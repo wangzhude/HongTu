@@ -1,0 +1,4 @@
+klayout==0.30.12
+pydantic-ai-harness==0.52.0
+pydantic-ai-slim[openai,ag-ui]==2.52.0
+ag-ui-protocol==0.1.22

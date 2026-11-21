@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hongtu-layout"
+version = "0.1.0"
+description = "HongTu local Python layout tools powered by the official KLayout database API"
+requires-python = ">=3.11"
+dependencies = [
+    "klayout==0.30.12",
+    "pydantic-ai-harness==0.52.0",
+    "pydantic-ai-slim[openai,ag-ui]==2.52.0",
+    "ag-ui-protocol==0.1.22",
+]
+
+[project.scripts]
+hongtu-python = "hongtu.cli:main"
+hongtu-python-bridge = "hongtu.bridge:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hongtu*"]
+
+[tool.setuptools.package-data]
+hongtu = ["native_tools.json"]

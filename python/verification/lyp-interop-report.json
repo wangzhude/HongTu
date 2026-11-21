@@ -1,0 +1,223 @@
+{
+  "engine": "klayout.lay 0.30.12",
+  "source": "actual LypService.formatLyp output",
+  "file": "hongtu-standard-export.lyp",
+  "sha256": "4a9827e9149496728344c9d513709dacdeaf62fc56e167d4e376a3badd199a73",
+  "layerPairs": 29,
+  "allFieldsEqual": true,
+  "checkedFields": [
+    "layer",
+    "datatype",
+    "name",
+    "frameColor",
+    "fillColor",
+    "visible",
+    "width"
+  ],
+  "fields": {
+    "64/5": {
+      "name": "nwell label [64/5] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "64/16": {
+      "name": "nwell pin [64/16] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "64/18": {
+      "name": "dnwell drawing [64/18] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "64/20": {
+      "name": "nwell drawing [64/20] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "64/59": {
+      "name": "pwell label [64/59] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "65/20": {
+      "name": "diff drawing [65/20] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "65/44": {
+      "name": "tap drawing [65/44] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "66/20": {
+      "name": "poly drawing [66/20] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "66/44": {
+      "name": "licon1 drawing [66/44] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "67/5": {
+      "name": "li1 label [67/5] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "67/16": {
+      "name": "li1 pin [67/16] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "67/20": {
+      "name": "li1 drawing [67/20] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "67/44": {
+      "name": "mcon drawing [67/44] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "69/5": {
+      "name": "met2 label [69/5] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "69/16": {
+      "name": "met2 pin [69/16] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "69/20": {
+      "name": "met2 drawing [69/20] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "78/44": {
+      "name": "hvtp drawing [78/44] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "81/4": {
+      "name": "areaid.sc identifier [81/4] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "83/44": {
+      "name": "text label [83/44] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "93/44": {
+      "name": "nsdm drawing [93/44] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "94/20": {
+      "name": "psdm drawing [94/20] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "95/20": {
+      "name": "npc drawing [95/20] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "122/16": {
+      "name": "pwell pin [122/16] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "236/0": {
+      "name": "L236/0 & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "68/0": {
+      "name": "met1 pin text [68/0] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "68/5": {
+      "name": "met1 label [68/5] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": false,
+      "width": 3
+    },
+    "68/16": {
+      "name": "met1 pin [68/16] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "68/20": {
+      "name": "met1 drawing [68/20] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    },
+    "68/44": {
+      "name": "via drawing [68/44] & test <name>",
+      "frameColor": "#12ab34",
+      "fillColor": "#5634ac",
+      "visible": true,
+      "width": 3
+    }
+  },
+  "scope": "Standard XML interoperability; no claim of exact custom patterns/opacity/animation/selection-lock roundtrip."
+}

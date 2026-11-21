@@ -1,0 +1,26 @@
+{
+  "forms": [
+    {
+      "name": "hongtu_card",
+      "displayName": "鸿图版图概览",
+      "description": "显示最近打开的版图文件和 DRC 检查状态",
+      "src": "./ets/pages/hongtu_card/CardPage.ets",
+      "uiSyntax": "arkts",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "auto",
+      "isDynamic": true,
+      "isDefault": true,
+      "updateEnabled": true,
+      "scheduledUpdateTime": "06:00",
+      "updateDuration": 2,
+      "defaultDimension": "2*2",
+      "supportDimensions": [
+        "2*2",
+        "2*4"
+      ]
+    }
+  ]
+}

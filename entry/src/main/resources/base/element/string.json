@@ -1,0 +1,10 @@
+{
+  "string": [
+    { "name": "app_desc", "value": "芯片版图编辑器" },
+    { "name": "module_desc", "value": "基于 KLayout 核心架构的 HarmonyOS NEXT 芯片版图编辑器" },
+    { "name": "EntryAbility_desc", "value": "鸿图版图编辑器主界面" },
+    { "name": "EntryAbility_label", "value": "鸿图版图编辑器" },
+    { "name": "permission_internet_reason", "value": "AI 助手需要联网访问大语言模型 API" },
+    { "name": "permission_network_info_reason", "value": "检测网络连通性以在请求前提示用户网络状态" }
+  ]
+}

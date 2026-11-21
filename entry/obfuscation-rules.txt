@@ -1,0 +1,31 @@
+# 鸿图（HongTu）Release 构建 ArkGuard 混淆保留规则
+# 默认开启局部变量与参数混淆；显式保留 NAPI 跨语言声明、@Sendable 跨线程载荷、
+# Ability/卡片宿主入口及沙箱 JSON / Preferences 持久化数据模型字段。
+
+# 1. 保留 C++17 NAPI (libhongtu.so) 声明符号与跨语言属性名
+-keep-dts ./src/main/cpp/types/libhongtu/Index.d.ts
+-keep ./src/main/cpp/types/libhongtu/Index.d.ts
+
+# 2. 保留 @Sendable 跨线程零拷贝载荷类及其只读成员属性
+-keep ./src/main/ets/models/LayoutSendablePayload.ets
+-keep-global-name SendableJsonBudgetSpec SendableEncodedJson
+-keep-property-name maxUtf8Bytes tag ok encoded utf8Bytes errorMessage
+
+# 3. 保留 Stage 模型 Ability、桌面服务卡片入口与持久化模型目录
+-keep ./src/main/ets/entryability/EntryAbility.ets
+-keep ./src/main/ets/formability/FormAbility.ets
+-keep ./src/main/ets/pages/hongtu_card/CardPage.ets
+-keep ./src/main/ets/models
+-keep ./src/main/ets/workbench/WorkbenchModels.ets
+
+# 4. 保留桌面卡片 Want 路由、工程快照 (.hongtu)、最近文件、工艺包、RDB 与 AI 会话 JSON 序列化字段
+-keep-property-name params cardCommand command documentId action uri oriUri ts
+-keep-property-name fileName fileType fileSize drcErrors drcWarnings drcPassed drcChecked drcIncomplete drcScope updateTime formDimension
+-keep-property-name version id title sourcePath saveUri projectUri sandboxPath sourceUri lastOpened
+-keep-property-name libName topCellName topCellId cellNames cellKeys cellProperties libProperties layerDefinitions
+-keep-property-name shapes layers ports crossSections layoutContextRecords cellContextRecords engineering
+-keep-property-name physicalUnits userUnits dirty revision updatedAt viewMode cellStack selectedIds
+-keep-property-name layerNumber datatype points pathWidth pathType textPresentation pathBeginExtension pathEndExtension pathWidthAbsolute
+-keep-property-name arrayCols arrayRows arrayColStepX arrayColStepY arrayRowStepX arrayRowStepY
+-keep-property-name text cellName ownerCellId cellId rotation mirror magnification properties attr dtype name value
+-keep-property-name visible locked selectable color fillStyle lineStyle lineWidth transparency highlighted animated chineseName englishName

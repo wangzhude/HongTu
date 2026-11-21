@@ -1,0 +1,44 @@
+{
+  "name": "SKY130 met1 公开三规则子集（非签核）",
+  "source": "https://skywater-pdk.readthedocs.io/en/main/rules/periphery.html#m1",
+  "layerSource": "https://skywater-pdk.readthedocs.io/en/main/rules/layers.html",
+  "lengthUnit": "nm",
+  "areaUnit": "nm2",
+  "foundrySignoff": false,
+  "scope": "仅 met1 drawing 68/20 的基本宽度、间距、面积；不含 huge-metal 特例、包围、密度、天线或其他层",
+  "rules": [
+    {
+      "ruleId": "SKY130.m1.1",
+      "name": "met1 最小宽度（公开子集）",
+      "type": "min_width",
+      "layer": 68,
+      "datatype": 20,
+      "min": 140,
+      "severity": "error",
+      "enabled": true,
+      "description": "SKY130 m1.1：met1 drawing 68/20 最小宽度 0.140 µm = 140 nm；三规则子集，非生产签核。"
+    },
+    {
+      "ruleId": "SKY130.m1.2",
+      "name": "met1 最小间距（公开子集）",
+      "type": "min_spacing",
+      "layer": 68,
+      "datatype": 20,
+      "min": 140,
+      "severity": "error",
+      "enabled": true,
+      "description": "SKY130 m1.2：met1 drawing 68/20 基本间距 0.140 µm = 140 nm；未覆盖 m1.3a/b huge-metal 条件，非生产签核。"
+    },
+    {
+      "ruleId": "SKY130.m1.6",
+      "name": "met1 最小面积（公开子集）",
+      "type": "min_area",
+      "layer": 68,
+      "datatype": 20,
+      "min": 83000,
+      "severity": "error",
+      "enabled": true,
+      "description": "SKY130 m1.6：met1 drawing 68/20 最小面积 0.083 µm² = 83000 nm²；应按合并区域解释，非生产签核。"
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": [
+      "default",
+      "tablet",
+      "2in1"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    "metadata": [
+      {
+        "name": "ohos.arkui.UIMaterial.state",
+        "value": "default"
+      }
+    ],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "orientation": "follow_desktop",
+        "exported": true,
+        "skills": [
+          {
+            "entities": ["entity.system.home"],
+            "actions": ["action.system.home"]
+          },
+          {
+            "entities": [
+              "entity.system.default",
+              "entity.system.browsable"
+            ],
+            "actions": [
+              "ohos.want.action.viewData",
+              "ohos.want.action.sendData"
+            ],
+            "uris": [
+              {
+                "scheme": "file",
+                "utd": "general.object",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "utd": "general.file",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "utd": "general.xml",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "utd": "general.json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "utd": "general.plain-text",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "extensionAbilities": [
+      {
+        "name": "FormAbility",
+        "srcEntrance": "./ets/formability/FormAbility.ets",
+        "type": "form",
+        "metadata": [
+          {
+            "name": "ohos.extension.form",
+            "resource": "$profile:form_config"
+          }
+        ]
+      }
+    ],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET",
+        "reason": "$string:permission_internet_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.GET_NETWORK_INFO",
+        "reason": "$string:permission_network_info_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      }
+    ]
+  }
+}

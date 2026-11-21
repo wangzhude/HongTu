@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>鸿图电脑端 · 界面概念参考</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+      color: #182642;
+      background: #f4f7fb;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    .page { width: min(1480px, calc(100% - 48px)); margin: 0 auto; padding: 48px 0 72px; }
+    header { margin-bottom: 32px; }
+    .eyebrow { margin: 0 0 12px; color: #286bea; font-size: 13px; font-weight: 700; letter-spacing: .08em; }
+    h1 { margin: 0; font-size: clamp(28px, 3vw, 40px); letter-spacing: -.025em; }
+    .intro { margin: 12px 0 0; color: #5b6881; font-size: 15px; line-height: 1.7; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+    .card { overflow: hidden; border: 1px solid #dbe3ef; border-radius: 16px; background: #fff; box-shadow: 0 8px 30px rgba(30, 55, 95, .05); }
+    .preview { display: block; width: 100%; padding: 0; border: 0; background: #eaf0f8; cursor: zoom-in; }
+    .preview:focus-visible, .close:focus-visible { outline: 3px solid #2772fa; outline-offset: -3px; }
+    .preview img { display: block; width: 100%; height: auto; aspect-ratio: 8 / 5; object-fit: contain; }
+    .details { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px 20px 19px; border-top: 1px solid #e6ebf3; }
+    .details h2 { margin: 0; font-size: 17px; line-height: 1.4; }
+    .details p { margin: 4px 0 0; color: #67748c; font-size: 13px; }
+    .tag { flex: none; padding: 6px 10px; border-radius: 999px; color: #2465d8; background: #eaf2ff; font-size: 12px; font-weight: 700; }
+    dialog { width: min(96vw, 1800px); max-width: none; max-height: 96vh; padding: 0; overflow: hidden; border: 1px solid #dbe3ef; border-radius: 14px; background: #fff; box-shadow: 0 30px 90px rgba(10, 24, 52, .3); }
+    dialog::backdrop { background: rgba(14, 28, 52, .78); }
+    .lightbox-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px 10px 20px; border-bottom: 1px solid #e6ebf3; }
+    .lightbox-head strong { font-size: 16px; }
+    .close { width: 36px; height: 36px; border: 0; border-radius: 8px; color: #334260; background: #edf2f9; font-size: 23px; line-height: 1; cursor: pointer; }
+    .lightbox-image { display: block; max-width: 100%; max-height: calc(96vh - 58px); margin: auto; object-fit: contain; }
+    @media (max-width: 800px) {
+      .page { width: min(100% - 28px, 600px); padding-top: 28px; }
+      .grid { grid-template-columns: 1fr; gap: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <p class="eyebrow">HONGTU EDA · PC UI</p>
+      <h1>鸿图电脑端界面参考</h1>
+      <p class="intro">画布优先的浅色方案，中心采用白色网格画布。点击缩略图可放大查看。以下均为概念参考图，并非当前应用截图。</p>
+    </header>
+
+    <section class="grid" aria-label="界面概念图对比">
+      <article class="card">
+        <button class="preview" type="button" data-src="hongtu-b-light-white-canvas.png" data-title="版图工作台 · 白色画布" aria-label="放大查看版图工作台">
+          <img src="hongtu-b-light-white-canvas.png" alt="白色网格画布的版图工作台概念图" loading="lazy">
+        </button>
+        <div class="details"><div><h2>版图工作台 · 白色画布</h2><p>图层、绘制工具与属性面板</p></div><span class="tag">概念参考图</span></div>
+      </article>
+      <article class="card">
+        <button class="preview" type="button" data-src="hongtu-light-selected-reference.png" data-title="图形选中 · 属性查看" aria-label="放大查看图形选中界面">
+          <img src="hongtu-light-selected-reference.png" alt="图形选中与属性查看的概念图" loading="lazy">
+        </button>
+        <div class="details"><div><h2>图形选中 · 属性查看</h2><p>选中态与上下文属性</p></div><span class="tag">概念参考图</span></div>
+      </article>
+      <article class="card">
+        <button class="preview" type="button" data-src="hongtu-light-verify-reference.png" data-title="验证界面" aria-label="放大查看验证界面">
+          <img src="hongtu-light-verify-reference.png" alt="验证界面的概念图" loading="lazy">
+        </button>
+        <div class="details"><div><h2>验证界面</h2><p>检查入口与结果面板</p></div><span class="tag">概念参考图</span></div>
+      </article>
+      <article class="card">
+        <button class="preview" type="button" data-src="hongtu-light-data-reference.png" data-title="数据管理" aria-label="放大查看数据管理界面">
+          <img src="hongtu-light-data-reference.png" alt="数据管理界面的概念图" loading="lazy">
+        </button>
+        <div class="details"><div><h2>数据管理</h2><p>当前文件与版图元信息</p></div><span class="tag">概念参考图</span></div>
+      </article>
+      <article class="card">
+        <button class="preview" type="button" data-src="hongtu-light-ai-reference.png" data-title="AI 助手" aria-label="放大查看 AI 助手界面">
+          <img src="hongtu-light-ai-reference.png" alt="AI 助手界面的概念图" loading="lazy">
+        </button>
+        <div class="details"><div><h2>AI 助手</h2><p>画布旁的辅助操作</p></div><span class="tag">概念参考图</span></div>
+      </article>
+      <article class="card">
+        <button class="preview" type="button" data-src="hongtu-light-file-reference.png" data-title="打开与导入文件" aria-label="放大查看文件打开界面">
+          <img src="hongtu-light-file-reference.png" alt="文件打开与导入界面的概念图" loading="lazy">
+        </button>
+        <div class="details"><div><h2>打开与导入文件</h2><p>支持格式与最近文件空状态</p></div><span class="tag">概念参考图</span></div>
+      </article>
+    </section>
+  </main>
+
+  <dialog id="lightbox" aria-labelledby="lightbox-title">
+    <div class="lightbox-head"><strong id="lightbox-title"></strong><button class="close" type="button" aria-label="关闭放大图">×</button></div>
+    <img class="lightbox-image" id="lightbox-image" alt="">
+  </dialog>
+
+  <script>
+    const lightbox = document.getElementById('lightbox');
+    const lightboxTitle = document.getElementById('lightbox-title');
+    const lightboxImage = document.getElementById('lightbox-image');
+    document.querySelectorAll('.preview').forEach((button) => {
+      button.addEventListener('click', () => {
+        lightboxTitle.textContent = button.dataset.title;
+        lightboxImage.src = button.dataset.src;
+        lightboxImage.alt = button.querySelector('img').alt;
+        lightbox.showModal();
+      });
+    });
+    lightbox.querySelector('.close').addEventListener('click', () => lightbox.close());
+    lightbox.addEventListener('click', (event) => {
+      if (event.target === lightbox) lightbox.close();
+    });
+  </script>
+</body>
+</html>

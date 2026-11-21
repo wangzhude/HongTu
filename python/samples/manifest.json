@@ -1,0 +1,57 @@
+[
+  {
+    "name": "sky130_fd_sc_hd__inv_1.gds",
+    "repository": "google/skywater-pdk-libs-sky130_fd_sc_hd",
+    "revision": "ac7fb61f06e6470b94e8afdf7c25268f62fbd7b1",
+    "path": "cells/inv/sky130_fd_sc_hd__inv_1.gds",
+    "license": "Apache-2.0",
+    "licenseFile": "SKYWATER-LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/google/skywater-pdk-libs-sky130_fd_sc_hd/ac7fb61f06e6470b94e8afdf7c25268f62fbd7b1/cells/inv/sky130_fd_sc_hd__inv_1.gds",
+    "bytes": 3632,
+    "sha256": "18a9cfa399957c7c7b5fc75175e03fc921d56ecc6b8de8fae34ba301bb7914c4"
+  },
+  {
+    "name": "sky130_fd_sc_hd__nand2_1.gds",
+    "repository": "google/skywater-pdk-libs-sky130_fd_sc_hd",
+    "revision": "ac7fb61f06e6470b94e8afdf7c25268f62fbd7b1",
+    "path": "cells/nand2/sky130_fd_sc_hd__nand2_1.gds",
+    "license": "Apache-2.0",
+    "licenseFile": "SKYWATER-LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/google/skywater-pdk-libs-sky130_fd_sc_hd/ac7fb61f06e6470b94e8afdf7c25268f62fbd7b1/cells/nand2/sky130_fd_sc_hd__nand2_1.gds",
+    "bytes": 4034,
+    "sha256": "4e7fa6255df901f59151791d6e8ff4c421b63c1ea3822d6d5d25b48221782a3a"
+  },
+  {
+    "name": "klayout-ringo.gds",
+    "repository": "KLayout/klayout",
+    "revision": "5fa733e1680212e4ceda532ca5fa6ea707c654de",
+    "path": "testdata/lvs/ringo.gds",
+    "license": "GPL-3.0-or-later (repository license)",
+    "licenseFile": "KLAYOUT-LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/KLayout/klayout/5fa733e1680212e4ceda532ca5fa6ea707c654de/testdata/lvs/ringo.gds",
+    "bytes": 10210,
+    "sha256": "eb247a40a3712262e7f7863d994a47d6e5b4fc9bd367173aa78a112912840bda"
+  },
+  {
+    "name": "klayout-inv.oas",
+    "repository": "KLayout/klayout",
+    "revision": "5fa733e1680212e4ceda532ca5fa6ea707c654de",
+    "path": "testdata/lvs/inv.oas",
+    "license": "GPL-3.0-or-later (repository license)",
+    "licenseFile": "KLAYOUT-LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/KLayout/klayout/5fa733e1680212e4ceda532ca5fa6ea707c654de/testdata/lvs/inv.oas",
+    "bytes": 936,
+    "sha256": "711844f64dba01c9fbade9f6871956ce9371b23e094cb13466e38bbc7aec736f"
+  },
+  {
+    "name": "klayout-inv.cir",
+    "repository": "KLayout/klayout",
+    "revision": "5fa733e1680212e4ceda532ca5fa6ea707c654de",
+    "path": "testdata/lvs/inv.cir",
+    "license": "GPL-3.0-or-later (repository license)",
+    "licenseFile": "KLAYOUT-LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/KLayout/klayout/5fa733e1680212e4ceda532ca5fa6ea707c654de/testdata/lvs/inv.cir",
+    "bytes": 173,
+    "sha256": "d42071216eb126432e8367d23be3be390b2129a1f42cb7effaf1c48cbe11856b"
+  }
+]

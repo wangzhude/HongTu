@@ -1,0 +1,28 @@
+{
+  "color": [
+    { "name": "primary", "value": "#3D8BFF" },
+    { "name": "primary_soft", "value": "#1A2B45" },
+    { "name": "accent", "value": "#5CA3FF" },
+    { "name": "accent_soft", "value": "#1B2A42" },
+    { "name": "bg", "value": "#0F141B" },
+    { "name": "surface", "value": "#18212D" },
+    { "name": "surface_muted", "value": "#212C3B" },
+    { "name": "border", "value": "#2B394B" },
+    { "name": "ink", "value": "#ECF1F7" },
+    { "name": "muted", "value": "#94A3B8" },
+    { "name": "canvas_bg", "value": "#0A0E14" },
+    { "name": "canvas_grid", "value": "#08FFFFFF" },
+    { "name": "canvas_grid_major", "value": "#12FFFFFF" },
+    { "name": "success", "value": "#34D399" },
+    { "name": "warning", "value": "#FBBF24" },
+    { "name": "danger", "value": "#F87171" },
+    { "name": "card_rim", "value": "#304156" },
+    { "name": "card_glow_primary", "value": "#331D6FF2" },
+    { "name": "card_glow_accent", "value": "#2214B8A6" },
+    { "name": "card_inner_card", "value": "#202B3A" },
+    { "name": "success_soft", "value": "#163329" },
+    { "name": "warning_soft", "value": "#362A15" },
+    { "name": "danger_soft", "value": "#3A1D22" },
+    { "name": "neutral_soft", "value": "#232F3E" }
+  ]
+}

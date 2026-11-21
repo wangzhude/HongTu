@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>鸿图 HongTu — UI 布局预览 v3</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #FAFBFC; color: #1A2233; }
+.label { position: absolute; background: #E04646; color: #fff; font-size: 11px; padding: 2px 8px; border-radius: 3px; white-space: nowrap; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+.label::before { content: ''; position: absolute; border: 5px solid transparent; }
+
+.app { width: 1400px; margin: 20px auto; border: 1px solid #E4E7EC; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.08); position: relative; }
+
+/* TopBar */
+.topbar { height: 48px; background: #fff; border-bottom: 1px solid #E4E7EC; display: flex; align-items: center; padding: 0 16px; gap: 12px; }
+.topbar .logo { font-size: 18px; font-weight: 700; }
+.topbar .ver { font-size: 10px; color: #697386; }
+.topbar .spacer { flex: 1; }
+.topbar .btn { font-size: 12px; color: #697386; padding: 5px 12px; border-radius: 4px; cursor: pointer; border: 1px solid #E4E7EC; background: #fff; }
+.topbar .btn-primary { color: #6B4EFF; border-color: #6B4EFF; background: #F0EDFF; }
+.topbar .btn-ai { color: #fff; background: #6B4EFF; border: none; }
+
+/* EditToolbar */
+.edit-toolbar { height: 36px; background: #fff; border-bottom: 1px solid #E4E7EC; display: flex; align-items: center; padding: 0 8px; gap: 2px; }
+.edit-toolbar .group-label { font-size: 9px; color: #697386; margin: 0 4px 0 8px; }
+.edit-toolbar .divider { width: 1px; height: 20px; background: #E4E7EC; margin: 0 6px; }
+.edit-toolbar .tb-btn { font-size: 12px; color: #1A2233; width: 28px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 4px; cursor: pointer; }
+.edit-toolbar .tb-btn:hover { background: #F6F7F9; }
+.edit-toolbar .tb-btn.new { background: #E8F0FF; color: #2F6DF6; font-weight: 600; }
+
+/* Main */
+.main { display: flex; height: 640px; }
+
+/* NavSidebar */
+.sidebar { width: 180px; background: #F6F7F9; border-right: 1px solid #E4E7EC; padding: 0; overflow-y: auto; }
+.sidebar .section-title { font-size: 11px; color: #697386; font-weight: 500; padding: 16px 16px 4px; letter-spacing: 0.5px; }
+.sidebar .nav-item { display: flex; align-items: center; height: 36px; padding: 0 16px; font-size: 13px; cursor: pointer; border-right: 2px solid transparent; }
+.sidebar .nav-item.active { background: #F0EDFF; border-right-color: #6B4EFF; color: #6B4EFF; }
+.sidebar .nav-item .icon { width: 20px; text-align: center; margin-right: 10px; font-size: 14px; }
+.sidebar .nav-item .shortcut { margin-left: auto; font-size: 10px; color: #697386; font-family: monospace; }
+.sidebar .nav-item.new { background: #E8F0FF; }
+.sidebar .nav-item.new .icon { color: #2F6DF6; }
+.sidebar .recent { padding: 0 16px; font-size: 12px; color: #1A2233; }
+.sidebar .recent-item { display: flex; align-items: center; height: 32px; gap: 8px; }
+.sidebar .recent-item .size { margin-left: auto; font-size: 10px; color: #697386; }
+
+/* Canvas */
+.canvas-area { flex: 1; background: #1E1E2E; position: relative; overflow: hidden; }
+.canvas-grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px); background-size: 20px 20px; }
+.canvas-grid::after { content: ''; position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.08) 1px, transparent 1px); background-size: 100px 100px; }
+.shape { position: absolute; border: 1.5px solid; }
+.shape.rect { border-radius: 0; }
+.shape.selected { outline: 2px dashed #2F6DF6; outline-offset: 2px; }
+.ruler { position: absolute; border-top: 2px solid #2F6DF6; }
+.ruler::after { content: attr(data-label); position: absolute; top: -18px; left: 50%; transform: translateX(-50%); font-size: 10px; color: #2F6DF6; background: #1E1E2E; padding: 1px 4px; border-radius: 2px; font-family: monospace; }
+.text-label { position: absolute; font-size: 10px; color: #F09A3D; font-family: monospace; }
+
+/* Right Panel */
+.right-panel { width: 240px; background: #fff; border-left: 1px solid #E4E7EC; display: flex; flex-direction: column; }
+.panel-header { height: 40px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid #E4E7EC; gap: 6px; }
+.panel-header .title { font-size: 13px; font-weight: 700; }
+.panel-header .count { font-size: 10px; color: #697386; }
+.panel-header .spacer { flex: 1; }
+.panel-header .action { font-size: 10px; color: #2F6DF6; background: #E8F0FF; padding: 2px 8px; border-radius: 4px; cursor: pointer; }
+
+.search-bar { height: 32px; display: flex; align-items: center; padding: 0 10px; background: #F6F7F9; border-bottom: 1px solid #E4E7EC; gap: 6px; }
+.search-bar input { font-size: 11px; border: none; background: transparent; flex: 1; outline: none; color: #1A2233; }
+
+.layer-list { flex: 1; overflow-y: auto; }
+.group-header { display: flex; align-items: center; height: 26px; padding: 0 10px; background: #F6F7F9; gap: 4px; cursor: pointer; }
+.group-header .arrow { font-size: 8px; color: #697386; }
+.group-header .name { font-size: 11px; font-weight: 500; }
+.group-header .badge { font-size: 9px; color: #697386; background: #fff; padding: 1px 4px; border-radius: 3px; margin-left: 6px; }
+
+.layer-row { display: flex; align-items: center; height: 38px; padding: 0 16px; gap: 10px; cursor: pointer; border-right: 2px solid transparent; }
+.layer-row.selected { background: #E8F0FF; border-right-color: #2F6DF6; }
+.layer-row .color-box { width: 12px; height: 12px; border-radius: 2px; border: 1px solid #E4E7EC; }
+.layer-row .layer-name { font-size: 12px; }
+.layer-row .layer-sub { font-size: 9px; color: #697386; font-family: monospace; }
+.layer-row .count { font-size: 10px; color: #697386; font-family: monospace; margin-left: auto; margin-right: 8px; }
+.layer-row .vis { font-size: 13px; width: 24px; text-align: center; }
+
+.props { border-top: 1px solid #E4E7EC; background: #F6F7F9; }
+.props .prop-header { height: 36px; display: flex; align-items: center; padding: 0 16px; gap: 6px; }
+.props .prop-header .title { font-size: 13px; font-weight: 700; }
+.props .prop-header .tag { font-size: 9px; padding: 1px 5px; border-radius: 3px; }
+.props .prop-header .tag.layer { color: #697386; background: #fff; }
+.prop-row { display: flex; align-items: center; height: 22px; padding: 0 16px; gap: 8px; }
+.prop-row .label { position: static; background: none; color: #697386; font-size: 11px; width: 60px; padding: 0; box-shadow: none; }
+.prop-row .value { font-size: 11px; color: #1A2233; font-family: monospace; }
+.prop-row .color-preview { width: 28px; height: 14px; border-radius: 2px; border: 1px solid #E4E7EC; }
+.edit-style-btn { text-align: center; padding: 5px 10px; margin: 6px 16px 12px; font-size: 11px; color: #2F6DF6; background: #E8F0FF; border-radius: 4px; cursor: pointer; }
+
+/* AI Panel */
+.ai-panel { width: 260px; background: #fff; border-left: 1px solid #E4E7EC; display: flex; flex-direction: column; }
+.ai-header { height: 40px; display: flex; align-items: center; padding: 0 12px; border-bottom: 1px solid #E4E7EC; gap: 6px; }
+.ai-header .title { font-size: 13px; font-weight: 700; }
+.ai-header .model { font-size: 9px; color: #697386; }
+.ai-messages { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.ai-msg { font-size: 12px; padding: 8px 10px; border-radius: 8px; max-width: 90%; }
+.ai-msg.user { background: #F0EDFF; color: #1A2233; align-self: flex-end; }
+.ai-msg.ai { background: #F6F7F9; color: #1A2233; }
+.ai-cmd-card { background: #E8F0FF; border: 1px solid #2F6DF6; border-radius: 6px; padding: 8px; margin-top: 4px; }
+.ai-cmd-card .cmd-type { font-size: 9px; color: #2F6DF6; font-weight: 600; }
+.ai-cmd-card .cmd-desc { font-size: 11px; color: #1A2233; margin-top: 2px; }
+.ai-input { padding: 8px; border-top: 1px solid #E4E7EC; }
+.ai-input textarea { width: 100%; height: 40px; border: 1px solid #E4E7EC; border-radius: 6px; padding: 6px; font-size: 12px; resize: none; outline: none; }
+
+/* Quick Bar */
+.quick-bar { height: 36px; background: #fff; border-top: 1px solid #E4E7EC; display: flex; align-items: center; padding: 0 8px; gap: 4px; overflow-x: auto; }
+.quick-bar .chip { font-size: 11px; color: #6B4EFF; background: #F0EDFF; padding: 3px 10px; border-radius: 12px; white-space: nowrap; cursor: pointer; }
+.quick-bar .chip.green { color: #1F9D6B; background: #E8F8F0; }
+
+/* Status Bar */
+.statusbar { height: 28px; background: #F6F7F9; border-top: 1px solid #E4E7EC; display: flex; align-items: center; padding: 0 16px; font-size: 11px; color: #697386; gap: 12px; }
+.statusbar .scale { font-family: monospace; }
+
+/* Floating panels */
+.float-panel { position: absolute; background: #fff; border: 1px solid #E4E7EC; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); z-index: 50; }
+.bookmark-panel { right: 250px; top: 100px; width: 240px; }
+.marker-panel { right: 250px; top: 100px; width: 280px; }
+.panel-title-row { height: 40px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid #E4E7EC; gap: 6px; }
+.panel-title-row .title { font-size: 14px; font-weight: 700; }
+.panel-title-row .count { font-size: 10px; color: #697386; }
+.panel-title-row .spacer { flex: 1; }
+.panel-title-row .close { font-size: 14px; color: #697386; cursor: pointer; }
+
+.bm-row { padding: 8px 16px; border-bottom: 1px solid #E4E7EC; }
+.bm-row .name { font-size: 12px; }
+.bm-row .coord { font-size: 9px; color: #697386; font-family: monospace; margin-top: 2px; }
+
+.mk-filter { display: flex; gap: 4px; padding: 6px 12px; background: #F6F7F9; border-bottom: 1px solid #E4E7EC; }
+.mk-filter .chip { font-size: 10px; color: #697386; background: #fff; padding: 2px 8px; border-radius: 4px; cursor: pointer; }
+.mk-filter .chip.active { color: #fff; background: #6B4EFF; }
+.mk-row { display: flex; padding: 8px 12px; border-bottom: 1px solid #E4E7EC; gap: 8px; }
+.mk-row .sev { font-size: 13px; width: 20px; text-align: center; }
+.mk-row .sev.error { color: #E04646; }
+.mk-row .sev.warning { color: #E08600; }
+.mk-row .info { flex: 1; }
+.mk-row .info .cat { font-size: 11px; font-weight: 500; }
+.mk-row .info .msg { font-size: 10px; color: #697386; margin-top: 2px; }
+.mk-row .info .coord { font-size: 9px; color: #697386; font-family: monospace; margin-top: 1px; }
+.mk-row .src-tag { font-size: 9px; color: #fff; padding: 1px 5px; border-radius: 3px; }
+.mk-row .src-tag.DRC { background: #E04646; }
+.mk-row .src-tag.XOR { background: #E08600; }
+
+/* Dialog */
+.dialog-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.3); z-index: 200; display: flex; align-items: center; justify-content: center; }
+.dialog { width: 380px; height: 480px; background: #fff; border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.2); display: flex; flex-direction: column; overflow: hidden; }
+.dialog-header { height: 48px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid #E4E7EC; }
+.dialog-header .title { font-size: 15px; font-weight: 700; }
+.dialog-header .spacer { flex: 1; }
+.dialog-header .close { font-size: 16px; color: #697386; cursor: pointer; }
+.dialog-body { flex: 1; overflow-y: auto; padding: 0; }
+.dialog-section { padding: 8px 20px; }
+.dialog-section .label { font-size: 12px; font-weight: 500; color: #1A2233; margin-bottom: 6px; position: static; background: none; padding: 0; box-shadow: none; }
+.color-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.color-swatch { width: 28px; height: 28px; border-radius: 4px; cursor: pointer; border: 1px solid #E4E7EC; }
+.color-swatch.selected { border: 3px solid #2F6DF6; }
+.style-row { display: flex; gap: 4px; margin-top: 4px; }
+.style-chip { font-size: 11px; color: #1A2233; padding: 5px 10px; background: #F6F7F9; border-radius: 6px; cursor: pointer; }
+.style-chip.active { color: #2F6DF6; background: #E8F0FF; }
+.slider-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.slider-row .label { font-size: 12px; color: #697386; width: 60px; position: static; background: none; padding: 0; box-shadow: none; }
+.slider { flex: 1; height: 4px; background: #E4E7EC; border-radius: 2px; position: relative; }
+.slider .fill { height: 100%; background: #6B4EFF; border-radius: 2px; }
+.slider .knob { position: absolute; top: -4px; width: 12px; height: 12px; background: #fff; border: 2px solid #6B4EFF; border-radius: 50%; }
+.slider-row .val { font-size: 11px; font-family: monospace; width: 40px; text-align: right; }
+.dialog-footer { display: flex; justify-content: flex-end; padding: 12px 20px; gap: 8px; }
+.dialog-footer .btn { font-size: 13px; padding: 8px 16px; border-radius: 6px; cursor: pointer; }
+.dialog-footer .btn.cancel { color: #697386; }
+.dialog-footer .btn.apply { color: #fff; background: #6B4EFF; }
+</style>
+</head>
+<body>
+<div class="app" style="position: relative;">
+  <!-- 标注标签 -->
+  <div class="label" style="top: -8px; left: 700px;">顶部工具栏（文件/DRC/AI）</div>
+  <div class="label" style="top: 52px; left: 500px;">编辑工具栏 — 变换/对齐/视图/分析（含新增倒圆角/搜索）</div>
+  <div class="label" style="top: 120px; left: 5px;">左侧导航（含新增：文本/实例/标尺/顶点编辑）</div>
+  <div class="label" style="top: 300px; left: 580px;">版图画布（暗色背景）</div>
+  <div class="label" style="top: 150px; right: 260px;">图层管理（含新增：样式编辑/线型/填充）</div>
+  <div class="label" style="top: 100px; right: 10px;">AI 助手面板</div>
+  <div class="label" style="bottom: 80px; left: 300px;">AI 快捷操作栏（25 个快捷指令）</div>
+  <div class="label" style="bottom: 8px; left: 500px;">状态栏</div>
+
+  <!-- TopBar -->
+  <div class="topbar">
+    <span class="logo">鸿图</span>
+    <span class="ver">v0.1.0-dev | KLayout Port for HarmonyOS NEXT</span>
+    <span class="spacer"></span>
+    <span class="btn">📄 打开文件</span>
+    <span class="btn">✓ 运行 DRC</span>
+    <span class="btn">⌨ 快捷键</span>
+    <span class="btn btn-primary">🔖 书签</span>
+    <span class="btn btn-primary">⚑ 标记浏览器</span>
+    <span class="btn btn-ai">🤖 AI 助手</span>
+    <span class="btn">⚙</span>
+  </div>
+
+  <!-- EditToolbar -->
+  <div class="edit-toolbar">
+    <span class="group-label">变换</span>
+    <span class="tb-btn">↻90</span>
+    <span class="tb-btn">↻180</span>
+    <span class="tb-btn">↻270</span>
+    <span class="tb-btn">⇋</span>
+    <span class="tb-btn">⇵</span>
+    <span class="divider"></span>
+    <span class="group-label">对齐</span>
+    <span class="tb-btn">⬅</span>
+    <span class="tb-btn">➡</span>
+    <span class="tb-btn">⬆</span>
+    <span class="tb-btn">⬇</span>
+    <span class="tb-btn">↔</span>
+    <span class="tb-btn">↕</span>
+    <span class="divider"></span>
+    <span class="group-label">视图</span>
+    <span class="tb-btn">🔖</span>
+    <span class="tb-btn">←</span>
+    <span class="tb-btn">⟳</span>
+    <span class="tb-btn">📸</span>
+    <span class="divider"></span>
+    <span class="group-label">分析</span>
+    <span class="tb-btn">⊕</span>
+    <span class="tb-btn">⌗</span>
+    <span class="tb-btn">⚑</span>
+    <span style="flex:1"></span>
+    <span class="tb-btn new">◐</span>
+    <span class="tb-btn new">🔍</span>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <!-- NavSidebar -->
+    <div class="sidebar">
+      <div class="section-title">场景导航</div>
+      <div class="nav-item active">
+        <span class="icon">✎</span> 版图编辑
+      </div>
+      <div class="nav-item">
+        <span class="icon">✓</span> 验证检查
+        <span style="margin-left:auto;font-size:10px;color:#fff;background:#6B4EFF;padding:1px 6px;border-radius:8px;">3</span>
+      </div>
+      <div class="nav-item">
+        <span class="icon">☰</span> 数据管理
+      </div>
+
+      <div class="section-title">绘制工具</div>
+      <div class="nav-item active">
+        <span class="icon">▭</span> 选择
+        <span class="shortcut">XZ</span>
+      </div>
+      <div class="nav-item">
+        <span class="icon">□</span> 矩形
+        <span class="shortcut">JX</span>
+      </div>
+      <div class="nav-item">
+        <span class="icon">◇</span> 多边形
+        <span class="shortcut">DB</span>
+      </div>
+      <div class="nav-item">
+        <span class="icon">╱</span> 路径
+        <span class="shortcut">LJ</span>
+      </div>
+      <div class="nav-item new">
+        <span class="icon">T</span> 文本标注
+        <span class="shortcut">WB</span>
+      </div>
+      <div class="nav-item new">
+        <span class="icon">⊞</span> 实例
+        <span class="shortcut">SL</span>
+      </div>
+      <div class="nav-item">
+        <span class="icon">↔</span> 测量
+        <span class="shortcut">CL</span>
+      </div>
+      <div class="nav-item new">
+        <span class="icon">📏</span> 标尺
+        <span class="shortcut">BC</span>
+      </div>
+      <div class="nav-item new">
+        <span class="icon">◆</span> 顶点编辑
+        <span class="shortcut">DB</span>
+      </div>
+
+      <div class="section-title">最近文件</div>
+      <div class="recent">
+        <div class="recent-item">📄 inverter.gds <span class="size">12 KB</span></div>
+        <div class="recent-item">📄 adc_top.oas <span class="size">45 MB</span></div>
+        <div class="recent-item">📄 cpu_core.gds <span class="size">287 MB</span></div>
+      </div>
+
+      <div style="padding:16px;text-align:center;font-size:10px;color:#697386;border-top:1px solid #E4E7EC;margin-top:16px;">
+        鸿图 v0.1.0
+      </div>
+    </div>
+
+    <!-- Canvas -->
+    <div class="canvas-area">
+      <div class="canvas-grid"></div>
+
+      <!-- Demo shapes -->
+      <div class="shape rect" style="left:100px;top:100px;width:160px;height:100px;border-color:#4A90D9;background:rgba(74,144,217,0.15);"></div>
+      <div class="shape rect" style="left:300px;top:100px;width:220px;height:100px;border-color:#4A90D9;background:rgba(74,144,217,0.15);"></div>
+      <div class="shape rect selected" style="left:180px;top:100px;width:120px;height:100px;border-color:#D94A4A;background:rgba(217,74,74,0.2);"></div>
+      <div class="shape rect" style="left:100px;top:220px;width:300px;height:60px;border-color:#4AD97A;background:rgba(74,217,122,0.15);"></div>
+      <div class="shape rect" style="left:350px;top:100px;width:200px;height:180px;border-color:#D9B34A;background:rgba(217,179,74,0.1);"></div>
+
+      <!-- Ruler -->
+      <div class="ruler" style="left:100px;top:310px;width:300px;" data-label="300nm"></div>
+
+      <!-- Text label -->
+      <div class="text-label" style="left:140px;top:90px;">VDD</div>
+      <div class="text-label" style="left:320px;top:90px;">GND</div>
+
+      <!-- Coordinate display -->
+      <div style="position:absolute;bottom:8px;right:8px;font-size:10px;color:rgba(255,255,255,0.5);font-family:monospace;">
+        X: 350nm  Y: 180nm  |  Grid: 10nm  |  Snap: ON
+      </div>
+    </div>
+
+    <!-- Right Panel (LayerPanel) -->
+    <div class="right-panel">
+      <div class="panel-header">
+        <span class="title">图层管理</span>
+        <span class="count">8 个图层</span>
+        <span class="spacer"></span>
+        <span class="action">全显</span>
+      </div>
+
+      <div class="search-bar">
+        <span>🔍</span>
+        <input placeholder="搜索图层名/层号..." value="">
+      </div>
+
+      <div class="layer-list">
+        <div class="group-header">
+          <span class="arrow">▼</span>
+          <span class="name">互连层</span>
+          <span class="badge">3</span>
+        </div>
+        <div class="layer-row">
+          <div class="color-box" style="background:#4A90D9;"></div>
+          <div>
+            <div class="layer-name">金属1</div>
+            <div class="layer-sub">M1 / L1</div>
+          </div>
+          <span class="count">1.2K</span>
+          <span class="vis">◉</span>
+        </div>
+        <div class="layer-row selected">
+          <div class="color-box" style="background:#D9B34A;"></div>
+          <div>
+            <div class="layer-name">金属2</div>
+            <div class="layer-sub">M2 / L2</div>
+          </div>
+          <span class="count">3.5K</span>
+          <span class="vis">◉</span>
+        </div>
+        <div class="layer-row">
+          <div class="color-box" style="background:#6BCB77;opacity:0.3;"></div>
+          <div>
+            <div class="layer-name" style="color:#697386;">金属3</div>
+            <div class="layer-sub">M3 / L3</div>
+          </div>
+          <span class="count">—</span>
+          <span class="vis">○</span>
+        </div>
+
+        <div class="group-header">
+          <span class="arrow">▼</span>
+          <span class="name">掺杂层</span>
+          <span class="badge">3</span>
+        </div>
+        <div class="layer-row">
+          <div class="color-box" style="background:#D94A4A;"></div>
+          <div>
+            <div class="layer-name">多晶硅</div>
+            <div class="layer-sub">Poly / L4</div>
+          </div>
+          <span class="count">892</span>
+          <span class="vis">◉</span>
+        </div>
+        <div class="layer-row">
+          <div class="color-box" style="background:#4AD97A;"></div>
+          <div>
+            <div class="layer-name">有源区</div>
+            <div class="layer-sub">AA / L5</div>
+          </div>
+          <span class="count">1.2K</span>
+          <span class="vis">◉</span>
+        </div>
+
+        <div class="group-header">
+          <span class="arrow">▶</span>
+          <span class="name">接触孔</span>
+          <span class="badge">2</span>
+        </div>
+      </div>
+
+      <!-- Properties -->
+      <div class="props">
+        <div class="prop-header">
+          <span class="title">属性</span>
+          <span class="tag layer">图层</span>
+        </div>
+        <div class="prop-row"><span class="label">图层号</span><span class="value">2</span></div>
+        <div class="prop-row"><span class="label">数据类型</span><span class="value">0</span></div>
+        <div class="prop-row"><span class="label">中文名</span><span class="value">金属2</span></div>
+        <div class="prop-row"><span class="label">英文名</span><span class="value">M2</span></div>
+        <div class="prop-row"><span class="label">图形数</span><span class="value">3.5K</span></div>
+        <div class="prop-row"><span class="label">颜色</span><div class="color-preview" style="background:#D9B34A;"></div><span class="value">#D9B34A</span></div>
+        <div class="prop-row"><span class="label">线型</span><span class="value">实线</span></div>
+        <div class="prop-row"><span class="label">填充</span><span class="value">轮廓</span></div>
+        <div class="edit-style-btn">编辑样式 →</div>
+      </div>
+    </div>
+
+    <!-- AI Panel -->
+    <div class="ai-panel">
+      <div class="ai-header">
+        <span class="title">🤖 AI 助手</span>
+        <span class="model">DeepSeek-V3</span>
+        <span style="flex:1"></span>
+        <span style="font-size:12px;color:#697386;cursor:pointer;">⚙</span>
+        <span style="font-size:14px;color:#697386;cursor:pointer;">✕</span>
+      </div>
+      <div class="ai-messages">
+        <div class="ai-msg ai">你好！我是鸿图 AI 助手，可以帮你创建和编辑版图。试试说"画一个反相器版图"。</div>
+        <div class="ai-msg user">画一个反相器版图</div>
+        <div class="ai-msg ai">
+          好的，为您创建标准 CMOS 反相器版图：
+          <div class="ai-cmd-card">
+            <div class="cmd-type">CREATE_RECT × 6</div>
+            <div class="cmd-desc">N阱 + PMOS有源区 + NMOS有源区 + 多晶硅栅 + 金属连线 + 通孔</div>
+          </div>
+        </div>
+      </div>
+      <div class="ai-input">
+        <textarea placeholder="输入指令... (如: 在金属1层画一个 200×100 的矩形)"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick Bar -->
+  <div class="quick-bar">
+    <span class="chip">⚡ 反相器</span>
+    <span class="chip">⚡ NAND2</span>
+    <span class="chip">⚡ NOR2</span>
+    <span class="chip">⚡ 传输门</span>
+    <span class="chip">⚡ SRAM</span>
+    <span style="width:1px;height:20px;background:#E4E7EC;margin:0 4px;"></span>
+    <span class="chip green">□ 矩形</span>
+    <span class="chip green">◇ 多边形</span>
+    <span class="chip green">╱ 路径</span>
+    <span class="chip green">T 文本</span>
+    <span class="chip green">⊞ 实例</span>
+    <span class="chip green">↻ 旋转</span>
+    <span class="chip green">⇋ 镜像</span>
+    <span class="chip green">⬅ 对齐</span>
+    <span class="chip green">⊕ XOR</span>
+    <span class="chip green">⌗ 网络追踪</span>
+    <span class="chip green">🔍 搜索</span>
+    <span class="chip green">适配全部</span>
+    <span class="chip green">切换层</span>
+    <span class="chip green">隐藏层</span>
+  </div>
+
+  <!-- Status Bar -->
+  <div class="statusbar">
+    <span>鸿图 v0.1.0 | 7 个图形 | 就绪</span>
+    <span style="flex:1"></span>
+    <span class="scale">比例 1:500</span>
+    <span>网格 10nm</span>
+    <span>吸附: 开</span>
+  </div>
+
+  <!-- Layer Style Dialog (overlay) -->
+  <div class="dialog-overlay" style="display:none;">
+    <div class="dialog">
+      <div class="dialog-header">
+        <span class="title">图层样式编辑</span>
+        <span class="spacer"></span>
+        <span class="close">✕</span>
+      </div>
+      <div class="dialog-body">
+        <div class="dialog-section">
+          <div style="display:flex;align-items:center;gap:8px;padding:12px 0;">
+            <div style="width:16px;height:16px;border-radius:3px;background:#D9B34A;border:1px solid #E4E7EC;"></div>
+            <span style="font-size:13px;">L2 金属2</span>
+            <span style="font-size:11px;color:#697386;font-family:monospace;">M2</span>
+          </div>
+        </div>
+        <div class="dialog-section">
+          <div class="label">颜色</div>
+          <div class="color-grid">
+            <div class="color-swatch" style="background:#4A90D9;"></div>
+            <div class="color-swatch selected" style="background:#D9B34A;"></div>
+            <div class="color-swatch" style="background:#6BCB77;"></div>
+            <div class="color-swatch" style="background:#D94A4A;"></div>
+            <div class="color-swatch" style="background:#B34AD9;"></div>
+            <div class="color-swatch" style="background:#E07AC0;"></div>
+            <div class="color-swatch" style="background:#9B6BDB;"></div>
+            <div class="color-swatch" style="background:#F09A3D;"></div>
+            <div class="color-swatch" style="background:#3DB8C9;"></div>
+            <div class="color-swatch" style="background:#1F9D6B;"></div>
+            <div class="color-swatch" style="border:1px dashed #E4E7EC;display:flex;align-items:center;justify-content:center;color:#697386;font-size:14px;">+</div>
+          </div>
+        </div>
+        <div class="dialog-section">
+          <div class="label">线型</div>
+          <div class="style-row">
+            <span class="style-chip active">━━━</span>
+            <span class="style-chip">╌╌╌</span>
+            <span class="style-chip">·····</span>
+            <span class="style-chip">·╌·╌</span>
+          </div>
+        </div>
+        <div class="dialog-section">
+          <div class="label">填充模式</div>
+          <div class="style-row">
+            <span class="style-chip">实心</span>
+            <span class="style-chip active">轮廓</span>
+            <span class="style-chip">交叉</span>
+            <span class="style-chip">斜线</span>
+            <span class="style-chip">空心</span>
+          </div>
+        </div>
+        <div class="dialog-section">
+          <div class="slider-row">
+            <span class="label">透明度</span>
+            <div class="slider"><div class="fill" style="width:0%;"></div><div class="knob" style="left:0%;"></div></div>
+            <span class="val">0%</span>
+          </div>
+          <div class="slider-row">
+            <span class="label">线宽</span>
+            <div class="slider"><div class="fill" style="width:10%;"></div><div class="knob" style="left:10%;"></div></div>
+            <span class="val">1px</span>
+          </div>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <span class="btn cancel">取消</span>
+        <span class="btn apply">应用</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Feature summary -->
+<div style="max-width:1400px;margin:20px auto;padding:20px;background:#fff;border-radius:8px;border:1px solid #E4E7EC;">
+  <h2 style="font-size:16px;margin-bottom:12px;">鸿图 v3 功能清单 — 与 KLayout 全面对齐</h2>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:12px;">
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">绘制工具 (9种)</h3>
+      <div>✅ 选择 / 矩形 / 多边形 / 路径 / 测量</div>
+      <div style="color:#2F6DF6;">🆕 文本标注 / 实例放置 / 标尺 / 顶点编辑</div>
+    </div>
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">编辑操作</h3>
+      <div>✅ 移动 / 删除 / 撤销/重做 / 上下文菜单</div>
+      <div style="color:#2F6DF6;">🆕 旋转/镜像/缩放 / 对齐(6种) / 倒圆角 / 搜索替换</div>
+    </div>
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">图层管理</h3>
+      <div>✅ 分组折叠 / 颜色标识 / 可见性 / 搜索</div>
+      <div style="color:#2F6DF6;">🆕 颜色/线型/填充/透明度/线宽自定义</div>
+      <div style="color:#2F6DF6;">🆕 布尔运算(AND/OR/NOT/XOR)</div>
+      <div style="color:#2F6DF6;">🆕 .lyp 配置导入导出 / 色板预设</div>
+    </div>
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">验证分析</h3>
+      <div>✅ DRC 规则检查 / 规则管理</div>
+      <div style="color:#2F6DF6;">🆕 XOR 版图对比 / 网络追踪(BFS)</div>
+      <div style="color:#2F6DF6;">🆕 标记浏览器(筛选/跳转/清除)</div>
+    </div>
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">视图增强</h3>
+      <div>✅ 缩放/平移 / 适配 / 网格</div>
+      <div style="color:#2F6DF6;">🆕 书签系统 / 视图历史 / 全局旋转翻转</div>
+      <div style="color:#2F6DF6;">🆕 导航器 / 截图</div>
+    </div>
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">AI 智能助手</h3>
+      <div>✅ 自然语言→版图命令 / 多模型接入</div>
+      <div>✅ 电路单元模板(反相器/NAND/NOR/传输门/SRAM)</div>
+      <div style="color:#2F6DF6;">🆕 25个快捷指令 / 视口动作回调</div>
+    </div>
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">宏脚本</h3>
+      <div style="color:#2F6DF6;">🆕 宏录制/回放 / 批处理</div>
+      <div style="color:#2F6DF6;">🆕 4个内置宏(焊盘/DRC/清理/保护环)</div>
+      <div style="color:#2F6DF6;">🆕 宏导入导出(JSON)</div>
+    </div>
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">Cell 管理</h3>
+      <div style="color:#2F6DF6;">🆕 Cell创建/引用 / 层次结构</div>
+      <div style="color:#2F6DF6;">🆕 从选中创建Cell / 展平实例</div>
+      <div style="color:#2F6DF6;">🆕 阵列实例</div>
+    </div>
+    <div>
+      <h3 style="font-size:13px;color:#6B4EFF;margin-bottom:6px;">文件格式</h3>
+      <div>✅ GDSII / OASIS 解析(C++ NAPI)</div>
+      <div>✅ 流式加载 / 进度显示</div>
+      <div style="color:#2F6DF6;">🆕 .lyp 图层配置 / .hlm 宏脚本</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

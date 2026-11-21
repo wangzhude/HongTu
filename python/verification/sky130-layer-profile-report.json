@@ -1,0 +1,204 @@
+{
+  "source": "https://skywater-pdk.readthedocs.io/en/main/rules/layers.html#gds-layers-information",
+  "sourceChecked": "2026-09-30",
+  "serializerAndReopenEngine": "klayout.lay 0.30.12",
+  "profile": "sky130-public-display.lyp",
+  "sha256": "cbfd73f66bf6d565d29b6ff58803acf8f053ee78c38bffec9e3446da918d36b6",
+  "entries": [
+    {
+      "source": "64/20@1",
+      "name": "nwell drawing [64/20]",
+      "layer": 64,
+      "datatype": 20
+    },
+    {
+      "source": "64/18@1",
+      "name": "dnwell drawing [64/18]",
+      "layer": 64,
+      "datatype": 18
+    },
+    {
+      "source": "64/16@1",
+      "name": "nwell pin [64/16]",
+      "layer": 64,
+      "datatype": 16
+    },
+    {
+      "source": "64/5@1",
+      "name": "nwell label [64/5]",
+      "layer": 64,
+      "datatype": 5
+    },
+    {
+      "source": "64/59@1",
+      "name": "pwell label [64/59]",
+      "layer": 64,
+      "datatype": 59
+    },
+    {
+      "source": "65/20@1",
+      "name": "diff drawing [65/20]",
+      "layer": 65,
+      "datatype": 20
+    },
+    {
+      "source": "65/44@1",
+      "name": "tap drawing [65/44]",
+      "layer": 65,
+      "datatype": 44
+    },
+    {
+      "source": "66/20@1",
+      "name": "poly drawing [66/20]",
+      "layer": 66,
+      "datatype": 20
+    },
+    {
+      "source": "66/44@1",
+      "name": "licon1 drawing [66/44]",
+      "layer": 66,
+      "datatype": 44
+    },
+    {
+      "source": "67/20@1",
+      "name": "li1 drawing [67/20]",
+      "layer": 67,
+      "datatype": 20
+    },
+    {
+      "source": "67/44@1",
+      "name": "mcon drawing [67/44]",
+      "layer": 67,
+      "datatype": 44
+    },
+    {
+      "source": "67/16@1",
+      "name": "li1 pin [67/16]",
+      "layer": 67,
+      "datatype": 16
+    },
+    {
+      "source": "67/5@1",
+      "name": "li1 label [67/5]",
+      "layer": 67,
+      "datatype": 5
+    },
+    {
+      "source": "68/20@1",
+      "name": "met1 drawing [68/20]",
+      "layer": 68,
+      "datatype": 20
+    },
+    {
+      "source": "68/16@1",
+      "name": "met1 pin [68/16]",
+      "layer": 68,
+      "datatype": 16
+    },
+    {
+      "source": "68/5@1",
+      "name": "met1 label [68/5]",
+      "layer": 68,
+      "datatype": 5
+    },
+    {
+      "source": "68/0@1",
+      "name": "met1 pin text [68/0]",
+      "layer": 68,
+      "datatype": 0
+    },
+    {
+      "source": "68/44@1",
+      "name": "via drawing [68/44]",
+      "layer": 68,
+      "datatype": 44
+    },
+    {
+      "source": "69/20@1",
+      "name": "met2 drawing [69/20]",
+      "layer": 69,
+      "datatype": 20
+    },
+    {
+      "source": "69/16@1",
+      "name": "met2 pin [69/16]",
+      "layer": 69,
+      "datatype": 16
+    },
+    {
+      "source": "69/5@1",
+      "name": "met2 label [69/5]",
+      "layer": 69,
+      "datatype": 5
+    },
+    {
+      "source": "78/44@1",
+      "name": "hvtp drawing [78/44]",
+      "layer": 78,
+      "datatype": 44
+    },
+    {
+      "source": "81/4@1",
+      "name": "areaid.sc identifier [81/4]",
+      "layer": 81,
+      "datatype": 4
+    },
+    {
+      "source": "83/44@1",
+      "name": "text label [83/44]",
+      "layer": 83,
+      "datatype": 44
+    },
+    {
+      "source": "93/44@1",
+      "name": "nsdm drawing [93/44]",
+      "layer": 93,
+      "datatype": 44
+    },
+    {
+      "source": "94/20@1",
+      "name": "psdm drawing [94/20]",
+      "layer": 94,
+      "datatype": 20
+    },
+    {
+      "source": "95/20@1",
+      "name": "npc drawing [95/20]",
+      "layer": 95,
+      "datatype": 20
+    },
+    {
+      "source": "122/16@1",
+      "name": "pwell pin [122/16]",
+      "layer": 122,
+      "datatype": 16
+    },
+    {
+      "source": "236/0@1",
+      "name": "L236/0",
+      "layer": 236,
+      "datatype": 0
+    }
+  ],
+  "samples": [
+    {
+      "file": "sky130_fd_sc_hd__inv_1.gds",
+      "layerPairs": 22,
+      "allPairsCovered": true,
+      "unassignedPurposeRetainedNumerically": [
+        "236/0"
+      ]
+    },
+    {
+      "file": "sky130_fd_sc_hd__nand2_1.gds",
+      "layerPairs": 22,
+      "allPairsCovered": true,
+      "unassignedPurposeRetainedNumerically": [
+        "236/0"
+      ]
+    }
+  ],
+  "fixture": "tests\\fixtures\\klayout-standard-groups.lyp",
+  "fixtureSha256": "1286d08d7ee6f8236fa8c49d6339753b1647afb98d8ca4c826399d73b163a149",
+  "scope": "Display names and colors only; no geometry remap, PDK installation or foundry signoff."
+}

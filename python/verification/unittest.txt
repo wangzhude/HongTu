@@ -1,0 +1,13 @@
+test_long_running_child_is_terminated (test_bridge.GeneratedLayouts.test_long_running_child_is_terminated) ... ok
+test_own_examples_reopen_gds_and_oasis (test_bridge.GeneratedLayouts.test_own_examples_reopen_gds_and_oasis) ... ok
+test_real_python_functions_and_import_forms (test_bridge.GeneratedLayouts.test_real_python_functions_and_import_forms) ... ok
+test_result_required_and_resource_boundaries (test_bridge.GeneratedLayouts.test_result_required_and_resource_boundaries) ... ok
+test_unsafe_operations_are_rejected_before_execution (test_bridge.GeneratedLayouts.test_unsafe_operations_are_rejected_before_execution) ... ok
+test_health_and_bearer_requirement (test_bridge.HttpContract.test_health_and_bearer_requirement) ... ok
+test_no_file_or_shell_endpoint (test_bridge.HttpContract.test_no_file_or_shell_endpoint) ... ok
+test_real_http_generation (test_bridge.HttpContract.test_real_http_generation) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 17.803s
+
+OK

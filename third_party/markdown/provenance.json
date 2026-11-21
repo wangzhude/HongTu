@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "reviewDate": "2026-09-30",
+  "packages": [
+    {
+      "name": "@cangjie-tpc/formula_hybrid",
+      "version": "1.3.0",
+      "url": "https://ohpm.openharmony.cn/ohpm/@cangjie-tpc/formula_hybrid/-/formula_hybrid-1.3.0.har",
+      "integrity": "sha512-aZgGXSIMnVA3Ti4SzxbRZlWPWtWHE9tegs+ZxAQgielqqcz73h6HhWa5crHwgASMaPYPj00dJg1cxOrcKWQRhw==",
+      "license": "MIT",
+      "licenseFile": "third_party/markdown/cangjie-tpc-formula_hybrid-1.3.0-LICENSE.txt",
+      "licenseSha256": "a8499c26186ee7bae81df6eb7a2c66300eb42f0ab9c5f1f4d34e8c617bcda12a",
+      "repository": "https://gitcode.com/Cangjie-TPC/formula-ffi/tree/formula-ffi_hybrid_cangjie-plugin_5.1.1",
+      "compatibleSdkVersion": 12,
+      "nativeAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ]
+    },
+    {
+      "name": "@cangjie-tpc/prism_hybrid",
+      "version": "1.2.6",
+      "url": "https://ohpm.openharmony.cn/ohpm/@cangjie-tpc/prism_hybrid/-/prism_hybrid-1.2.6.har",
+      "integrity": "sha512-yq401p5rb4FQumFHDoXlKOYnaWfhQDNMRxDsJZV8peieTTl4vT/pNKDCT3dx7DrU15DOZ9X4lhr9kZbnczGPnw==",
+      "license": "Apache-2.0",
+      "licenseFile": "third_party/markdown/cangjie-tpc-prism_hybrid-1.2.6-LICENSE.txt",
+      "licenseSha256": "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a",
+      "repository": "https://gitcode.com/Cangjie-TPC/prism4cj/tree/prism4cj_hybrid_cangjie-plugin_5.1.1",
+      "compatibleSdkVersion": 12,
+      "nativeAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ]
+    },
+    {
+      "name": "@luvi/html2md",
+      "version": "1.0.3",
+      "url": "https://ohpm.openharmony.cn/ohpm/@luvi/html2md/-/html2md-1.0.3.har",
+      "integrity": "sha512-BBa2FqQKQ48dBmG+n2z63IGpbIV4Gc/g5Qj1FGssZ6ki+DHqYknZ46FRVRJeKtrfmCjYoiiKx5FtBjOuqnwbtA==",
+      "license": "MIT",
+      "licenseFile": "third_party/markdown/luvi-html2md-1.0.3-LICENSE.txt",
+      "licenseSha256": "771d3e6ab43edf078ba2968eb25ef10c46c4b5010a0a70f120a370cb57a54b1b",
+      "repository": "https://gitee.com/luvi/html2md.git",
+      "compatibleSdkVersion": 12,
+      "nativeAbis": []
+    },
+    {
+      "name": "@luvi/lv-markdown-in",
+      "version": "3.4.7",
+      "url": "https://ohpm.openharmony.cn/ohpm/@luvi/lv-markdown-in/-/lv-markdown-in-3.4.7.har",
+      "integrity": "sha512-wqErKxK98p8A28o1uSUusQH88fqczHwcOKlxxmBVmhIw9MS5a5JFL9R71Um8/gAjrwx8Ifyr0XM6i4/RV1PD8A==",
+      "license": "MIT",
+      "licenseFile": "third_party/markdown/luvi-lv-markdown-in-3.4.7-LICENSE.txt",
+      "licenseSha256": "71e2caed314869547d49f35de3cf3171782c29ebda943cd149cf996ae99211a3",
+      "repository": "https://gitee.com/luvi/lv-markdown-in.git",
+      "compatibleSdkVersion": 12,
+      "nativeAbis": []
+    }
+  ],
+  "reviewedSource": {
+    "repository": "https://gitee.com/luvi/lv-markdown-in",
+    "commit": "2adcf6990b97bc4f83d22eff4333e65dd8dc5fb1",
+    "declaredVersion": "3.4.6",
+    "url": "https://gitee.com/luvi/lv-markdown-in/raw/2adcf6990b97bc4f83d22eff4333e65dd8dc5fb1/markdown/src/main/ets/enhance/index.ets",
+    "sha256": "453b60a83ea5b0abf3b95ba1f8e903213c80bb61d0013593c5e036da66aaef22",
+    "boundary": "Public master review snapshot; upstream does not expose a matching 3.4.7 tag. Production is the exact integrity-pinned OHPM 3.4.7 HAR, not a claimed source rebuild."
+  }
+}

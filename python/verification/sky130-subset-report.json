@@ -1,0 +1,128 @@
+{
+  "engine": "klayout.db",
+  "version": "0.30.12",
+  "scope": "SKY130 met1 drawing 68/20; three rules only",
+  "foundrySignoff": false,
+  "source": "https://skywater-pdk.readthedocs.io/en/main/rules/periphery.html#m1",
+  "layerSource": "https://skywater-pdk.readthedocs.io/en/main/rules/layers.html",
+  "rules": [
+    {
+      "id": "m1.1",
+      "kind": "width",
+      "threshold": 0.14,
+      "unit": "um"
+    },
+    {
+      "id": "m1.2",
+      "kind": "spacing",
+      "threshold": 0.14,
+      "unit": "um"
+    },
+    {
+      "id": "m1.6",
+      "kind": "area",
+      "threshold": 0.083,
+      "unit": "um^2"
+    }
+  ],
+  "syntheticCases": {
+    "compliant": {
+      "status": "subset-clean",
+      "dbuUm": 0.001,
+      "checkedMergedRegions": 2,
+      "areaUm2": 0.4,
+      "violations": {
+        "m1.1": 0,
+        "m1.2": 0,
+        "m1.6": 0
+      },
+      "foundrySignoff": false
+    },
+    "width_violation": {
+      "status": "subset-violations",
+      "dbuUm": 0.001,
+      "checkedMergedRegions": 1,
+      "areaUm2": 0.1,
+      "violations": {
+        "m1.1": 1,
+        "m1.2": 0,
+        "m1.6": 0
+      },
+      "foundrySignoff": false
+    },
+    "spacing_violation": {
+      "status": "subset-violations",
+      "dbuUm": 0.001,
+      "checkedMergedRegions": 2,
+      "areaUm2": 0.4,
+      "violations": {
+        "m1.1": 0,
+        "m1.2": 1,
+        "m1.6": 0
+      },
+      "foundrySignoff": false
+    },
+    "area_violation": {
+      "status": "subset-violations",
+      "dbuUm": 0.001,
+      "checkedMergedRegions": 1,
+      "areaUm2": 0.04,
+      "violations": {
+        "m1.1": 0,
+        "m1.2": 0,
+        "m1.6": 1
+      },
+      "foundrySignoff": false
+    }
+  },
+  "officialSamples": [
+    {
+      "file": "sky130_fd_sc_hd__inv_1.gds",
+      "sha256": "18a9cfa399957c7c7b5fc75175e03fc921d56ecc6b8de8fae34ba301bb7914c4",
+      "cells": 1,
+      "layers": 22,
+      "storedShapes": 54,
+      "result": {
+        "status": "subset-clean",
+        "dbuUm": 0.001,
+        "checkedMergedRegions": 2,
+        "areaUm2": 1.3248,
+        "violations": {
+          "m1.1": 0,
+          "m1.2": 0,
+          "m1.6": 0
+        },
+        "foundrySignoff": false
+      }
+    },
+    {
+      "file": "sky130_fd_sc_hd__nand2_1.gds",
+      "sha256": "4e7fa6255df901f59151791d6e8ff4c421b63c1ea3822d6d5d25b48221782a3a",
+      "cells": 1,
+      "layers": 22,
+      "storedShapes": 58,
+      "result": {
+        "status": "subset-clean",
+        "dbuUm": 0.001,
+        "checkedMergedRegions": 2,
+        "areaUm2": 1.3248,
+        "violations": {
+          "m1.1": 0,
+          "m1.2": 0,
+          "m1.6": 0
+        },
+        "foundrySignoff": false
+      }
+    }
+  ],
+  "excluded": [
+    "huge-metal spacing exceptions",
+    "enclosure",
+    "hole area",
+    "density",
+    "antenna",
+    "other layers",
+    "electrical models",
+    "complete LVS"
+  ]
+}

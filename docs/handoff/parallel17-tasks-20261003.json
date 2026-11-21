@@ -1,0 +1,516 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2026-10-03 04:02:58 UTC",
+  "baselineCommit": "0edb7e1ab72bac5704fe250df88a585d1bc06e10",
+  "integrationBranch": "integration/parallel17",
+  "model": "gpt-6.1-sol",
+  "reasoningEffort": "ultra",
+  "localGitOnly": true,
+  "nativeWindows": {
+    "opened": false,
+    "reason": "Computer Use initialization failed twice: kernel asset path not found; independent Codex chats created instead."
+  },
+  "tasks": [
+    {
+      "key": "A",
+      "title": "鸿图并行 A：多来源版图叠加",
+      "threadId": "01a0ffe9-212c-71e2-935b-db80c1463d03",
+      "hostId": "local",
+      "branch": "feature/readonly-overlay",
+      "worktree": "D:\\HongTu\\worktrees\\readonly-overlay",
+      "status": "code-integrated-full-native-function-acceptance-pending",
+      "initialCursor": "49f0befe-b402-4020-ac9a-5b96019c7d8b:1"
+    },
+    {
+      "key": "B",
+      "title": "鸿图并行 B：工程携带视图与审阅",
+      "threadId": "01a0ffe9-7e1f-7bd1-a016-0f91120e62c9",
+      "hostId": "local",
+      "branch": "feature/project-review-carry",
+      "worktree": "D:\\HongTu\\worktrees\\project-review-carry",
+      "status": "code-integrated-full-native-function-acceptance-pending",
+      "initialCursor": "624e1079-6ca2-4ce9-ad00-16df0e4fd435:1"
+    },
+    {
+      "key": "C",
+      "title": "鸿图并行 C：可复用豁免库",
+      "threadId": "01a0ffe9-e6cb-7993-a974-c1e72ecae9b2",
+      "hostId": "local",
+      "branch": "feature/rdb-waiver-library",
+      "worktree": "D:\\HongTu\\worktrees\\rdb-waiver-library",
+      "status": "code-integrated-full-native-function-acceptance-pending",
+      "initialCursor": "7d4f3c6c-3048-41db-9bda-f3409489aca1:1",
+      "followup": "Small activeId FIFO manifest integrated as d426432; final root host 25/25 and incremental SDK passed, native acceptance pending.",
+      "ordinaryAcceptance": {
+        "ledger": {
+          "path": "docs/validation/parallel18-ordinary-ui/requirements-ledger.json",
+          "bytes": 6064,
+          "sha256": "FCF791B8824E74114DFFBB6C39F590B0D320425F314B1C875CCAFF2ACE4074CB"
+        },
+        "wholeNativeQualified": false
+      }
+    },
+    {
+      "key": "D",
+      "title": "鸿图并行 D：递归层运算",
+      "threadId": "01a0ffec-c5cd-7310-a7f6-1eefcc0a5a69",
+      "hostId": "local",
+      "branch": "feature/recursive-layer-expression",
+      "worktree": "D:\\HongTu\\worktrees\\recursive-layer-expression",
+      "status": "code-integrated-full-native-function-acceptance-pending",
+      "initialCursor": "949b6dbc-8ce4-4939-84cd-47962a7da7d7:1",
+      "ordinaryAcceptance": {
+        "ledger": {
+          "path": "docs/validation/parallel18-ordinary-ui/requirements-ledger.json",
+          "bytes": 6064,
+          "sha256": "FCF791B8824E74114DFFBB6C39F590B0D320425F314B1C875CCAFF2ACE4074CB"
+        },
+        "wholeNativeQualified": false
+      }
+    }
+  ],
+  "acceptance": {
+    "owner": "root",
+    "phase": "functional-first-active-selection-integrated-sdk-native-pending",
+    "qualifiedSourceHead": "84b9f06bee650b57b3fba810f8bcaa6d80dba6c7",
+    "sourceCohort": {
+      "productionFiles": 333,
+      "toolFiles": 301
+    },
+    "hapSha256": "0968DE16BA69F78C67268CA8C6C9E3B6DC0AD37CB0B160E46F99BA42265293A2",
+    "nativeUi": {
+      "target": "127.0.0.1:15558",
+      "phase": "owned-guest-stopped-real-terminal",
+      "qualified": false,
+      "current0968InstalledBeforeStop": true,
+      "active100kCompleteGeometryAndCamera": true,
+      "completeFourDocumentState": false,
+      "strictStateResult": "19/20; inactive Main offset difference retained",
+      "anrResolved": false,
+      "originalPc": {
+        "pid": 162968,
+        "creationTime": "2026-10-02T18:59:12.1846210+08:00",
+        "unchangedIdentity": true,
+        "new0968HapInstalled": false,
+        "eightDocumentsHistoricalEef6ScopePreserved": true
+      }
+    },
+    "phoneRestoration": {
+      "restored": true,
+      "restorationTerminal": true,
+      "pid": 70400,
+      "creationTime": "2026-10-04T00:02:36.6082460+08:00",
+      "target": "127.0.0.1:15557",
+      "api": "24",
+      "deviceType": "phone",
+      "sameUuidConfigUserdata": true,
+      "receipt": {
+        "path": "docs/validation/parallel17-memory/second-batch/phone-restoration-01/phone-restored.json",
+        "bytes": 12639,
+        "sha256": "59679C7E5CD57E744A9D018229E87E129D1F39C0194BD9632D4E460A623407E7"
+      },
+      "restorationRequired": true,
+      "requirementSatisfied": true,
+      "authorizedTemporaryStop": true,
+      "restoredAt": "2026-10-04T00:17:16.3693953+08:00"
+    },
+    "required": [
+      "Read every final branch diff and command terminal results.",
+      "Integrate finite Index wiring on integration/parallel17 after A relinquishes ownership.",
+      "Preserve frozen closure1-16 evidence and move changed R16 live bindings to a new historical map before integration.",
+      "Run appropriate combined host/native checks, complete gate and SDK build.",
+      "Perform same-package API24 2in1 emulator UI operations; preserve original eight documents.",
+      "Update capability ledger and software structure tree with implemented and still-open distinctions."
+    ],
+    "historicalGate4Sdk4": {
+      "sourceHead": "7e6d44554cb90c7a1f3c43aae46581b6103b67ac",
+      "productionFiles": 333,
+      "toolFiles": 292,
+      "gate4": "docs/validation/parallel17-integration/gate4-qualification/qualification-03.json",
+      "sdk4": "docs/validation/parallel17-integration/gate4-qualification/sdk4-qualification-01.json",
+      "hapSha256": "021EB336FD81E26E28F37E71D4EB81ACA50EE36C8A1BDC76104CB3F2778ED1D7",
+      "currentAcceptance": false,
+      "newSourceFullGateRerun": false
+    },
+    "sdk": "docs/validation/parallel17-memory/second-batch/sdk-01/result.json",
+    "qualificationScope": "Exact incremental SDK and limited steady active-scene observation; full functional flows remain pending.",
+    "completeFunctionalAcceptance": false,
+    "memoryBatch": {
+      "totalIncludesSwapPss": true,
+      "beforeMedianKiB": 821880,
+      "afterMedianKiB": 773624,
+      "observedDecreaseKiB": 48256,
+      "observedDecreasePercent": 5.8714167518372555,
+      "nonSwapBeforeMedianKiB": 268156,
+      "nonSwapAfterMedianKiB": 296247,
+      "physicalRamImprovementClaimed": false,
+      "vmOverallImprovementClaimed": false,
+      "strictWholeFlowPaired": false,
+      "causalAttributionClaimed": false,
+      "stateChecksPassed": 19,
+      "stateChecksTotal": 20,
+      "stateOverallPassed": false,
+      "anrResolved": false,
+      "rollupIndependentlyAvailable": false
+    },
+    "currentLedger": {
+      "path": "docs/validation/parallel18-active-manifest/root-01/requirements-ledger.json",
+      "bytes": 9310,
+      "sha256": "C3627995EDCD8CB59BD5FF57BCC9A2A9648B26344F53424A602B40EFA3078B6A"
+    },
+    "currentPriority": "User requested functional completeness and ordinary usability first; no expanded emulator stress testing.",
+    "deferred": [
+      "Large-file model paging/database/Sendable architecture",
+      "Expanded emulator performance testing",
+      "Physical-device performance and industrial-scale limits"
+    ],
+    "activeSelectionFollowup": {
+      "ordinaryUseFollowup": {
+        "path": "docs/validation/parallel18-ordinary-ui/requirements-ledger.json",
+        "bytes": 6064,
+        "sha256": "FCF791B8824E74114DFFBB6C39F590B0D320425F314B1C875CCAFF2ACE4074CB"
+      },
+      "currentLedger": {
+        "path": "docs/validation/parallel18-active-manifest/root-01/requirements-ledger.json",
+        "bytes": 9310,
+        "sha256": "C3627995EDCD8CB59BD5FF57BCC9A2A9648B26344F53424A602B40EFA3078B6A"
+      }
+    },
+    "previousCurrentLedger": {
+      "path": "docs/validation/parallel17-memory/second-batch/requirements-ledger.json",
+      "bytes": 6022,
+      "sha256": "52828F019FD2A4EBA0B09B5D418A57E74A1AF26DFB93ACFD4E6DCCB94B816D54"
+    },
+    "previousOrdinaryLedger": {
+      "path": "docs/validation/parallel18-active-manifest/root-01/requirements-ledger.json",
+      "bytes": 2858,
+      "sha256": "5F9FB0AE1109A3E1FA74FD8EE4DB1D78CB7856DDD5F8B50DFEECC9F0EB83D845"
+    },
+    "historicalActiveSelectionFollowup": {
+      "schema": "hongtu-functional-active-selection-root/v1",
+      "updatedAt": "2026-10-03T16:42:42.133786+00:00",
+      "priority": "Functional completeness and ordinary usability first; expanded emulator stress tests deferred by user.",
+      "sourceHead": "b592db8b7fdacd6c253e98b52381873e27292afc",
+      "sourceCodeCommit": "d426432efa74624a09673943a06722caabbba15b",
+      "branchSourceCommit": "f8f6fdbede2e9b2aa8df378af085ecc59237e733",
+      "branchEvidenceCommit": "6d2daeb8bbc8092d6309c875fdece18a3118c90d",
+      "productionFiles": 333,
+      "toolFiles": 302,
+      "sourceFilesRehashed": 635,
+      "sourceDrift": 0,
+      "functionalHostChecksPassed": 25,
+      "functionalHostChecksFailed": 0,
+      "sdk": {
+        "path": "docs/validation/parallel18-active-manifest/root-01/sdk-01/result.json",
+        "bytes": 1583,
+        "sha256": "FD558A15A750ABF8EF1780D293D5E6C838548E803E37A3DB3D91EC7C2F7B921D"
+      },
+      "host": {
+        "path": "docs/validation/parallel18-active-manifest/root-01/host-01/result.json",
+        "bytes": 2958,
+        "sha256": "B36C0B383D2290E4B79B21A36EE575AAFC24E83AA29186F3DB6CE0951CED3D7E"
+      },
+      "hapSha256": "96CE89D83039A3A7619E9E57F5F84DEC0C67A365DB73B7EAD3218526A4F932CC",
+      "currentHapInstalled": false,
+      "qualification": "Integrated host functional checks and incremental SDK only; native acceptance remains pending.",
+      "previousDeviceSourceHead": "84b9f06bee650b57b3fba810f8bcaa6d80dba6c7",
+      "previousDeviceHapSha256": "0968DE16BA69F78C67268CA8C6C9E3B6DC0AD37CB0B160E46F99BA42265293A2",
+      "previousEvidenceResolution": {
+        "path": "docs/validation/parallel18-active-manifest/root-01/historical-publication17/resolution-map.json",
+        "bytes": 2999,
+        "sha256": "FCBDBF64A0080B6845206456F5441ACE9B84E33FBBFC9D5E2B8987D17387884B"
+      },
+      "auditNodesTotal": 12,
+      "wholeNodesComplete": 0,
+      "competitorGroupsTotal": 31,
+      "wholeGroupsComplete": 0,
+      "objectiveComplete": false,
+      "completeFunctionalAcceptance": false,
+      "anrResolved": false,
+      "devicePerformanceImprovementClaimed": false,
+      "newPerformanceTestRun": false,
+      "phoneRestored": true,
+      "phonePid": 70400,
+      "phoneRestorationReceipt": {
+        "path": "docs/validation/parallel17-memory/second-batch/phone-restoration-01/phone-restored.json",
+        "bytes": 12639,
+        "sha256": "59679C7E5CD57E744A9D018229E87E129D1F39C0194BD9632D4E460A623407E7"
+      },
+      "deferred": [
+        "Large-file Cell paging/full-model architecture",
+        "Expanded emulator performance testing",
+        "Physical-device performance and industrial-scale limits"
+      ],
+      "stillRequired": [
+        "Current-package native selection persistence/cold restoration",
+        "KEEP UndoRedo and GDS/OAS export",
+        "A/B/C/D complete ordinary native flows",
+        "GPU/text/styles and real-device acceptance"
+      ],
+      "independentReview": "parallel17_c_review: FIFO/guards/data preservation reviewed; final 25 and previous-candidate 49 qualifications kept separate."
+    }
+  },
+  "updatedAt": "2026-10-03T19:30:58.780413+00:00",
+  "historicalMemoryBatch": {
+    "owner": "root",
+    "phase": "memory-batch-qualified-full-native-business-pending",
+    "qualifiedSourceHead": "cfe9eb089d3f9de4e84774a2981a7225a476504f",
+    "sourceCohort": {
+      "productionFiles": 333,
+      "toolFiles": 294
+    },
+    "hapSha256": "EEF6FC6ED92055AD3DEB8F20A2B2A6366FBF641C2C024621CC070FF4FD08D885",
+    "nativeUi": {
+      "target": "127.0.0.1:15558",
+      "phase": "dedicated-guest-stopped",
+      "qualified": false,
+      "sdk4ExpressionPreviewApply": "passed-limited-old-hap",
+      "new100kGeometryAndDraw": "observed-limited",
+      "new100kCameraEquality": "not-qualified",
+      "new100kAppPssOverallReduction": false,
+      "originalPc": {
+        "target": "127.0.0.1:5555",
+        "memoryHapInstalled": true,
+        "eightDocumentsFirstLaunchAndColdRecovery": true,
+        "vmIdentityUnchanged": true,
+        "fullBusinessAcceptance": false
+      }
+    },
+    "phoneRestoration": {
+      "target": "127.0.0.1:15557",
+      "authorizedTemporaryStop": true,
+      "restorationRequired": true,
+      "restored": true,
+      "requirementSatisfied": true,
+      "restoredAt": "2026-10-03T20:19:02.3388063+08:00",
+      "pid": 199480,
+      "creationTime": "2026-10-03T20:11:48.303075+08:00",
+      "actualApi": "24",
+      "actualDeviceType": "phone",
+      "receipt": "docs/validation/parallel17-integration/ui/phone-restoration-20261003/phone-restored.json"
+    },
+    "required": [
+      "Read every final branch diff and command terminal results.",
+      "Integrate finite Index wiring on integration/parallel17 after A relinquishes ownership.",
+      "Preserve frozen closure1-16 evidence and move changed R16 live bindings to a new historical map before integration.",
+      "Run appropriate combined host/native checks, complete gate and SDK build.",
+      "Perform same-package API24 2in1 emulator UI operations; preserve original eight documents.",
+      "Update capability ledger and software structure tree with implemented and still-open distinctions."
+    ],
+    "historicalGate4Sdk4": {
+      "sourceHead": "7e6d44554cb90c7a1f3c43aae46581b6103b67ac",
+      "productionFiles": 333,
+      "toolFiles": 292,
+      "gate4": "docs/validation/parallel17-integration/gate4-qualification/qualification-03.json",
+      "sdk4": "docs/validation/parallel17-integration/gate4-qualification/sdk4-qualification-01.json",
+      "hapSha256": "021EB336FD81E26E28F37E71D4EB81ACA50EE36C8A1BDC76104CB3F2778ED1D7",
+      "currentAcceptance": false,
+      "newSourceFullGateRerun": false
+    },
+    "sdk": "docs/validation/parallel17-memory/sdk-memory-01/readback/SDKqual.json",
+    "qualificationScope": "Limited memory methods, targeted host/native, SDK and original-document recovery; full four workflows pending",
+    "completeFunctionalAcceptance": false,
+    "memoryBatch": {
+      "qualifiedLimitedMethods": [
+        "R17-M01",
+        "R17-M02",
+        "R17-M03"
+      ],
+      "hostEntries": 9,
+      "hostCheckExecutions": 392,
+      "devicePssOldMedianKiB": 677681,
+      "devicePssNewMedianKiB": 678520,
+      "overallPssImprovementClaimed": false,
+      "wholeNodesComplete": false,
+      "wholeGroupsComplete": false,
+      "evidence": [
+        {
+          "path": "docs/validation/parallel17-memory/integration-host/fresh-01/result.json",
+          "sha256": "C9CE12A7D81BBCE5869B226F9CDA251196CE08083441AA9FDF809D202A2AE7AF",
+          "bytes": 26202
+        },
+        {
+          "path": "docs/validation/parallel17-memory/integration-native/audit.json",
+          "sha256": "8B48148476CC6FB26E837763D27C9AAAE81D7494473597C0ED751C6FD56BF6E5",
+          "bytes": 23442
+        },
+        {
+          "path": "docs/validation/parallel17-memory/sdk-memory-01/readback/SDKqual.json",
+          "sha256": "AD49D43D1147834FC36F5F47C90089A650B4F6F9682D446C3CA79877FDDE0CC5",
+          "bytes": 32000
+        },
+        {
+          "path": "docs/validation/parallel17-memory/device/original/receipt.json",
+          "sha256": "5587DBC5889089D181AC9660C2480B522F022B9BD76C57B597B351F0C7D3CC35",
+          "bytes": 5743
+        },
+        {
+          "path": "docs/validation/parallel17-memory/readback/camera-offset-diagnosis-01.json",
+          "sha256": "30CACFE820AB6B512A749499091EBADDB3ABAC4A7E5D6C017654E2F53457641F",
+          "bytes": 20225
+        },
+        {
+          "path": "docs/validation/parallel17-integration/ui/phone-restoration-20261003/phone-restored.json",
+          "sha256": "5EAC3FD6D3B389D79EC03739C5411D20B029332988111BD76FFD5536805EBC8A",
+          "bytes": 3974
+        }
+      ]
+    }
+  },
+  "ordinaryUseFollowup": {
+    "schema": "hongtu-limited-ordinary-functional-acceptance/v1",
+    "updatedAtUtc": "2026-10-03T19:30:58.780413+00:00",
+    "sourceHead": "b592db8b7fdacd6c253e98b52381873e27292afc",
+    "hapSha256": "96CE89D83039A3A7619E9E57F5F84DEC0C67A365DB73B7EAD3218526A4F932CC",
+    "target": "127.0.0.1:15558",
+    "runtimePid": 49160,
+    "api": 24,
+    "deviceType": "2in1",
+    "ramMiB": 2048,
+    "currentHapInstalled": true,
+    "smallWorkspaceNormalStartPassed": true,
+    "activeManifestBusinessComparisonPassed": true,
+    "activeManifestCompleteByteIdentityPassed": false,
+    "activeManifestRevisionIdentityPassed": false,
+    "dRawBusinessChecksPassed": 145,
+    "dSeparateVisiblePrimaryChecksPassed": 32,
+    "dCanonicalPublishedSelectionBranch": "[5]/[5]",
+    "dShapes": {
+      "import": 5,
+      "selected": 5,
+      "applied": 10,
+      "undo": 5,
+      "redo": 10
+    },
+    "gdsUiSaveAsCleanSnapshotPassed": true,
+    "gdsExportedByteOracle": {
+      "passed": 19,
+      "failed": 0
+    },
+    "oasExportedByteOracle": {
+      "passed": 19,
+      "failed": 0
+    },
+    "oasUiPrimary": 8,
+    "oasPersistedSelection": [
+      5
+    ],
+    "oasPersistedSelectionIsRuntimePrimaryProof": false,
+    "dExactRawEmptyFlagsFiveNativeBranchQualified": false,
+    "restoreOriginalNineReferencedFilesPassed": true,
+    "unreferencedOrdinaryFixtureFilesMayRemain": true,
+    "restoredPressureWorkspaceNormallyStarted": false,
+    "ownedVmStoppedAndReadBack": true,
+    "phonePreserved": true,
+    "pcPreserved": true,
+    "wholeNativeDQualified": false,
+    "completeFunctionalAcceptance": false,
+    "physicalDeviceAcceptance": false,
+    "anrResolved": false,
+    "newPerformanceTestRun": false,
+    "devicePerformanceImprovementClaimed": false,
+    "evidence": [
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/active-manifest-comparison-01.json",
+        "bytes": 24405,
+        "sha256": "14B005A8D5E61181E0F1B83CDFD11F07965471393EF5CC69B8506C7D08B7F28E"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/d-fixture-audit-01/audit.json",
+        "bytes": 152666,
+        "sha256": "7130285A6E1C64A4E902E3565605D00E5C7E8EF4C856E1CD8202E136B3823C73"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/d-visible-primary-qualification-01.json",
+        "bytes": 18329,
+        "sha256": "33062F9D14E2879139B0FE6B0FDBF7D593B88E0FA1A510D0CA776A48D1C7422B"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/d-export-pair-qualification-01.json",
+        "bytes": 54330,
+        "sha256": "FE525D329DB303AA67760BDE71AF8A8D3B26C51FBE94466EBD17EEA3CE02D060"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/states/d-gds-saved-01/receipt.json",
+        "bytes": 10570,
+        "sha256": "EE1E5909187E91309FB3C83BD17E580D7DE4F776F26F7853320FBCC7CC439B3C"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/states/d-oas-exported-01/receipt.json",
+        "bytes": 10611,
+        "sha256": "B4A2E083C585E1CE8CB3B7AEBB34C332951773DAED84A05A62B01112937AE3E7"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/captures/oas-saved-visible-01.tree.json",
+        "bytes": 440194,
+        "sha256": "A6E2FED4AD205CA069AA141594869A42C97620B1A7BEDC88322ED5E8CD0EA484"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/captures/oas-saved-visible-01.jpeg",
+        "bytes": 317530,
+        "sha256": "73DDF9B42E8F4C2F8050B175F38782104E73D6BF3F89BE43F2F17A9F0AF9153A"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/exports/gds-transfer-01/receipt.json",
+        "bytes": 11481,
+        "sha256": "D7EF16C1F931858A6091AED774C56A2961F3504CFF53C95E3F00E0A99873FE4F"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/restoration-01/receipt.json",
+        "bytes": 46637,
+        "sha256": "BF0D989720284CD195FF070E3FE2F06C47BD69E16FE610498739E7BC2258C9E4"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/outer-workers/restore-original-01/receipt.json",
+        "bytes": 1115,
+        "sha256": "2C0F23FEA68495338F5C42E72071E5BB64552C2B9A8273168A4605F0BEBDC5CF"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/start/final-runtime-status-01.json",
+        "bytes": 1916,
+        "sha256": "E69B8756735CC8E8EE9581656C3075559BCE8991B4CFEAAE9AAD0C3F25D206D0"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/start/final-runtime-status-02.json",
+        "bytes": 1915,
+        "sha256": "DDDDC4EED74149390A8F152E4792E2A65AAEC438DE80C9EB0E361C2C20C9845B"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/historical-publication18/resolution-map.json",
+        "bytes": 4125,
+        "sha256": "5404EE6788A173DF552C25697EF16EE0C8BBC1267549946274C378CEA855CEBF"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/exports/gds-transfer-02/receipt.json",
+        "bytes": 20784,
+        "sha256": "457A5158BBE9F575093E2A2AF44CE5B1383557D3D0ACCEACD842B0D9A03C5B82"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/outer-workers/gds-transfer-02/receipt.json",
+        "bytes": 1100,
+        "sha256": "B95710F71AD2166E00B1F7F4D3767B43CBDD17C55B7CA525E0CFA803C97F7F23"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/exports/gds-oracle-01/result.json",
+        "bytes": 18984,
+        "sha256": "595755BAAF09DAAD9DC49E22D5DF0057462BE20E8FA93F697700E1B3BCA385F6"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/exports/oas-transfer-02/receipt.json",
+        "bytes": 20832,
+        "sha256": "87ABEE7885B4E79E71363EB6020D534F5EB0423E150193CEAC24D925F2EFC225"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/outer-workers/oas-transfer-02/receipt.json",
+        "bytes": 1100,
+        "sha256": "E6A09DBFB93CF10706112177033E8E246CC55CDB0F59BFBD7D5D70D1F03F9A3C"
+      },
+      {
+        "path": "docs/validation/parallel18-ordinary-ui/exports/oas-oracle-01/result.json",
+        "bytes": 18986,
+        "sha256": "1FCAF08819CF8E7FF28266482842F43D8EA3CE0D7E2BE91FC0FEC3C8B44F0D13"
+      }
+    ],
+    "qualification": "Limited ordinary active-tab restoration and canonical recursive-expression positive flow/export only. Historical raw qualification fields are unchanged."
+  }
+}

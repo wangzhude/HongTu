@@ -1,0 +1,23 @@
+{
+  "files": [
+    "**/*.ets"
+  ],
+  "ignore": [
+    "**/oh_modules/**/*",
+    "**/build/**/*",
+    "**/node_modules/**/*",
+    "**/.preview/**/*",
+    "**/.hvigor/**/*"
+  ],
+  "ruleSet": [
+    "plugin:@performance/recommended",
+    "plugin:@typescript-eslint/recommended"
+  ],
+  "rules": {
+    "@performance/hp-arkui-use-scale-to-replace-attr-animateto": "warn",
+    "@performance/hp-arkui-combine-same-arg-animateto": "warn",
+    "@performance/update-state-var-between-animatetos-check": "warn",
+    "@performance/hp-arkui-use-transition-to-replace-animateto": "warn",
+    "@performance/hp-arkui-reduce-pangesture-distance": "warn"
+  }
+}

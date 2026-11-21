@@ -1,0 +1,13 @@
+[PASS] Current fixture hash matches independently reopened KLayout report
+[PASS] All 29 standard profile pairs/names agree with official KLayout reader
+[PASS] Same layer 68 drawing/pin/label/zero remain separate
+[PASS] Unknown numeric layer and datatype survive exact merge without geometry remap
+[PASS] Real KLayout group fixture flattens children, keeps inherited visibility and escaped name
+[PASS] Cellview suffix, empty name, unknown style and unknown fields cannot discard numeric source
+[PASS] Wildcard/invalid source does not silently apply to a numerical layer
+[PASS] CDATA names are text, not injected properties
+Real KLayout reader verified 29 exported pairs, names, both colors, visibility and width.
+[PASS] Actual app serializer writes standard XML which real KLayout reads without field loss
+[PASS] Unrepresentable display effects warn, while invalid pair cannot be exported
+[PASS] Legacy HongTu-format self-check remains valid
+Standard LYP source contract: 11/11 passed; device/picker/rendering not covered.

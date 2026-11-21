@@ -1,0 +1,14 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "entry",
+  "version": "0.4.0",
+  "description": "鸿图 entry module",
+  "main": "",
+  "author": "",
+  "license": "GPL-3.0-only",
+  "dependencies": {
+    "@luvi/lv-markdown-in": "3.4.7"
+  },
+  "devDependencies": {},
+  "dynamicDependencies": {}
+}

@@ -1,0 +1,59 @@
+{
+  "schema": "hongtu-parallel19-ordinary-results/v1",
+  "date": "2026-10-04",
+  "integrationBranch": "integration/parallel17",
+  "productHead": "96ba99de9c04db1cacf427abefff4995d941ba53",
+  "model": "gpt-6.1-sol",
+  "reasoningEffort": "ultra",
+  "localGitOnly": true,
+  "ordinaryBatchAccepted": true,
+  "fullProfessionalContractsAccepted": false,
+  "originalDispatch": "parallel17-tasks-20261003.json",
+  "acceptanceLedger": "../validation/parallel19-ordinary-abc/requirements-ledger.json",
+  "report": "../validation/parallel19-ordinary-abc/report.md",
+  "structureTree": "../software-structure-tree.md",
+  "tasks": [
+    {
+      "key": "A",
+      "title": "鸿图并行 A：多来源版图叠加",
+      "threadId": "01a0ffe9-212c-71e2-935b-db80c1463d03",
+      "branch": "feature/readonly-overlay-ordinary19",
+      "status": "integrated-ordinary-accepted-professional-open"
+    },
+    {
+      "key": "B",
+      "title": "鸿图并行 B：工程携带视图与审阅",
+      "threadId": "01a0ffe9-7e1f-7bd1-a016-0f91120e62c9",
+      "branch": "feature/project-review-carry-ordinary19",
+      "status": "integrated-ordinary-accepted-professional-open"
+    },
+    {
+      "key": "C",
+      "title": "鸿图并行 C：可复用豁免库",
+      "threadId": "01a0ffe9-e6cb-7993-a974-c1e72ecae9b2",
+      "branch": "feature/rdb-waiver-library",
+      "status": "integrated-ordinary-accepted-professional-open"
+    },
+    {
+      "key": "D",
+      "title": "鸿图并行 D：递归层运算",
+      "threadId": "01a0ffec-c5cd-7310-a7f6-1eefcc0a5a69",
+      "branch": "feature/recursive-layer-expression",
+      "status": "integrated-ordinary-depth-cancel-accepted-r18-export-separate"
+    }
+  ],
+  "deferred": [
+    "Large-file architecture/lazy Cell/OAS mapping/Sendable/checkpoint redesign",
+    "Expanded emulator pressure and performance attribution"
+  ],
+  "broaderOpen": [
+    "Focus following and old view-library governance",
+    "Dynamic derived dependencies",
+    "Cross technology/document waiver qualification migration",
+    "Global waiver library project carry",
+    "Collaboration and full attachments",
+    "Complete comparison review library",
+    "Deep DRC and general LVS",
+    "Plugin host/IDE"
+  ]
+}

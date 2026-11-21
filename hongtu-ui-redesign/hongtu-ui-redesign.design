@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "id": "page-main-workspace",
+      "title": "鸿图主界面",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1751540400000,
+      "canvasData": {
+        "x": 48,
+        "y": -24,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/main-workspace.html",
+        "interactions": []
+      }
+    }
+  ],
+  "config": {
+    "autoLayout": false,
+    "deviceType": "desktop",
+    "projectName": "鸿图 UI 重设计",
+    "showEdge": false,
+    "windowSize": {
+      "width": 800,
+      "height": 600
+    }
+  }
+}

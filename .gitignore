@@ -1,0 +1,67 @@
+# Build output
+/build/
+/entry/build/
+/entry/.cxx/
+/.idea/
+/.hvigor/
+/.cxx/
+
+# ohpm modules (installed deps, not source)
+/oh_modules/
+/entry/oh_modules/
+
+# Node modules
+/node_modules/
+
+# Snapshot dumps (regenerable)
+/ui_trees/
+*.jpeg
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE caches
+.vscode/
+*.iml
+
+# Local config
+/local.properties
+/.env
+/.env.*
+/.tmp.drive*/
+/signing/
+/.signing/
+*.p12
+*.p7b
+*.jks
+*.keystore
+
+# Logs
+*.log
+# 漏网的 .txt 构建日志（*.log 规则覆盖不到）
+build_log.txt
+_build*.log
+build_*.log
+
+# 误生成的"绝对路径文件名"垃圾（运行脚本路径处理 bug 的产物）
+D*HongTu*.txt
+/--brand-css
+
+# 工具/调试产物
+/artifacts/
+/uploads/
+/entry/.test/
+/*.zip
+*.hap
+*.hsp
+*.app
+tools/_smoke_*.txt
+tools/*_smoke_done.txt
+tools/*_smoke_stdout.txt
+
+# 工具运行态
+/.superpowers/
+
+# 大型二进制/文档（按需，不应入库）
+*.pdf

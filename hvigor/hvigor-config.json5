@@ -1,0 +1,10 @@
+{
+  "modelVersion": "6.0.0",
+  "dependencies": {},
+  "properties": {
+    "hvigor.pool.maxSize": 1,
+    "ohos.arkCompile.maxSize": 1,
+    "hvigor.enableMemoryCache": false,
+    "hvigor.pool.cache.capacity": 0
+  }
+}

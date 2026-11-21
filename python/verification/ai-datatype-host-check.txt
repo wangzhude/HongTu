@@ -1,0 +1,13 @@
+[PASS] Actual JSON converter preserves explicit datatype 0 and nonzero types
+[PASS] Prompt distinguishes complete available/current/selected pairs
+[PASS] Nonzero datatype context cannot enter legacy single-layer local shortcuts
+[PASS] Disconnected demo mode explains model requirement without generating wrong-layer commands
+[PASS] Creation defaults current dtype; explicit zero retained; other layer defaults zero
+[PASS] Rect/polygon/path/text/array pass exact dtype to editing backend
+[PASS] Malformed datatype/layer rejected before any editing side effect
+[PASS] Drawing lock blocks drawing creation while same-layer pin remains writable
+[PASS] Selection by pair and point filters exact datatype, including zero
+[PASS] Selected shape edit lock uses its dtype instead of active dtype
+[PASS] Merged select and visibility actions preserve independent same-layer types
+[PASS] Warnings identify unknown pair rather than accepting any matching layer
+AI datatype source contract: 12/12 passed; platform/native/UI not covered.

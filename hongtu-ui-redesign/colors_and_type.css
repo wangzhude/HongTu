@@ -1,0 +1,95 @@
+/* HongTu UI Redesign — Apple Minimalist Style */
+/* Luxury/refined tone inspired by macOS native design language */
+
+:root {
+  /* Color System — Warm neutrals + Single brand blue */
+  --color-bg-primary: #F5F5F7;
+  --color-bg-secondary: #FFFFFF;
+  --color-bg-tertiary: #FAFAFA;
+  --color-bg-canvas: #1D1D2B;
+  --color-bg-sidebar: rgba(255, 255, 255, 0.72);
+  --color-bg-toolbar: rgba(255, 255, 255, 0.85);
+  --color-bg-overlay: rgba(255, 255, 255, 0.92);
+  --color-bg-hover: rgba(0, 0, 0, 0.03);
+  --color-bg-active: rgba(0, 122, 255, 0.08);
+  --color-bg-selected: rgba(0, 122, 255, 0.12);
+
+  --color-brand-primary: #007AFF;
+  --color-brand-hover: #0062CC;
+  --color-brand-light: #E8F0FE;
+
+  --color-text-primary: #1D1D1F;
+  --color-text-secondary: #6E6E73;
+  --color-text-tertiary: #AEAEB2;
+  --color-text-inverse: #FFFFFF;
+
+  --color-border-primary: rgba(0, 0, 0, 0.08);
+  --color-border-secondary: rgba(0, 0, 0, 0.04);
+  --color-divider: rgba(0, 0, 0, 0.06);
+
+  --color-state-success: #34C759;
+  --color-state-warning: #FF9F0A;
+  --color-state-error: #FF3B30;
+  --color-state-info: #007AFF;
+
+  /* Typography — SF Pro style */
+  --font-display: 'SF Pro Display', -apple-system, 'Helvetica Neue', 'PingFang SC', sans-serif;
+  --font-body: 'SF Pro Text', -apple-system, 'Helvetica Neue', 'PingFang SC', sans-serif;
+  --font-mono: 'SF Mono', 'Menlo', 'Consolas', monospace;
+
+  --text-xs: 0.6875rem;    /* 11px */
+  --text-sm: 0.8125rem;     /* 13px */
+  --text-base: 0.875rem;    /* 14px */
+  --text-md: 1rem;          /* 16px */
+  --text-lg: 1.125rem;      /* 18px */
+  --text-xl: 1.25rem;       /* 20px */
+
+  --leading-tight: 1.2;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.02em;
+
+  /* Spacing */
+  --space-0: 0;
+  --space-1: 0.25rem;   /* 4px */
+  --space-2: 0.5rem;    /* 8px */
+  --space-3: 0.75rem;   /* 12px */
+  --space-4: 1rem;      /* 16px */
+  --space-5: 1.25rem;   /* 20px */
+  --space-6: 1.5rem;    /* 24px */
+  --space-8: 2rem;      /* 32px */
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* Shadow — Refined, minimal alpha */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.05);
+  --shadow-float: 0 12px 36px rgba(0, 0, 0, 0.16);
+
+  /* Glass effect */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-blur: 20px;
+  --glass-border: rgba(255, 255, 255, 0.5);
+
+  /* Surface depth */
+  --surface-0: #FFFFFF;
+  --surface-1: #F5F5F7;
+  --surface-2: #E8E8ED;
+  --surface-3: #D2D2D7;
+
+  /* Layer colors — Classic IC layout palette */
+  --layer-metal1: #007AFF;
+  --layer-metal2: #5856D6;
+  --layer-poly: #FF3B30;
+  --layer-active: #34C759;
+  --layer-contact: #FF9F0A;
+  --layer-nwell: #AF52DE;
+}
