@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import math
+import re
 from pathlib import Path
 import site
 import sys
@@ -225,8 +226,13 @@ def execute(payload, workdir):
     attach_context(port_metadata, raw)
     staging.unlink()
     svg, truncated = make_preview(layout)
+    default_file_name = "python-generated.gds"
+    if len(tops) == 1 and payload.get("inputMode", "new") == "new":
+        top_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", tops[0].name.strip()).strip("._-")[:64]
+        if top_stem and top_stem.upper() not in {"TOP", "CELL", "MAIN", "LAYOUT", "UNTITLED"}:
+            default_file_name = top_stem if top_stem.lower().endswith(".gds") else f"{top_stem}.gds"
     result = {
-        "success": True, "fileName": "python-generated.gds",
+        "success": True, "fileName": default_file_name,
         "gdsBase64": base64.b64encode(raw).decode("ascii"),
         "cellCount": len(cells), "shapeCount": total, "layerCount": len(layers),
         "layerDefinitions": layer_definitions,

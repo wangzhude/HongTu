@@ -6,10 +6,11 @@ import { GdsByteWriter } from '../main/ets/services/LayoutExportService';
 import { formatZoomPercent, worldToScreenPx, screenToWorldPx } from '../main/ets/common/constants';
 import { worldViewportFromCamera } from '../main/ets/services/HierarchyExpandService';
 import { LayerGroup, UiLayer } from '../main/ets/common/types';
-import { AiService } from '../main/ets/services/AiService';
+import { AiService, parseAiModelCatalog, inferAiModelContextWindow, AiProvider } from '../main/ets/services/AiService';
 import { queryAiWorkbench } from '../main/ets/services/AiWorkbenchQuery';
 import { parseLyp, mergeLypIntoLayers, entriesFromUiLayers, formatLyp } from '../main/ets/services/LypService';
-import { splitMarkdownSegments, repairStreamingMarkdown, describeAiToolCall, matchAiSlashCommands, buildAgentCanvasHudModel } from '../main/ets/services/AiAgentPresentation';
+import { splitMarkdownSegments, repairStreamingMarkdown, describeAiToolCall, matchAiSlashCommands, buildAgentCanvasHudModel, parseAiTokenMeter, computeDraftAwareTokenMeter, splitInlineThinking,
+  splitStreamingMarkdownBlocks, formatCompactTokens, AI_SLASH_COMMANDS } from '../main/ets/services/AiAgentPresentation';
 import type { LayoutPort, LayoutCrossSection, LayoutContextRecord } from '../main/ets/models/LayoutPort';
 import type { LayoutPropRecord, NativeShape } from '../main/cpp/types/libhongtu/Index';
 import { EditService, editService, EditStructureState } from '../main/ets/services/EditService';
@@ -871,6 +872,76 @@ export default function localUnitTest(): void {
       const hudPhase2 = buildAgentCanvasHudModel(false, '1 项操作待确认', '', false, [], '', '', 0, 6000);
       expect(hudPhase2.phase).assertEqual('preview');
       expect(hudPhase2.badge.includes('第二期')).assertTrue();
+
+      const meterCfg = parseAiTokenMeter('估算 11266 / 配置窗口 32768 tokens（含输出预留 2048）', 32768, 0.8);
+      expect(meterCfg.usedTokens).assertEqual(11266);
+      expect(meterCfg.windowTokens).assertEqual(32768);
+      expect(meterCfg.percent).assertEqual(34);
+      expect(meterCfg.nearThreshold).assertFalse();
+
+      const meterAnchored = parseAiTokenMeter(
+        '估算 11266 / 配置窗口 32768 tokens（含输出预留 2048）\n服务端估算 27000 / 32768 tokens（以用量作锚）',
+        32768,
+        0.8
+      );
+      expect(meterAnchored.usedTokens).assertEqual(27000);
+      expect(meterAnchored.percent).assertEqual(82);
+      expect(meterAnchored.nearThreshold).assertTrue();
+
+      const aiCheck: AiService = new AiService();
+      const fixSpec = AI_SLASH_COMMANDS.find((item) => item.command === '/fix');
+      expect(fixSpec !== undefined).assertTrue();
+      expect(aiCheck.isAgentReadOnlyRequest(fixSpec!.prompt)).assertFalse();
+      const explainSpec = AI_SLASH_COMMANDS.find((item) => item.command === '/explain');
+      const checkSpec = AI_SLASH_COMMANDS.find((item) => item.command === '/check');
+      const locateSpec = AI_SLASH_COMMANDS.find((item) => item.command === '/locate');
+      const invSpec = AI_SLASH_COMMANDS.find((item) => item.command === '/inverter');
+      expect(aiCheck.isAgentReadOnlyRequest(explainSpec!.prompt)).assertTrue();
+      expect(aiCheck.isAgentReadOnlyRequest(checkSpec!.prompt)).assertTrue();
+      expect(aiCheck.isAgentReadOnlyRequest(locateSpec!.prompt)).assertFalse();
+      expect(aiCheck.isAgentReadOnlyRequest(invSpec!.prompt)).assertFalse();
+      expect(aiCheck.isCircuitCreationRequest(invSpec!.prompt)).assertTrue();
+
+      const splitThink = splitInlineThinking('<think>先读取 TOP 单元 Poly 图层</think>查询完毕，共 1 个矩形。', '');
+      expect(splitThink.thinking).assertEqual('先读取 TOP 单元 Poly 图层');
+      expect(splitThink.answer).assertEqual('查询完毕，共 1 个矩形。');
+      expect(splitThink.isStreamingThink).assertFalse();
+
+      const streamingThink = splitInlineThinking('<think>正在计算间距…', '');
+      expect(streamingThink.thinking).assertEqual('正在计算间距…');
+      expect(streamingThink.answer).assertEqual('');
+      expect(streamingThink.isStreamingThink).assertTrue();
+
+      const draftMeter = computeDraftAwareTokenMeter('估算 10000 / 配置窗口 32768 tokens', '向右移动矩形10000纳米', 32768, 0.8);
+      expect(draftMeter.usedTokens > 10000).assertTrue();
+      expect(formatCompactTokens(131072)).assertEqual('128K');
+      expect(formatCompactTokens(1048576)).assertEqual('1M');
+
+      const catalog = parseAiModelCatalog(
+        '{"data":[{"id":"cn:deepseek-v4.1-flash"},{"id":"claude-sonnet-4","context_length":200000}]}',
+        AiProvider.OPENAI_COMPATIBLE
+      );
+      expect(catalog.length).assertEqual(2);
+      const dsSpec = catalog.find((c) => c.id === 'cn:deepseek-v4.1-flash');
+      expect(dsSpec !== undefined).assertTrue();
+      expect(dsSpec!.supportsThinking).assertTrue();
+      expect(dsSpec!.categories.includes('推理')).assertTrue();
+      expect(inferAiModelContextWindow('cn:deepseek-v4.1-flash', 0)).assertEqual(131072);
+      const claudeSpec = catalog.find((c) => c.id === 'claude-sonnet-4');
+      expect(claudeSpec!.contextWindow).assertEqual(200000);
+      expect(claudeSpec!.windowInferred).assertFalse();
+
+      const blocksStep1 = splitStreamingMarkdownBlocks('### 版图分析\n正在检查 TOP 单元中的');
+      const blocksStep2 = splitStreamingMarkdownBlocks('### 版图分析\n正在检查 TOP 单元中的 Poly 与 Active 间距，未发现短路。');
+      expect(blocksStep1.length).assertEqual(2);
+      expect(blocksStep2.length).assertEqual(2);
+      expect(blocksStep1[1].kind).assertEqual('paragraph');
+      expect(blocksStep2[1].kind).assertEqual('paragraph');
+
+      const codeStreaming = splitStreamingMarkdownBlocks('说明如下：\n```python\ncell.shapes(l1)');
+      expect(codeStreaming.length).assertEqual(2);
+      expect(codeStreaming[1].kind).assertEqual('code');
+      expect(codeStreaming[1].language).assertEqual('python');
     });
   });
 }

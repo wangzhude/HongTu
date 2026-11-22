@@ -41,6 +41,12 @@ export interface AiToolPresentation {
   formattedResult: string;
 }
 
+export interface AiExtractedThinking {
+  thinking: string;
+  answer: string;
+  isStreamingThink: boolean;
+}
+
 export interface AiTokenMeterState {
   usedTokens: number;
   windowTokens: number;
@@ -702,7 +708,17 @@ export function parseAiTokenMeter(
 ): AiTokenMeterState {
   const safeWindow: number = Number.isFinite(contextWindowTokens) && contextWindowTokens >= 1024 ? contextWindowTokens : 32768;
   const thresholdPercent: number = Math.round(Math.min(0.95, Math.max(0.5, thresholdFraction)) * 100);
-  const ratioMatch: RegExpExecArray | null = /(\d[\d,]*)\s*\/\s*(\d[\d,]*)\s*tokens?/i.exec(usageSummary || '');
+  const rawSummary: string = usageSummary || '';
+  const lines: string[] = rawSummary.split(/\r?\n/);
+  let preferredTarget: string = rawSummary;
+  for (let i: number = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes('服务端')) {
+      preferredTarget = lines[i];
+      break;
+    }
+  }
+  const ratioPattern: RegExp = /(\d[\d,]*)\s*(?:tokens?\s*)?\/\s*(?:[^\d/\r\n]{0,24}?)(\d[\d,]*)\s*tokens?/i;
+  const ratioMatch: RegExpExecArray | null = ratioPattern.exec(preferredTarget) ?? ratioPattern.exec(rawSummary);
   if (ratioMatch !== null) {
     const used: number = Number(ratioMatch[1].replace(/,/g, ''));
     const win: number = Number(ratioMatch[2].replace(/,/g, '')) || safeWindow;
@@ -717,7 +733,7 @@ export function parseAiTokenMeter(
       badgeText: `${used.toLocaleString()} / ${win.toLocaleString()} (${pct}%)`
     };
   }
-  const singleMatch: RegExpExecArray | null = /(\d[\d,]*)\s*tokens?/i.exec(usageSummary || '');
+  const singleMatch: RegExpExecArray | null = rawSummary.includes('/') ? null : /(\d[\d,]*)\s*tokens?/i.exec(rawSummary);
   if (singleMatch !== null) {
     const used: number = Number(singleMatch[1].replace(/,/g, ''));
     const pct: number = Math.min(100, Math.max(0, Math.round((used / Math.max(1, safeWindow)) * 100)));
@@ -869,4 +885,230 @@ export function exportConversationAsMarkdown(title: string, messages: ChatMessag
     lines.push('');
   }
   return lines.join('\n');
+}
+
+export function formatCompactTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens <= 0) {
+    return '—';
+  }
+  if (tokens >= 1000000) {
+    const m: number = Math.round((tokens / 1048576) * 10) / 10;
+    return `${m}M`;
+  }
+  if (tokens === 200000) {
+    return '200K';
+  }
+  if (tokens >= 1024 && tokens % 1024 === 0) {
+    return `${Math.round(tokens / 1024)}K`;
+  }
+  if (tokens >= 1000) {
+    const k: number = Math.round((tokens / 1000) * 10) / 10;
+    return `${k}K`;
+  }
+  return `${Math.round(tokens)}`;
+}
+
+export function reasoningEffortLabel(effort: string | undefined): string {
+  if (effort === 'none') return '关闭';
+  if (effort === 'low') return '低';
+  if (effort === 'medium') return '中';
+  if (effort === 'high') return '高';
+  return '自动';
+}
+
+export function splitInlineThinking(rawText: string, explicitReasoning: string = ''): AiExtractedThinking {
+  const parts: string[] = [];
+  if (explicitReasoning.trim().length > 0) {
+    parts.push(explicitReasoning.trim());
+  }
+  let rest: string = rawText || '';
+  let streamingThink: boolean = false;
+  const closedThinkRegex: RegExp = /<think>([\s\S]*?)<\/think>/gi;
+  let match: RegExpExecArray | null = closedThinkRegex.exec(rest);
+  while (match !== null) {
+    if (match[1].trim().length > 0) {
+      parts.push(match[1].trim());
+    }
+    match = closedThinkRegex.exec(rest);
+  }
+  rest = rest.replace(/<think>[\s\S]*?<\/think>\s*/gi, '');
+  const openIdx: number = rest.toLowerCase().indexOf('<think>');
+  if (openIdx >= 0) {
+    const unclosed: string = rest.substring(openIdx + 7).trim();
+    if (unclosed.length > 0) {
+      parts.push(unclosed);
+    }
+    rest = rest.substring(0, openIdx);
+    streamingThink = true;
+  }
+  return {
+    thinking: parts.join('\n\n'),
+    answer: rest.trimStart(),
+    isStreamingThink: streamingThink
+  };
+}
+
+export function estimateDraftQuickTokens(text: string): number {
+  if (!text || text.length === 0) return 0;
+  let wide: number = 0;
+  let narrow: number = 0;
+  for (let i: number = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 255) wide++;
+    else narrow++;
+  }
+  return Math.ceil(wide * 1.5 + narrow / 3);
+}
+
+export function computeDraftAwareTokenMeter(
+  usageSummary: string,
+  draftText: string,
+  contextWindowTokens: number,
+  thresholdFraction: number
+): AiTokenMeterState {
+  const base: AiTokenMeterState = parseAiTokenMeter(usageSummary, contextWindowTokens, thresholdFraction);
+  const draftTokens: number = estimateDraftQuickTokens(draftText);
+  if (draftTokens <= 0) {
+    return base;
+  }
+  const win: number = base.windowTokens > 0 ? base.windowTokens : 32768;
+  const used: number = base.usedTokens + draftTokens;
+  const pct: number = Math.min(100, Math.max(0, Math.round((used / Math.max(1, win)) * 100)));
+  return {
+    usedTokens: used,
+    windowTokens: win,
+    percent: pct,
+    thresholdPercent: base.thresholdPercent,
+    nearThreshold: pct >= base.thresholdPercent,
+    hasNumeric: true,
+    badgeText: `${used.toLocaleString()} / ${win.toLocaleString()} (${pct}%)`
+  };
+}
+
+export interface AiStreamingBlock {
+  kind: 'code' | 'heading' | 'quote' | 'list' | 'paragraph';
+  text: string;
+  language: string;
+  level: number;
+  marker: string;
+}
+
+/**
+ * 流式输出期间使用的同步轻量块切分器：
+ * 在同一段落或同一代码块持续追加 token 时，保持块数量与 kind 不变，仅更新末尾块的 text，
+ * 避免第三方 Markdown 组件在流式帧重建 AST 导致滚动容器高度归零抖动。
+ */
+export function splitStreamingMarkdownBlocks(raw: string): AiStreamingBlock[] {
+  const normalized: string = (raw || '').replace(/\r\n/g, '\n');
+  if (normalized.trim().length === 0) {
+    return [];
+  }
+  const lines: string[] = normalized.split('\n');
+  const blocks: AiStreamingBlock[] = [];
+  let i: number = 0;
+
+  while (i < lines.length) {
+    const line: string = lines[i];
+    const trimmed: string = line.trim();
+    if (trimmed.length === 0) {
+      i++;
+      continue;
+    }
+
+    const fenceMatch: RegExpExecArray | null = /^(`{3,}|~{3,})([^`~]*)$/.exec(trimmed);
+    if (fenceMatch !== null) {
+      const markerFence: string = fenceMatch[1];
+      const lang: string = fenceMatch[2].trim();
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length) {
+        const checkTrim: string = lines[i].trim();
+        if (checkTrim.startsWith(markerFence.charAt(0).repeat(markerFence.length)) &&
+          checkTrim.replace(/[`~]/g, '').trim().length === 0) {
+          i++;
+          break;
+        }
+        codeLines.push(lines[i]);
+        i++;
+      }
+      blocks.push({
+        kind: 'code',
+        text: codeLines.join('\n'),
+        language: lang,
+        level: 0,
+        marker: ''
+      });
+      continue;
+    }
+
+    const headingMatch: RegExpExecArray | null = /^(#{1,6})\s+(.*)$/.exec(trimmed);
+    if (headingMatch !== null) {
+      blocks.push({
+        kind: 'heading',
+        text: stripInlineMarkdownDecorators(headingMatch[2]),
+        language: '',
+        level: headingMatch[1].length,
+        marker: ''
+      });
+      i++;
+      continue;
+    }
+
+    if (trimmed.startsWith('>')) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quoteLines.push(stripInlineMarkdownDecorators(lines[i].trim().replace(/^>+\s?/, '')));
+        i++;
+      }
+      blocks.push({
+        kind: 'quote',
+        text: quoteLines.join('\n'),
+        language: '',
+        level: 0,
+        marker: ''
+      });
+      continue;
+    }
+
+    const listMatch: RegExpExecArray | null = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(line);
+    if (listMatch !== null) {
+      const indentLevel: number = Math.min(4, Math.floor(listMatch[1].length / 2));
+      const bullet: string = /^\d+\./.test(listMatch[2]) ? listMatch[2] : '•';
+      blocks.push({
+        kind: 'list',
+        text: stripInlineMarkdownDecorators(listMatch[3]),
+        language: '',
+        level: indentLevel,
+        marker: bullet
+      });
+      i++;
+      continue;
+    }
+
+    const paraLines: string[] = [];
+    while (i < lines.length) {
+      const cur: string = lines[i];
+      const curTrim: string = cur.trim();
+      if (curTrim.length === 0 ||
+        /^(`{3,}|~{3,})/.test(curTrim) ||
+        /^#{1,6}\s+/.test(curTrim) ||
+        curTrim.startsWith('>') ||
+        /^(\s*)([-*+]|\d+\.)\s+/.test(cur)) {
+        break;
+      }
+      paraLines.push(stripInlineMarkdownDecorators(cur));
+      i++;
+    }
+    if (paraLines.length > 0) {
+      blocks.push({
+        kind: 'paragraph',
+        text: paraLines.join('\n'),
+        language: '',
+        level: 0,
+        marker: ''
+      });
+    } else {
+      i++;
+    }
+  }
+  return blocks;
 }

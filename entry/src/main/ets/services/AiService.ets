@@ -223,6 +223,8 @@ export interface ExportConversation {
 }
 
 /** AI 模型配置 */
+export type AiReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high';
+
 export interface AiModelConfig {
   provider: AiProvider;
   /** API 端点 URL */
@@ -242,6 +244,7 @@ export interface AiModelConfig {
   contextWindowTokens?: number;
   compressionThreshold?: number;
   autoCompress?: boolean;
+  reasoningEffort?: AiReasoningEffort;
 }
 
 /** A provider owns its endpoint and OS credential; models keep independent tuning. */
@@ -251,9 +254,30 @@ export interface AiProviderProfile {
   modelsEndpoint: string; activeModelId: string; models: AiSavedModel[];
 }
 interface AiProfileStorage { version: number; activeProfileId: string; profiles: AiProviderProfile[]; legacyCleanupPending?: boolean; }
-interface AiModelListItem { id?: string; name?: string; model?: string; }
+interface AiModelListItem {
+  id?: string;
+  name?: string;
+  model?: string;
+  display_name?: string;
+  displayName?: string;
+  context_length?: number;
+  max_context_length?: number;
+  inputTokenLimit?: number;
+  supported_parameters?: string[];
+}
 interface AiModelListBody { data?: AiModelListItem[]; models?: AiModelListItem[]; }
-export interface AiModelDiscovery { modelIds: string[]; }
+export interface AiDiscoveredModelSpec {
+  id: string;
+  displayName: string;
+  contextWindow: number;
+  categories: string[];
+  supportsThinking: boolean;
+  windowInferred: boolean;
+}
+export interface AiModelDiscovery {
+  modelIds: string[];
+  catalog?: AiDiscoveredModelSpec[];
+}
 
 /** Match the Agent's OpenAI-compatible base semantics without changing saved URLs. */
 export function aiChatEndpoint(config: AiModelConfig): string {
@@ -309,6 +333,72 @@ export function parseAiModelList(raw: string, provider: AiProvider): string[] {
     if (!models.includes(id)) models.push(id);
   }
   return models.sort();
+}
+
+export function inferAiModelContextWindow(modelId: string, suppliedWindow: number = 0): number {
+  if (Number.isInteger(suppliedWindow) && suppliedWindow >= 8192 && suppliedWindow <= 2097152) {
+    return suppliedWindow;
+  }
+  const lower: string = modelId.toLowerCase();
+  if (/gemini-2\.5|gemini-2\.0|gemini-1\.5|1m/.test(lower)) return 1048576;
+  if (/256k|qwen3-coder|kimi-k2/.test(lower)) return 262144;
+  if (/claude-3|claude-sonnet|claude-opus|claude-haiku|200k/.test(lower)) return 200000;
+  if (/deepseek-(?:v3|v4|chat|reasoner|r1)|gpt-4o|gpt-4\.1|gpt-5|(?:^|[-/:])o[134](?:[-.]|$)|qwen|moonshot-v1-128k|glm-4|doubao|128k/.test(lower)) {
+    return 131072;
+  }
+  if (/64k|deepseek-coder|qwq/.test(lower)) return 65536;
+  return 32768;
+}
+
+export function parseAiModelCatalog(raw: string, provider: AiProvider): AiDiscoveredModelSpec[] {
+  const ids: string[] = parseAiModelList(raw, provider);
+  const body = JSON.parse(raw) as AiModelListBody;
+  const entries: AiModelListItem[] = (provider === AiProvider.OLLAMA_LOCAL ? body.models : body.data) ?? [];
+  const byId: Map<string, AiModelListItem> = new Map<string, AiModelListItem>();
+  for (let i = 0; i < entries.length; i++) {
+    const entry: AiModelListItem = entries[i];
+    const entryId: string | undefined = provider === AiProvider.OLLAMA_LOCAL ? (entry.name ?? entry.model) : entry.id;
+    if (typeof entryId === 'string' && !byId.has(entryId)) {
+      byId.set(entryId, entry);
+    }
+  }
+  const catalog: AiDiscoveredModelSpec[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const id: string = ids[i];
+    const row: AiModelListItem | undefined = byId.get(id);
+    const lower: string = id.toLowerCase();
+    const rawWin: number = row?.context_length ?? row?.max_context_length ?? row?.inputTokenLimit ?? 0;
+    const explicitValid: boolean = Number.isInteger(rawWin) && rawWin >= 8192 && rawWin <= 2097152;
+    const contextWindow: number = inferAiModelContextWindow(id, rawWin);
+    const categories: string[] = [];
+    const nonChat: boolean = /embed|bge-|rerank|tts|speech|whisper|asr|flux|stable-diffusion|dall-e|seedream|kolors/.test(lower);
+    if (!nonChat) {
+      categories.push('文本');
+    }
+    const paramReasoning: boolean = Array.isArray(row?.supported_parameters) &&
+      row!.supported_parameters!.some((p: string): boolean => p === 'reasoning' || p === 'reasoning_effort');
+    const supportsThinking: boolean = paramReasoning ||
+      /deepseek|reason|thinking|qwq|-r1|(?:^|[-/:])o[134](?:[-.]|$)|gpt-5|claude-(?:3-7|sonnet-4|opus-4)|gemini-2\.5|glm-z1|glm-4\.5/.test(lower);
+    if (supportsThinking) {
+      categories.push('推理');
+    }
+    if (/vision|[-/]vl(?:-|$)|gpt-4o|gpt-4\.1|gemini|claude/.test(lower)) {
+      categories.push('视觉');
+    }
+    if (categories.length === 0) {
+      categories.push('其他');
+    }
+    const displayName: string = (row?.display_name ?? row?.displayName ?? id).substring(0, 160);
+    catalog.push({
+      id,
+      displayName,
+      contextWindow,
+      categories,
+      supportsThinking,
+      windowInferred: !explicitValid
+    });
+  }
+  return catalog;
 }
 
 /** 聊天消息角色 */
@@ -425,71 +515,126 @@ export function createDefaultConfig(): AiModelConfig {
     apiKey: '',
     modelName: 'hongtu-demo',
     temperature: 0.3,
-    maxTokens: 2048,
-    timeoutMs: 30000,
+    maxTokens: 4096,
+    timeoutMs: 120000,
     enabled: true,
-    contextWindowTokens: 32768,
+    contextWindowTokens: 65536,
     compressionThreshold: 0.8,
     autoCompress: false,
+    reasoningEffort: 'auto',
   };
 }
 
-/** 预设模型提供商 */
+/** 预设模型提供商（对齐 DSH-Harmony 主流服务目录） */
 export const PRESET_PROVIDERS: PresetProvider[] = [
   {
-    name: 'WorkBuddy 中转 · DeepSeek Flash',
+    name: 'WorkBuddy 本地/中转',
     config: {
       provider: AiProvider.OPENAI_COMPATIBLE,
-      endpoint: 'http://127.0.0.1:7863/v1/chat/completions',
-      modelName: 'cn:deepseek-v4-flash',
+      endpoint: 'http://127.0.0.1:7863/v1',
+      modelName: 'cn:deepseek-v4.1-flash',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
     },
   },
   {
-    name: 'OpenAI GPT',
+    name: 'DeepSeek 官方',
     config: {
       provider: AiProvider.OPENAI_COMPATIBLE,
-      endpoint: 'https://api.openai.com/v1/chat/completions',
-      modelName: 'gpt-4o-mini',
-    },
-  },
-  {
-    name: 'DeepSeek',
-    config: {
-      provider: AiProvider.OPENAI_COMPATIBLE,
-      endpoint: 'https://api.deepseek.com/v1/chat/completions',
+      endpoint: 'https://api.deepseek.com/v1',
       modelName: 'deepseek-chat',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
     },
   },
   {
-    name: 'Moonshot (Kimi)',
+    name: '硅基流动 SiliconFlow',
     config: {
       provider: AiProvider.OPENAI_COMPATIBLE,
-      endpoint: 'https://api.moonshot.cn/v1/chat/completions',
-      modelName: 'moonshot-v1-8k',
+      endpoint: 'https://api.siliconflow.cn/v1',
+      modelName: 'deepseek-ai/DeepSeek-V3',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
     },
   },
   {
-    name: '通义千问',
+    name: '阿里云百炼 / 通义千问',
     config: {
       provider: AiProvider.OPENAI_COMPATIBLE,
-      endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
-      modelName: 'qwen-turbo',
+      endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      modelName: 'qwen-plus',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
     },
   },
   {
-    name: 'Ollama (本地)',
+    name: '火山方舟 / 豆包',
+    config: {
+      provider: AiProvider.OPENAI_COMPATIBLE,
+      endpoint: 'https://ark.cn-beijing.volces.com/api/v3',
+      modelName: 'deepseek-v3-250324',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
+    },
+  },
+  {
+    name: 'OpenRouter',
+    config: {
+      provider: AiProvider.OPENAI_COMPATIBLE,
+      endpoint: 'https://openrouter.ai/api/v1',
+      modelName: 'deepseek/deepseek-chat',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
+    },
+  },
+  {
+    name: '月之暗面 / Kimi',
+    config: {
+      provider: AiProvider.OPENAI_COMPATIBLE,
+      endpoint: 'https://api.moonshot.cn/v1',
+      modelName: 'kimi-k2-0711-preview',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
+    },
+  },
+  {
+    name: '智谱 / GLM',
+    config: {
+      provider: AiProvider.OPENAI_COMPATIBLE,
+      endpoint: 'https://open.bigmodel.cn/api/paas/v4',
+      modelName: 'glm-4.5',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
+    },
+  },
+  {
+    name: 'OpenAI / GPT',
+    config: {
+      provider: AiProvider.OPENAI_COMPATIBLE,
+      endpoint: 'https://api.openai.com/v1',
+      modelName: 'gpt-4.1',
+      contextWindowTokens: 131072,
+      maxTokens: 8192,
+    },
+  },
+  {
+    name: 'Ollama 本地服务',
     config: {
       provider: AiProvider.OLLAMA_LOCAL,
-      endpoint: 'http://localhost:11434/v1/chat/completions',
-      modelName: 'qwen2.5:7b',
+      endpoint: 'http://127.0.0.1:11434/v1',
+      modelName: 'qwen3:8b',
+      contextWindowTokens: 32768,
+      maxTokens: 4096,
     },
   },
   {
-    name: '演示模式（无需 API）',
+    name: '本地演示（无需联网）',
     config: {
       provider: AiProvider.DEMO_MODE,
       endpoint: '',
       modelName: 'hongtu-demo',
+      contextWindowTokens: 32768,
+      maxTokens: 2048,
     },
   },
 ];
@@ -666,6 +811,10 @@ export class AiService {
       contextWindowTokens: override.contextWindowTokens ?? base.contextWindowTokens ?? 32768,
       compressionThreshold: override.compressionThreshold ?? base.compressionThreshold ?? 0.8,
       autoCompress: override.autoCompress ?? base.autoCompress ?? false,
+      reasoningEffort: (override.reasoningEffort !== undefined &&
+        ['auto', 'none', 'low', 'medium', 'high'].includes(override.reasoningEffort))
+        ? override.reasoningEffort
+        : (base.reasoningEffort ?? 'auto'),
     };
     const contextWindow: number = result.contextWindowTokens ?? 32768;
     const threshold: number = result.compressionThreshold ?? 0.8;
@@ -846,11 +995,11 @@ export class AiService {
     return new Promise<AiModelDiscovery>((resolve, reject) => {
       let done: boolean = false;
       let timer: number = -1;
-      const finish = (error: string, ids: string[] = []): void => {
+      const finish = (error: string, ids: string[] = [], catalog: AiDiscoveredModelSpec[] = []): void => {
         if (done) return; done = true; clearTimeout(timer); this.discoveryCancel = null;
         try { request.destroy(); } catch (_) {}
         if (error.length > 0) reject(new Error(error)); else {
-          const discovery: AiModelDiscovery = { modelIds: ids }; resolve(discovery);
+          const discovery: AiModelDiscovery = { modelIds: ids, catalog }; resolve(discovery);
         }
       };
       this.discoveryCancel = (): void => finish('模型列表获取已取消');
@@ -872,8 +1021,9 @@ export class AiService {
           }
           try {
             if (typeof response.result !== 'string') throw new Error('模型列表响应格式无效');
-            const ids: string[] = parseAiModelList(response.result, config.provider);
-            finish('', ids);
+            const catalog: AiDiscoveredModelSpec[] = parseAiModelCatalog(response.result, config.provider);
+            const ids: string[] = catalog.map((item: AiDiscoveredModelSpec): string => item.id);
+            finish('', ids, catalog);
           } catch (error) { finish(error instanceof Error ? error.message : '模型列表解析失败'); }
         }).catch((): void => finish('模型列表连接失败，请检查当前网络与供应商地址，或手动填写模型 ID'));
       } catch (_) { finish('模型列表请求无法启动'); }
@@ -951,6 +1101,146 @@ export class AiService {
   switchConversation(id: string): boolean { return !this.isLoading && this.conversations.switchTo(id); }
   renameConversation(id: string, title: string): boolean { return this.conversations.rename(id, title); }
   deleteConversation(id: string): boolean { return !this.isLoading && this.conversations.delete(id); }
+  clearCurrentConversation(): boolean {
+    if (this.isLoading) return false;
+    this.conversations.clear();
+    return true;
+  }
+
+  async setReasoningEffort(effort: AiReasoningEffort): Promise<void> {
+    await this.ready;
+    this.beginConfigMutation();
+    try {
+      const next: AiProviderProfile[] = this.getProviderProfiles();
+      const profile = next.find((item: AiProviderProfile): boolean => item.id === this.activeProfileId);
+      if (profile === undefined) throw new Error('当前供应商未就绪');
+      const model = profile.models.find((item: AiSavedModel): boolean => item.id === profile.activeModelId);
+      if (model === undefined) throw new Error('当前模型未就绪');
+      model.config.reasoningEffort = effort;
+      this.persistProfiles(next, profile.id);
+      this.profiles = next;
+      this.config.reasoningEffort = effort;
+    } finally {
+      this.configMutationBusy = false;
+    }
+  }
+
+  async updateActiveContextWindowAndPolicy(
+    contextWindowTokens: number,
+    compressionThreshold: number,
+    autoCompress: boolean
+  ): Promise<void> {
+    await this.ready;
+    this.beginConfigMutation();
+    try {
+      const next: AiProviderProfile[] = this.getProviderProfiles();
+      const profile = next.find((item: AiProviderProfile): boolean => item.id === this.activeProfileId);
+      if (profile === undefined) throw new Error('当前供应商未就绪');
+      const model = profile.models.find((item: AiSavedModel): boolean => item.id === profile.activeModelId);
+      if (model === undefined) throw new Error('当前模型未就绪');
+      const safeMax: number = Math.min(model.config.maxTokens, Math.max(512, contextWindowTokens - 6500));
+      model.config.contextWindowTokens = contextWindowTokens;
+      model.config.compressionThreshold = compressionThreshold;
+      model.config.autoCompress = autoCompress;
+      model.config.maxTokens = safeMax;
+      this.persistProfiles(next, profile.id);
+      this.profiles = next;
+      this.config.contextWindowTokens = contextWindowTokens;
+      this.config.compressionThreshold = compressionThreshold;
+      this.config.autoCompress = autoCompress;
+      this.config.maxTokens = safeMax;
+    } finally {
+      this.configMutationBusy = false;
+    }
+  }
+
+  async addModelToProvider(
+    profileId: string,
+    modelName: string,
+    contextWindowTokens?: number,
+    activate: boolean = true
+  ): Promise<string> {
+    await this.ready;
+    this.beginConfigMutation();
+    try {
+      const cleanName: string = modelName.trim();
+      if (cleanName.length === 0 || cleanName.length > 200) throw new Error('模型名称无效');
+      const next: AiProviderProfile[] = this.getProviderProfiles();
+      const profile = next.find((item: AiProviderProfile): boolean => item.id === profileId);
+      if (profile === undefined) throw new Error('请先保存当前新增供应商，再向其添加多个模型');
+      const existing = profile.models.find((item: AiSavedModel): boolean => item.config.modelName === cleanName);
+      const win: number = inferAiModelContextWindow(cleanName, contextWindowTokens ?? 0);
+      let targetModel: AiSavedModel;
+      if (existing !== undefined) {
+        if (contextWindowTokens !== undefined && contextWindowTokens >= 8192) {
+          existing.config.contextWindowTokens = win;
+          existing.config.maxTokens = Math.min(existing.config.maxTokens, Math.max(512, win - 6500));
+        }
+        targetModel = existing;
+      } else {
+        if (profile.models.length >= 256) throw new Error('单个供应商最多保存 256 个模型');
+        const template: AiModelConfig = this.profileConfig(profile, profile.activeModelId);
+        template.modelName = cleanName;
+        template.contextWindowTokens = win;
+        template.maxTokens = Math.min(Math.max(4096, template.maxTokens), Math.max(512, win - 6500));
+        template.apiKey = '';
+        targetModel = { id: `${this.newId()}-model`, config: template };
+        profile.models.push(targetModel);
+      }
+      if (activate) {
+        profile.activeModelId = targetModel.id;
+      }
+      const activeProfileId: string = activate ? profile.id : this.activeProfileId;
+      this.persistProfiles(next, activeProfileId);
+      this.profiles = next;
+      if (activate) {
+        this.activeProfileId = profile.id;
+        const liveCfg: AiModelConfig = this.profileConfig(profile, targetModel.id);
+        liveCfg.apiKey = await credentialStore.get(this.profileAlias(profile.id));
+        this.config = liveCfg;
+        this.registerSecretForRedaction(liveCfg.apiKey);
+        this.profileCredentialReady = true;
+      }
+      return targetModel.id;
+    } finally {
+      this.configMutationBusy = false;
+    }
+  }
+
+  async addModelsBatchToProvider(profileId: string, specs: AiDiscoveredModelSpec[]): Promise<number> {
+    await this.ready;
+    this.beginConfigMutation();
+    try {
+      const next: AiProviderProfile[] = this.getProviderProfiles();
+      const profile = next.find((item: AiProviderProfile): boolean => item.id === profileId);
+      if (profile === undefined) throw new Error('请先保存当前新增供应商，再批量添加模型');
+      let addedCount: number = 0;
+      const baseCfg: AiModelConfig = this.profileConfig(profile, profile.activeModelId);
+      for (let i = 0; i < specs.length; i++) {
+        if (profile.models.length >= 256) break;
+        const spec: AiDiscoveredModelSpec = specs[i];
+        const cleanName: string = spec.id.trim();
+        if (cleanName.length === 0 || profile.models.some((m: AiSavedModel): boolean => m.config.modelName === cleanName)) {
+          continue;
+        }
+        const win: number = inferAiModelContextWindow(cleanName, spec.contextWindow);
+        const cfg: AiModelConfig = this.mergeConfig(baseCfg, baseCfg);
+        cfg.modelName = cleanName;
+        cfg.contextWindowTokens = win;
+        cfg.maxTokens = Math.min(Math.max(4096, cfg.maxTokens), Math.max(512, win - 6500));
+        cfg.apiKey = '';
+        profile.models.push({ id: `${this.newId()}-${i}-m`, config: cfg });
+        addedCount++;
+      }
+      if (addedCount > 0) {
+        this.persistProfiles(next, this.activeProfileId);
+        this.profiles = next;
+      }
+      return addedCount;
+    } finally {
+      this.configMutationBusy = false;
+    }
+  }
 
   /** Records the completed Python layout request; the caller owns execution and cancellation. */
   recordPythonLayoutResult(request: string, message: string, success: boolean, conversationId: string = this.getActiveConversationId()): void {
@@ -979,7 +1269,7 @@ export class AiService {
   }
 
   private stripConfirmationPreviewQualifiers(text: string): string {
-    if (!/待确认|预览|待审阅|审阅|确认方案|待应用|\b(?:preview|confirm|pending|review)\b/i.test(text)) {
+    if (!/待确认|预览|待审阅|审阅|确认方案|待应用|修复方案|\b(?:preview|confirm|pending|review)\b/i.test(text)) {
       return text;
     }
     let cleaned: string = text.replace(
@@ -988,6 +1278,14 @@ export class AiService {
     );
     cleaned = cleaned.replace(
       /\b(?:do\s+not|don['’]t|without|never)\s+(?:directly|immediately|auto(?:matically)?)\s+(?:execute|apply|commit)\b/gi,
+      ''
+    );
+    cleaned = cleaned.replace(
+      /(?:资料|信息|证据|规则|条件|上下文|参数)(?:不足|缺失|不明|不够|不全)[^，。；\r\n,.]*?(?:先|如实)?(?:说明|告知|提示)/gi,
+      ''
+    );
+    cleaned = cleaned.replace(
+      /(?:若|如果|如)(?:无法|不能|不足)[^，。；\r\n,.]*?(?:先|如实)?(?:说明|告知|提示)/gi,
       ''
     );
     return cleaned;
@@ -1032,7 +1330,7 @@ export class AiService {
     // Ambiguous non-circuit tasks may propose a user-confirmed edit, while a
     // bare circuit topic still cannot become a drawing request by model choice.
     return this.hasCircuitTopic(prompt) && !this.isCircuitCreationRequest(prompt) &&
-      !/移动|[上下左右]移|平移|删除|移除|去掉|旋转|镜像|对齐|缩放|适配|居中|放大|缩小|隐藏|显示|打开|关闭|选中|选择|切换|修改|更新|复制|粘贴|合并|分离|调整|运行|执行|\b(?:move|delete|remove|rotate|mirror|align|scale|zoom|fit|hide|show|open|close|select|change|update|copy|paste|merge|split|run|execute)\b/i.test(prompt);
+      !/移动|[上下左右]移|平移|删除|移除|去掉|旋转|镜像|对齐|缩放|适配|居中|放大|缩小|隐藏|显示|打开|关闭|选中|选择|切换|修改|修复|修补|更新|复制|粘贴|合并|分离|调整|运行|执行|\b(?:move|delete|remove|rotate|mirror|align|scale|zoom|fit|hide|show|open|close|select|change|fix|update|copy|paste|merge|split|run|execute)\b/i.test(prompt);
   }
 
   agentValidationProfile(prompt: string): 'generic_inverter' | undefined {

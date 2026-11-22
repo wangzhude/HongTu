@@ -14,6 +14,9 @@ import {
   AiModelConfig,
   AiProviderProfile,
   AiSavedModel,
+  AiDiscoveredModelSpec,
+  AiReasoningEffort,
+  inferAiModelContextWindow,
   createDefaultConfig,
   AiProvider,
   PRESET_PROVIDERS,
@@ -37,15 +40,20 @@ import { WorkbenchIcon } from './WorkbenchIcon';
 import { PanelHeading } from './PanelHeading';
 import { AiMarkdownBody } from './AiMarkdownBody';
 import {
+  AiExtractedThinking,
   AiSlashCommandSpec,
   AiTokenMeterState,
   AiToolField,
   AiToolPresentation,
+  computeDraftAwareTokenMeter,
   describeAiToolCall,
   exportConversationAsMarkdown,
+  formatCompactTokens,
   formatRelativeConversationTime,
   matchAiSlashCommands,
-  parseAiTokenMeter
+  parseAiTokenMeter,
+  reasoningEffortLabel,
+  splitInlineThinking
 } from '../../services/AiAgentPresentation';
 import { pythonBridgeService } from '../../services/PythonBridgeService';
 import { aiHarnessService } from '../../services/AiHarnessService';
@@ -91,6 +99,7 @@ export struct AiAssistantPanel {
   @Prop compressionSummary: string = '';
   @Prop contextDetail: string = '';
   @Prop checkpointSummary: string = '';
+  @Prop hasRecoverableArtifact: boolean = false;
   @Prop reviewGroups: AiReviewGroup[] = [];
   toggleReviewGroupAction: (id: string, accepted: boolean) => void = () => {};
   focusReviewAction: () => void = () => {};
@@ -109,6 +118,7 @@ export struct AiAssistantPanel {
   switchConversationAction: (id: string) => void = () => {};
   renameConversationAction: (id: string, title: string) => void = () => {};
   deleteConversationAction: (id: string) => void = () => {};
+  clearConversationAction: () => void = () => {};
   setContextOptionsAction: (options: AiContextOptions) => void = () => {};
   compressConversationAction: () => void = () => {};
   clearCompressionAction: () => void = () => {};
@@ -140,9 +150,9 @@ export struct AiAssistantPanel {
   /** AI-11: 错误信息 */
   @Prop errorMessage: string = '';
   /** AI-15: 流式增量文本（onChunk 累加，空字符串表示无流式输出） */
-  @Prop @Watch('onConversationChange') streamingText: string = '';
-  @Prop @Watch('onConversationChange') reasoningText: string = '';
-  @Prop @Watch('onConversationChange') toolCalls: AiChatToolState[] = [];
+  @Prop streamingText: string = '';
+  @Prop reasoningText: string = '';
+  @Prop toolCalls: AiChatToolState[] = [];
   @State expandedReasoning: string[] = [];
   @State expandedTools: string[] = [];
   @State expandedTraces: string[] = [];
@@ -159,6 +169,7 @@ export struct AiAssistantPanel {
   @State renamingConversationId: string = '';
   @State conversationTitleText: string = '';
   @State managementStatus: string = '';
+  @State managementStatusKind: 'info' | 'error' = 'error';
   // OVERLAY-2: 初始值设为 0 避免 PRESET_PROVIDERS 长度不足时越界，aboutToAppear 会修正为实际配置
   @State selectedProviderIndex: number = 0;
   @State providerValue: AiProvider = AiProvider.DEMO_MODE;
@@ -179,6 +190,20 @@ export struct AiAssistantPanel {
   @State profileNameText: string = '';
   @State modelsEndpointText: string = '';
   @State discoveredModels: string[] = [];
+  @State discoveredCatalog: AiDiscoveredModelSpec[] = [];
+  @State catalogSearchText: string = '';
+  @State catalogCategory: string = '全部';
+  @State manualNewModelText: string = '';
+  @State pendingDraftModels: string[] = [];
+  @State showAdvancedModelsUrl: boolean = false;
+  @State showPresetTemplates: boolean = false;
+  @State showQuickModelPicker: boolean = false;
+  @State quickModelSearch: string = '';
+  @State reasoningEffortValue: AiReasoningEffort = 'auto';
+  @State autoExpandThinking: boolean = true;
+  @State collapsedThinkingKeys: string[] = [];
+  @State showCompressedSummaryText: boolean = false;
+  @State contextCustomWindowText: string = '';
   @State discoveryBusy: boolean = false;
   @State agentConnectionText: string = 'Agent 连接尚未检查';
   @State connectionBusy: boolean = false;
@@ -189,12 +214,20 @@ export struct AiAssistantPanel {
   private credentialReloadTicket: number = 0;
   private diagnosticRunning: boolean = false;
   private conversationScroller: Scroller = new Scroller();
+  private liveThinkingScroller: Scroller = new Scroller();
+  private chatViewportHeight: number = 0;
+  private chatContentHeight: number = 0;
+  private liveThinkingViewportHeight: number = 0;
+  private liveThinkingContentHeight: number = 0;
   @State followsLatest: boolean = true;
   private userScrollPending: boolean = false;
   private scrollRequestTimer: number = -1;
+  private composerShiftHeld: boolean = false;
 
   aboutToAppear(): void {
     this.panelDisposed = false;
+    PersistentStorage.persistProp('hongtu_ai_auto_expand_thinking', true);
+    this.autoExpandThinking = AppStorage.get<boolean>('hongtu_ai_auto_expand_thinking') ?? true;
     aiService.ensureReady().then(() => {
       if (this.panelDisposed) return;
       this.loadConfigFields();
@@ -238,7 +271,7 @@ export struct AiAssistantPanel {
 
   onLoadingChange(): void {
     if (!this.isLoading) return;
-    this.expandedReasoning = this.expandedReasoning.filter((key: string): boolean => key !== '0:reasoning');
+    this.collapsedThinkingKeys = this.collapsedThinkingKeys.filter((key: string): boolean => key !== 'live:thinking');
     this.expandedTools = this.expandedTools.filter((key: string): boolean => !key.startsWith('0:'));
   }
 
@@ -250,19 +283,32 @@ export struct AiAssistantPanel {
     this.scrollConversationToLatest();
   }
 
+  private pinConversationToBottomInstant(): void {
+    if (this.panelDisposed || !this.followsLatest || this.showConversations || this.showContext || this.showSettings) {
+      return;
+    }
+    try {
+      if (this.chatContentHeight > 0 && this.chatViewportHeight > 0) {
+        const targetY: number = Math.max(0, this.chatContentHeight - this.chatViewportHeight);
+        this.conversationScroller.scrollTo({ xOffset: 0, yOffset: targetY, animation: false });
+      } else {
+        this.conversationScroller.scrollEdge(Edge.Bottom);
+      }
+    } catch (_) {}
+  }
+
   private scrollConversationToLatest(): void {
     if (!this.followsLatest) {
       return;
     }
+    this.pinConversationToBottomInstant();
     if (this.scrollRequestTimer >= 0) {
       clearTimeout(this.scrollRequestTimer);
     }
     this.scrollRequestTimer = setTimeout(() => {
       this.scrollRequestTimer = -1;
-      if (this.followsLatest) {
-        this.conversationScroller.scrollEdge(Edge.Bottom);
-      }
-    }, 0);
+      this.pinConversationToBottomInstant();
+    }, 16);
   }
 
   private toggleDesktopSettings(): void {
@@ -339,8 +385,12 @@ export struct AiAssistantPanel {
     }
   }
 
-  private loadConfigFields(): void {
-    this.discoveryTicket++;
+  private loadConfigFields(preserveCatalog: boolean = false): void {
+    if (!preserveCatalog) {
+      this.discoveryTicket++;
+      this.discoveredModels = [];
+      this.discoveredCatalog = [];
+    }
     this.providerProfiles = aiService.getProviderProfiles();
     this.selectedProfileId = aiService.getActiveProfileId();
     this.credentialReady = aiService.isProviderCredentialReady(this.selectedProfileId);
@@ -348,7 +398,8 @@ export struct AiAssistantPanel {
     this.selectedModelId = profile?.activeModelId ?? '';
     this.profileNameText = profile?.name ?? '';
     this.modelsEndpointText = profile?.modelsEndpoint ?? '';
-    this.discoveredModels = [];
+    this.showAdvancedModelsUrl = this.modelsEndpointText.trim().length > 0;
+    this.pendingDraftModels = [];
     const config: AiModelConfig = aiService.getConfig();
     this.fillConfigFields(config);
   }
@@ -362,8 +413,10 @@ export struct AiAssistantPanel {
     this.maxTokensText = String(config.maxTokens);
     this.timeoutSecondsText = String(config.timeoutMs / 1000);
     this.contextWindowText = String(config.contextWindowTokens ?? 32768);
-    this.compressionThresholdText = String((config.compressionThreshold ?? 0.8) * 100);
+    this.contextCustomWindowText = String(config.contextWindowTokens ?? 32768);
+    this.compressionThresholdText = String(Math.round((config.compressionThreshold ?? 0.8) * 100));
     this.autoCompressValue = config.autoCompress ?? false;
+    this.reasoningEffortValue = config.reasoningEffort ?? 'auto';
     this.configEnabled = config.enabled;
     this.selectedProviderIndex = this.indexForProvider(config);
   }
@@ -396,8 +449,10 @@ export struct AiAssistantPanel {
     if (this.isLoading || this.configBusy) return;
     this.discoveryTicket++;
     this.selectedProfileId = ''; this.selectedModelId = ''; this.profileNameText = '';
-    this.modelsEndpointText = ''; this.discoveredModels = [];
-    this.testStatusText = '新增供应商草稿：先填写名称、服务地址与 API Key，再获取模型；保存配置后启用';
+    this.modelsEndpointText = ''; this.discoveredModels = []; this.discoveredCatalog = [];
+    this.pendingDraftModels = [];
+    this.showPresetTemplates = true;
+    this.testStatusText = '点选上方预设服务商或填写地址与密钥，随后可获取并添加模型';
     const draft: AiModelConfig = createDefaultConfig();
     draft.provider = AiProvider.OPENAI_COMPATIBLE;
     draft.modelName = '';
@@ -407,13 +462,13 @@ export struct AiAssistantPanel {
     if (this.isLoading || this.configBusy) return;
     this.selectedModelId = ''; this.modelNameText = ''; this.testStatusText = '填写新模型 ID 后保存，现有模型保留';
   }
-  private deleteProviderOrModel(modelOnly: boolean): void {
+  private deleteProviderOrModel(modelOnly: boolean, explicitModelId: string = ''): void {
     if (this.isLoading || this.configBusy || this.selectedProfileId.length === 0) return;
     const profileId: string = this.selectedProfileId;
-    const modelId: string = modelOnly ? this.selectedModelId : '';
+    const modelId: string = modelOnly ? (explicitModelId.length > 0 ? explicitModelId : this.selectedModelId) : '';
     if (modelOnly && modelId.length === 0) return;
-    AlertDialog.show({ title: modelOnly ? '删除模型配置' : '删除供应商',
-      message: modelOnly ? '删除当前保存的模型参数？会话记录保留。' : '删除该供应商及其系统凭据？会话记录保留。',
+    AlertDialog.show({ title: modelOnly ? '移除该模型' : '删除供应商',
+      message: modelOnly ? '从当前供应商移除该模型？会话历史不受影响。' : '删除该供应商及其系统凭据？会话历史不受影响。',
       primaryButton: { value: '取消', action: () => {} },
       secondaryButton: { value: '删除', action: () => { this.removeProviderOrModel(profileId, modelId); } } });
   }
@@ -422,25 +477,35 @@ export struct AiAssistantPanel {
     this.configBusy = true;
     try {
       await aiService.deleteProviderModel(profileId, modelId);
-      if (!this.panelDisposed) { this.loadConfigFields(); this.configChangedAction(); this.testStatusText = '已删除'; }
+      if (!this.panelDisposed) { this.loadConfigFields(modelId.length > 0); this.configChangedAction(); this.testStatusText = '已移除'; }
     } catch (error) { if (!this.panelDisposed) this.testStatusText = error instanceof Error ? error.message : '删除失败'; }
     finally { this.configBusy = false; }
   }
   private async fetchModels(): Promise<void> {
     if (this.isLoading || this.configBusy) return;
-    this.configBusy = true; this.discoveryBusy = true; this.discoveredModels = [];
+    this.configBusy = true; this.discoveryBusy = true; this.discoveredModels = []; this.discoveredCatalog = [];
+    this.catalogSearchText = ''; this.catalogCategory = '全部';
     const ticket: number = ++this.discoveryTicket;
     const fingerprint: string = this.modelDiscoveryFingerprint();
-    this.testStatusText = '正在获取该供应商的真实模型列表…';
+    this.testStatusText = '正在请求远端模型目录…';
     try {
       const result = await aiService.discoverModels(this.modelDiscoveryConfigFromFields(), this.modelsEndpointText);
       if (!this.panelDisposed && ticket === this.discoveryTicket && fingerprint === this.modelDiscoveryFingerprint()) {
         this.discoveredModels = result.modelIds;
-        this.testStatusText = result.modelIds.length > 0 ? `已获取 ${result.modelIds.length} 个模型，选择后保存配置` :
-          '供应商返回空模型列表，可手动填写模型 ID';
+        this.discoveredCatalog = result.catalog ?? result.modelIds.map((id: string): AiDiscoveredModelSpec => ({
+          id,
+          displayName: id,
+          contextWindow: inferAiModelContextWindow(id, 0),
+          categories: ['文本'],
+          supportsThinking: false,
+          windowInferred: true
+        }));
+        this.testStatusText = result.modelIds.length > 0
+          ? `已获取 ${result.modelIds.length} 个远端模型，可搜索并点击「+ 添加」加入当前供应商`
+          : '服务返回空模型目录，请在上方输入框手动添加模型 ID';
       }
-      else if (!this.panelDisposed && ticket === this.discoveryTicket) this.testStatusText = '连接配置已改变，旧模型列表已忽略，请重新获取';
-    } catch (error) { if (!this.panelDisposed && ticket === this.discoveryTicket) this.testStatusText = error instanceof Error ? error.message : '模型列表获取失败'; }
+      else if (!this.panelDisposed && ticket === this.discoveryTicket) this.testStatusText = '连接字段已变动，请重新获取模型目录';
+    } catch (error) { if (!this.panelDisposed && ticket === this.discoveryTicket) this.testStatusText = error instanceof Error ? error.message : '模型目录获取失败'; }
     finally { if (ticket === this.discoveryTicket) { this.configBusy = false; this.discoveryBusy = false; } }
   }
   private modelDiscoveryFingerprint(): string {
@@ -510,7 +575,12 @@ export struct AiAssistantPanel {
   private fillArrayTemplate(): void {
     const rows: number = Number(this.templateRows), columns: number = Number(this.templateColumns), pitch: number = Number(this.templatePitch);
     if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1 || rows > 1000 || columns > 1000 || rows * columns > 10000 ||
-      !Number.isFinite(pitch) || pitch <= 0 || pitch > 1e9) { this.managementStatus = '行列须为正整数、总数不超过10000，间距须为有效正数（nm）'; return; }
+      !Number.isFinite(pitch) || pitch <= 0 || pitch > 1e9) {
+      this.managementStatusKind = 'error';
+      this.managementStatus = '行列须为正整数、总数不超过10000，间距须为有效正数（nm）';
+      return;
+    }
+    this.managementStatus = '';
     this.inputText = `将当前选区复制为 ${rows} 行 × ${columns} 列阵列，X/Y间距均为 ${pitch} nm。先核对当前Cell、图层与选区，提出预览方案，保留原图并作为一次可撤销操作。`;
     this.showTaskTemplate = false;
   }
@@ -549,9 +619,11 @@ export struct AiAssistantPanel {
     }
     const preset: PresetProvider = PRESET_PROVIDERS[index];
     this.discoveryTicket++;
-    // A preset can target a different host. Never carry another provider's key into it.
-    this.apiKeyText = ''; this.modelsEndpointText = ''; this.discoveredModels = [];
+    this.apiKeyText = ''; this.modelsEndpointText = ''; this.discoveredModels = []; this.discoveredCatalog = [];
     this.selectedProviderIndex = index;
+    if (this.selectedProfileId.length === 0 || this.profileNameText.trim().length === 0) {
+      this.profileNameText = preset.name;
+    }
     if (preset.config.provider !== undefined) {
       this.providerValue = preset.config.provider;
     }
@@ -560,16 +632,198 @@ export struct AiAssistantPanel {
     }
     if (preset.config.modelName !== undefined) {
       this.modelNameText = preset.config.modelName;
+      this.selectedModelId = '';
+    }
+    if (preset.config.contextWindowTokens !== undefined) {
+      this.contextWindowText = String(preset.config.contextWindowTokens);
+    }
+    if (preset.config.maxTokens !== undefined) {
+      this.maxTokensText = String(preset.config.maxTokens);
     }
     if (this.providerValue === AiProvider.DEMO_MODE) {
       this.apiKeyText = '';
     }
-    this.testStatusText = '';
+    this.showPresetTemplates = false;
+    this.testStatusText = `已填入「${preset.name}」预设，填写 API Key 后即可获取模型或保存`;
+  }
+
+  private applyWindowPresetInSettings(tokens: number): void {
+    this.contextWindowText = String(tokens);
+    const curMax: number = Number(this.maxTokensText.trim());
+    if (Number.isFinite(curMax) && curMax + 6000 >= tokens) {
+      this.maxTokensText = String(Math.max(512, tokens - 6500));
+    }
+  }
+
+  private filteredCatalogModels(): AiDiscoveredModelSpec[] {
+    const q: string = this.catalogSearchText.trim().toLowerCase();
+    const cat: string = this.catalogCategory;
+    return this.discoveredCatalog.filter((spec: AiDiscoveredModelSpec): boolean => {
+      if (cat !== '全部' && !spec.categories.includes(cat)) return false;
+      if (q.length === 0) return true;
+      return spec.id.toLowerCase().includes(q) || spec.displayName.toLowerCase().includes(q);
+    });
+  }
+
+  private isModelSavedInCurrentDraft(modelId: string): boolean {
+    if (this.savedModels().some((m: AiSavedModel): boolean => m.config.modelName === modelId)) return true;
+    return this.pendingDraftModels.includes(modelId);
+  }
+
+  private async addModelFromInputOrCatalog(modelId: string, suggestedWindow: number = 0, activateNow: boolean = true): Promise<void> {
+    if (this.isLoading || this.configBusy) return;
+    const clean: string = modelId.trim();
+    if (clean.length === 0) {
+      this.testStatusText = '请先输入要添加的模型 ID';
+      return;
+    }
+    const inferredWin: number = inferAiModelContextWindow(clean, suggestedWindow);
+    if (this.selectedProfileId.length === 0) {
+      if (!this.pendingDraftModels.includes(clean)) {
+        this.pendingDraftModels = this.pendingDraftModels.concat([clean]);
+      }
+      if (activateNow || this.modelNameText.trim().length === 0) {
+        this.modelNameText = clean;
+        this.applyWindowPresetInSettings(inferredWin);
+      }
+      this.manualNewModelText = '';
+      this.testStatusText = `已将「${clean}」加入待保存列表（共 ${this.pendingDraftModels.length} 个），点击底部「保存配置」即可落盘`;
+      return;
+    }
+    this.configBusy = true;
+    try {
+      await aiService.addModelToProvider(this.selectedProfileId, clean, inferredWin, activateNow);
+      if (!this.panelDisposed) {
+        this.loadConfigFields(true);
+        this.manualNewModelText = '';
+        this.configChangedAction();
+        this.testStatusText = activateNow
+          ? `已添加并切换到模型「${clean}」（窗口 ${formatCompactTokens(inferredWin)}）`
+          : `已添加模型「${clean}」到当前供应商`;
+        showAppSnackBar(this.getUIContext(), `已添加模型 ${clean}`);
+      }
+    } catch (error) {
+      if (!this.panelDisposed) {
+        this.testStatusText = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      this.configBusy = false;
+    }
+  }
+
+  private async batchAddFilteredCatalogModels(): Promise<void> {
+    if (this.isLoading || this.configBusy) return;
+    const candidates: AiDiscoveredModelSpec[] = this.filteredCatalogModels()
+      .filter((spec: AiDiscoveredModelSpec): boolean => !this.isModelSavedInCurrentDraft(spec.id))
+      .slice(0, 8);
+    if (candidates.length === 0) {
+      this.testStatusText = '当前筛选结果中的模型均已添加';
+      return;
+    }
+    if (this.selectedProfileId.length === 0) {
+      for (let i = 0; i < candidates.length; i++) {
+        if (!this.pendingDraftModels.includes(candidates[i].id)) {
+          this.pendingDraftModels = this.pendingDraftModels.concat([candidates[i].id]);
+        }
+      }
+      if (this.modelNameText.trim().length === 0) {
+        this.modelNameText = candidates[0].id;
+        this.applyWindowPresetInSettings(candidates[0].contextWindow);
+      }
+      this.testStatusText = `已暂存 ${candidates.length} 个模型，点击「保存配置」完成创建`;
+      return;
+    }
+    this.configBusy = true;
+    try {
+      const count: number = await aiService.addModelsBatchToProvider(this.selectedProfileId, candidates);
+      if (!this.panelDisposed) {
+        this.loadConfigFields(true);
+        this.configChangedAction();
+        this.testStatusText = `已批量添加 ${count} 个模型至当前供应商`;
+        showAppSnackBar(this.getUIContext(), `已批量添加 ${count} 个模型`);
+      }
+    } catch (error) {
+      if (!this.panelDisposed) this.testStatusText = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.configBusy = false;
+    }
+  }
+
+  private async quickSelectModel(profileId: string, modelId: string): Promise<void> {
+    if (this.isLoading || this.configBusy) return;
+    this.configBusy = true;
+    try {
+      await aiService.selectProviderModel(profileId, modelId);
+      if (!this.panelDisposed) {
+        this.loadConfigFields(false);
+        this.configChangedAction();
+        this.showQuickModelPicker = false;
+        showAppSnackBar(this.getUIContext(), `已切换至 ${aiService.getConfig().modelName}`);
+      }
+    } catch (error) {
+      if (!this.panelDisposed) {
+        showAppSnackBar(this.getUIContext(), error instanceof Error ? error.message : '模型切换失败');
+      }
+    } finally {
+      this.configBusy = false;
+    }
+  }
+
+  private async quickSetReasoningEffort(effort: AiReasoningEffort): Promise<void> {
+    if (this.isLoading || this.configBusy) return;
+    this.reasoningEffortValue = effort;
+    if (this.selectedProfileId.length === 0) return;
+    this.configBusy = true;
+    try {
+      await aiService.setReasoningEffort(effort);
+      if (!this.panelDisposed) {
+        this.configChangedAction();
+      }
+    } catch (_) {}
+    finally {
+      this.configBusy = false;
+    }
+  }
+
+  private async quickApplyContextPolicy(newWindow?: number, newThresholdPct?: number, newAutoCompress?: boolean): Promise<void> {
+    if (this.isLoading || this.configBusy) return;
+    const cfg: AiModelConfig = aiService.getConfig();
+    const targetWin: number = newWindow ?? (cfg.contextWindowTokens ?? 32768);
+    if (!Number.isInteger(targetWin) || targetWin < 8192 || targetWin > 2097152) {
+      this.managementStatusKind = 'error';
+      this.managementStatus = '窗口容量须为 8192–2097152 之间的整数 token';
+      return;
+    }
+    const targetThreshold: number = newThresholdPct !== undefined ? (newThresholdPct / 100) : (cfg.compressionThreshold ?? 0.8);
+    const targetAuto: boolean = newAutoCompress !== undefined ? newAutoCompress : (cfg.autoCompress ?? false);
+    this.configBusy = true;
+    try {
+      await aiService.updateActiveContextWindowAndPolicy(targetWin, targetThreshold, targetAuto);
+      if (!this.panelDisposed) {
+        this.loadConfigFields(true);
+        this.configChangedAction();
+        this.managementStatusKind = 'info';
+        this.managementStatus = `已更新上下文配置：窗口 ${formatCompactTokens(targetWin)}（${targetWin.toLocaleString()} tokens）· 压缩阈值 ${Math.round(targetThreshold * 100)}%`;
+      }
+    } catch (error) {
+      if (!this.panelDisposed) {
+        this.managementStatusKind = 'error';
+        this.managementStatus = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      this.configBusy = false;
+    }
+  }
+
+  private toggleAutoExpandThinking(enabled: boolean): void {
+    this.autoExpandThinking = enabled;
+    AppStorage.setOrCreate<boolean>('hongtu_ai_auto_expand_thinking', enabled);
+    if (enabled) {
+      this.collapsedThinkingKeys = [];
+    }
   }
 
   private modelDiscoveryConfigFromFields(): AiModelConfig {
-    // GET needs connection fields and a bounded timeout, not generation tuning.
-    // Saving/testing/inference keep their strict full-config validation.
     const config: AiModelConfig = aiService.getConfig();
     config.provider = this.providerValue;
     config.endpoint = this.endpointText.trim();
@@ -580,24 +834,31 @@ export struct AiAssistantPanel {
 
   private currentConfigFromFields(): AiModelConfig {
     const temperature: number = this.configNumber(this.temperatureText, '温度', 0, 2, false);
-    const maxTokens: number = this.configNumber(this.maxTokensText, '最大输出', 128, 65536, true);
-    const timeoutSeconds: number = this.configNumber(this.timeoutSecondsText, '超时秒数', 1, 180, false);
     const contextWindowTokens: number = this.configNumber(this.contextWindowText, '上下文窗口', 8192, 2097152, true);
+    let maxTokens: number = this.configNumber(this.maxTokensText, '最大输出', 128, 65536, true);
+    if (maxTokens + 6000 >= contextWindowTokens) {
+      maxTokens = Math.max(512, contextWindowTokens - 6500);
+      this.maxTokensText = String(maxTokens);
+    }
+    const timeoutSeconds: number = this.configNumber(this.timeoutSecondsText, '超时秒数', 1, 180, false);
     const compressionThreshold: number = this.configNumber(this.compressionThresholdText, '压缩阈值百分比', 50, 95, false) / 100;
-    if (maxTokens + 6000 >= contextWindowTokens) throw new Error('最大输出加 6000 系统与工具预留须小于上下文窗口');
     const fallbackModel = this.providerValue === AiProvider.DEMO_MODE ? 'hongtu-demo' : '';
-    if (this.modelNameText.trim().length === 0 && fallbackModel.length === 0) throw new Error('请填写或获取模型 ID');
+    const candidateModel: string = this.modelNameText.trim().length > 0
+      ? this.modelNameText.trim()
+      : (this.pendingDraftModels.length > 0 ? this.pendingDraftModels[0] : fallbackModel);
+    if (candidateModel.length === 0) throw new Error('请填写或从远端目录添加至少一个模型 ID');
     const config: AiModelConfig = {
       provider: this.providerValue,
       endpoint: this.endpointText.trim(),
       apiKey: this.apiKeyText.trim(),
-      modelName: this.modelNameText.trim().length > 0 ? this.modelNameText.trim() : fallbackModel,
+      modelName: candidateModel,
       temperature,
       maxTokens,
       timeoutMs: Math.round(timeoutSeconds * 1000),
       contextWindowTokens,
       compressionThreshold,
       autoCompress: this.autoCompressValue,
+      reasoningEffort: this.reasoningEffortValue,
       enabled: this.configEnabled,
     };
     return config;
@@ -630,19 +891,32 @@ export struct AiAssistantPanel {
       this.testStatusText = '该供应商原凭据状态未知，请重试读取原凭据或填写新的 API Key 后保存';
       return;
     }
+    const extraDraftModels: string[] = this.pendingDraftModels.slice();
     this.configBusy = true;
     try {
-      await aiService.saveProviderProfile(this.profileNameText, this.currentConfigFromFields(),
-        this.selectedProfileId, this.selectedModelId, this.modelsEndpointText);
+      const savedProfileId: string = await aiService.saveProviderProfile(
+        this.profileNameText.trim().length > 0 ? this.profileNameText : '自定义模型服务',
+        this.currentConfigFromFields(),
+        this.selectedProfileId,
+        this.selectedModelId,
+        this.modelsEndpointText
+      );
+      for (let i = 0; i < extraDraftModels.length; i++) {
+        const extraName: string = extraDraftModels[i];
+        if (extraName !== this.modelNameText.trim()) {
+          await aiService.addModelToProvider(savedProfileId, extraName, inferAiModelContextWindow(extraName, 0), false);
+        }
+      }
       if (!this.panelDisposed) {
-        this.loadConfigFields();
-        this.testStatusText = 'AI 配置已保存';
+        this.loadConfigFields(true);
+        this.testStatusText = '供应商与模型配置已保存';
         if (aiService.getCredentialError().length > 0) this.testStatusText += `；${aiService.getCredentialError()}`;
+        showAppSnackBar(this.getUIContext(), '模型配置已保存');
         try { this.configChangedAction(); }
-        catch (_) { this.testStatusText = 'AI 配置已保存，上下文占用将在下次请求刷新'; }
+        catch (_) { this.testStatusText = '配置已保存，上下文计量将在下次请求刷新'; }
       }
     } catch (e) {
-      if (!this.panelDisposed) this.testStatusText = `AI 配置保存失败：${e}`;
+      if (!this.panelDisposed) this.testStatusText = `配置保存失败：${e instanceof Error ? e.message : String(e)}`;
     } finally { this.configBusy = false; }
   }
 
@@ -681,11 +955,12 @@ export struct AiAssistantPanel {
 
   private conversationChangesAllowed(): boolean {
     if (!this.isLoading && !this.configBusy) return true;
-    this.managementStatus = '任务运行中，请完成或取消后再更改会话与上下文';
+    this.managementStatusKind = 'error'; this.managementStatus = '任务运行中，请完成或取消后再更改会话与上下文';
     return false;
   }
 
   private openManagement(section: string): void {
+    this.showQuickModelPicker = false;
     this.showConversations = section === 'conversations' && !this.showConversations;
     this.showContext = section === 'context' && !this.showContext;
     this.showSettings = section === 'settings' && !this.showSettings;
@@ -694,7 +969,12 @@ export struct AiAssistantPanel {
     if (this.scrollRequestTimer >= 0) clearTimeout(this.scrollRequestTimer);
     this.scrollRequestTimer = setTimeout(() => {
       this.scrollRequestTimer = -1;
-      if (!this.panelDisposed) this.conversationScroller.scrollEdge(this.followsLatest ? Edge.Bottom : Edge.Top);
+      if (this.panelDisposed) return;
+      if (this.followsLatest) {
+        this.pinConversationToBottomInstant();
+      } else {
+        this.conversationScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+      }
     }, 0);
   }
 
@@ -724,11 +1004,11 @@ export struct AiAssistantPanel {
     if (!this.conversationChangesAllowed()) return;
     const title: string = this.conversationTitleText.trim();
     if (title.length === 0 || title.length > 80 || /[\r\n\u0000-\u001f\u007f]/.test(title)) {
-      this.managementStatus = '会话名称须为 1–80 个字符，不含换行或控制字符';
+      this.managementStatusKind = 'error'; this.managementStatus = '会话名称须为 1–80 个字符，不含换行或控制字符';
       return;
     }
     if (!this.conversations.some((item: AiConversationSummary): boolean => item.id === this.renamingConversationId)) {
-      this.managementStatus = '会话已不存在，请刷新列表';
+      this.managementStatusKind = 'error'; this.managementStatus = '会话已不存在，请刷新列表';
       return;
     }
     this.renameConversationAction(this.renamingConversationId, title);
@@ -901,8 +1181,9 @@ export struct AiAssistantPanel {
 
   private tokenMeterState(): AiTokenMeterState {
     const cfg: AiModelConfig = aiService.getConfig();
-    return parseAiTokenMeter(
+    return computeDraftAwareTokenMeter(
       this.contextUsageSummary,
+      this.inputText,
       cfg.contextWindowTokens ?? 32768,
       cfg.compressionThreshold ?? 0.8
     );
@@ -914,7 +1195,35 @@ export struct AiAssistantPanel {
     const raw: string = cfg.modelName.trim() || '未选模型';
     const slashOrColon: number = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf(':'));
     const tail: string = slashOrColon >= 0 ? raw.substring(slashOrColon + 1) : raw;
-    return tail.length > 18 ? `${tail.substring(0, 17)}…` : tail;
+    const shortName: string = tail.length > 16 ? `${tail.substring(0, 15)}…` : tail;
+    return `${shortName} · ${formatCompactTokens(cfg.contextWindowTokens ?? 32768)}`;
+  }
+
+  private isThinkingExpanded(key: string, isLive: boolean, isLatestTurn: boolean): boolean {
+    if (isLive) {
+      return !this.collapsedThinkingKeys.includes(key);
+    }
+    if (this.expandedReasoning.includes(key)) {
+      return true;
+    }
+    if (this.collapsedThinkingKeys.includes(key)) {
+      return false;
+    }
+    return this.autoExpandThinking && isLatestTurn;
+  }
+
+  private toggleThinkingCard(key: string, currentlyExpanded: boolean): void {
+    if (currentlyExpanded) {
+      this.expandedReasoning = this.expandedReasoning.filter((item: string): boolean => item !== key);
+      if (!this.collapsedThinkingKeys.includes(key)) {
+        this.collapsedThinkingKeys = this.collapsedThinkingKeys.concat([key]);
+      }
+    } else {
+      this.collapsedThinkingKeys = this.collapsedThinkingKeys.filter((item: string): boolean => item !== key);
+      if (!this.expandedReasoning.includes(key)) {
+        this.expandedReasoning = this.expandedReasoning.concat([key]);
+      }
+    }
   }
 
   private hasInterruptedTurn(): boolean {
@@ -922,7 +1231,7 @@ export struct AiAssistantPanel {
     for (let i: number = this.messages.length - 1; i >= 0; i--) {
       if (this.messages[i].role === ChatRole.ASSISTANT) {
         const st = this.messages[i].runStatus;
-        return st !== undefined && st !== 'completed';
+        return st === 'failed' || st === 'cancelled';
       }
     }
     return false;
@@ -1317,19 +1626,136 @@ export struct AiAssistantPanel {
     return tool;
   }
 
+  /** DSH first-class Thinking Process Card: auto-expanded while streaming & on latest turn, with preview snippet when folded. */
   @Builder
-  ReasoningSection(reasoning: string, key: string) {
-    if (reasoning.length > 0) {
+  ThinkingDisclosureCard(
+    thinking: string,
+    key: string,
+    isLive: boolean,
+    activelyThinking: boolean,
+    isLatestTurn: boolean = false
+  ) {
+    if (thinking.trim().length > 0) {
       Column({ space: 6 }) {
-        Button(this.expandedReasoning.includes(key) ? '收起思考' : '查看思考', { type: ButtonType.Normal })
-          .height(UI.compactControlHeight).fontSize(UI.fontBody).fontColor(COLORS.muted)
-          .backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
-          .onClick(() => { this.toggleReasoning(key); })
-        if (this.expandedReasoning.includes(key)) {
-          AiMarkdownBody({ content: reasoning, streaming: key === '0:reasoning' && this.isLoading,
-            fontSize: 12, muted: true }).width('100%')
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 6 }) {
+            if (activelyThinking) {
+              LoadingProgress().width(14).height(14).color(COLORS.primary)
+            } else {
+              WorkbenchIcon({ name: 'think', iconSize: 14, color: COLORS.primary })
+            }
+            Text(activelyThinking ? `正在深度思考 · ${thinking.length} 字` : `思考过程 · ${thinking.length} 字`)
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(activelyThinking ? COLORS.primary : COLORS.ink)
+            if (!this.isThinkingExpanded(key, isLive, isLatestTurn)) {
+              Text(thinking.replace(/\s+/g, ' ').trim())
+                .fontSize(11)
+                .fontColor(COLORS.muted)
+                .layoutWeight(1)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            } else {
+              Blank().layoutWeight(1)
+            }
+            Text(this.isThinkingExpanded(key, isLive, isLatestTurn) ? '收起' : '展开')
+              .fontSize(11)
+              .fontColor(COLORS.muted)
+            WorkbenchIcon({
+              name: this.isThinkingExpanded(key, isLive, isLatestTurn) ? 'chevronUp' : 'chevronDown',
+              iconSize: 12,
+              color: COLORS.muted
+            })
+          }.width('100%').alignItems(VerticalAlign.Center)
         }
-      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 6, bottom: 6 })
+        .id(`ai-thinking-toggle-${key}`)
+        .width('100%')
+        .height(30)
+        .padding({ left: 10, right: 10 })
+        .backgroundColor(Color.Transparent)
+        .borderRadius(8)
+        .onClick(() => {
+          this.toggleThinkingCard(key, this.isThinkingExpanded(key, isLive, isLatestTurn));
+        })
+
+        if (this.isThinkingExpanded(key, isLive, isLatestTurn)) {
+          if (isLive) {
+            Scroll(this.liveThinkingScroller) {
+              Row({ space: 8 }) {
+                Column()
+                  .width(2.5)
+                  .backgroundColor(withAlpha(COLORS.primary, 0.45))
+                  .borderRadius(2)
+                Text(thinking)
+                  .fontSize(12)
+                  .lineHeight(19)
+                  .fontColor(COLORS.muted)
+                  .wordBreak(WordBreak.BREAK_WORD)
+                  .copyOption(CopyOptions.LocalDevice)
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              .alignItems(VerticalAlign.Top)
+              .padding({ left: 10, right: 10, bottom: 8 })
+              .onAreaChange((_oldArea: Area, newArea: Area) => {
+                const nextH: number = Number(newArea.height);
+                if (Number.isFinite(nextH) && Math.abs(nextH - this.liveThinkingContentHeight) > 0.5) {
+                  this.liveThinkingContentHeight = nextH;
+                  if (activelyThinking && this.liveThinkingViewportHeight > 0 && nextH > this.liveThinkingViewportHeight) {
+                    try {
+                      this.liveThinkingScroller.scrollTo({
+                        xOffset: 0,
+                        yOffset: Math.max(0, nextH - this.liveThinkingViewportHeight),
+                        animation: false
+                      });
+                    } catch (_) {}
+                  }
+                }
+              })
+            }
+            .width('100%')
+            .constraintSize({ maxHeight: 210 })
+            .align(Alignment.TopStart)
+            .scrollBar(BarState.Auto)
+            .nestedScroll({ scrollForward: NestedScrollMode.SELF_FIRST, scrollBackward: NestedScrollMode.SELF_FIRST })
+            .onAreaChange((_oldArea: Area, newArea: Area) => {
+              const nextV: number = Number(newArea.height);
+              if (Number.isFinite(nextV) && Math.abs(nextV - this.liveThinkingViewportHeight) > 0.5) {
+                this.liveThinkingViewportHeight = nextV;
+              }
+            })
+          } else {
+            Scroll() {
+              Row({ space: 8 }) {
+                Column()
+                  .width(2.5)
+                  .backgroundColor(withAlpha(COLORS.primary, 0.45))
+                  .borderRadius(2)
+                Text(thinking)
+                  .fontSize(12)
+                  .lineHeight(19)
+                  .fontColor(COLORS.muted)
+                  .wordBreak(WordBreak.BREAK_WORD)
+                  .copyOption(CopyOptions.LocalDevice)
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              .alignItems(VerticalAlign.Top)
+              .padding({ left: 10, right: 10, bottom: 8 })
+            }
+            .width('100%')
+            .constraintSize({ maxHeight: 260 })
+            .align(Alignment.TopStart)
+            .scrollBar(BarState.Auto)
+          }
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .backgroundColor(withAlpha(COLORS.surfaceMuted, 0.72))
+      .border({ width: 0.8, color: activelyThinking ? withAlpha(COLORS.primary, 0.38) : COLORS.border })
+      .borderRadius(10)
+      .margin({ bottom: 6 })
     }
   }
 
@@ -1486,10 +1912,10 @@ export struct AiAssistantPanel {
     }
   }
 
-  /** DSH-style collapsible Agent Trace Accordion: Thinking + Plan + Tool Calls unified above the answer. */
+  /** DSH-style collapsible Agent Tool Trace Accordion (Plan + Tool Calls). Thinking is rendered in its own top-level card. */
   @Builder
-  AgentTraceAccordion(tools: AiChatToolState[], reasoning: string, traceKey: string, isLive: boolean) {
-    if (tools.length > 0 || reasoning.length > 0) {
+  AgentTraceAccordion(tools: AiChatToolState[], traceKey: string, isLive: boolean) {
+    if (tools.length > 0) {
       Column({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {
           Row({ space: 8 }) {
@@ -1499,7 +1925,7 @@ export struct AiAssistantPanel {
               Circle({ width: 7, height: 7 })
                 .fill(tools.some((t: AiChatToolState): boolean => this.toolFailed(t)) ? COLORS.danger : COLORS.success)
             }
-            Text(this.traceSummaryText(tools, reasoning, isLive))
+            Text(this.traceSummaryText(tools, '', isLive))
               .fontSize(12)
               .fontWeight(FontWeight.Medium)
               .fontColor(COLORS.ink)
@@ -1525,9 +1951,6 @@ export struct AiAssistantPanel {
 
         if (isLive || this.expandedTraces.includes(traceKey)) {
           Column({ space: 4 }) {
-            if (reasoning.length > 0) {
-              this.ReasoningSection(reasoning, `${traceKey}:reasoning`)
-            }
             this.PlanChecklist(tools, traceKey)
             ForEach(tools, (tool: AiChatToolState) => {
               this.ToolCard(tool, `${traceKey}:${tool.id}`)
@@ -1552,20 +1975,35 @@ export struct AiAssistantPanel {
     Row() {
       Column({ space: 4 }) {
         Row({ space: 6 }) {
-          WorkbenchIcon({ name: 'sparkles', iconSize: 13, color: COLORS.primary })
+          if (this.isLoading) {
+            LoadingProgress().width(14).height(14).color(COLORS.primary)
+          } else {
+            WorkbenchIcon({ name: 'sparkles', iconSize: 13, color: COLORS.primary })
+          }
           Text('鸿图 Agent').fontSize(12).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
-          Text(this.generationStatus || '思考与绘图中…')
+          Text(this.generationStatus || (this.liveAssistantVisible() ? '思考与绘图中…' : '正在连接模型…'))
             .fontSize(11)
             .fontColor(COLORS.primary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .layoutWeight(1)
-        }.width('100%').alignItems(VerticalAlign.Center).margin({ bottom: 2 })
+        }.width('100%').height(20).alignItems(VerticalAlign.Center).margin({ bottom: 2 })
 
-        this.AgentTraceAccordion(this.toolCalls, this.reasoningText, '0', true)
+        if (splitInlineThinking(this.streamingText, this.reasoningText).thinking.length > 0) {
+          this.ThinkingDisclosureCard(
+            splitInlineThinking(this.streamingText, this.reasoningText).thinking,
+            'live:thinking',
+            true,
+            splitInlineThinking(this.streamingText, this.reasoningText).isStreamingThink ||
+              (this.reasoningText.length > 0 && splitInlineThinking(this.streamingText, this.reasoningText).answer.length === 0),
+            true
+          )
+        }
 
-        if (this.streamingText.length > 0) {
-          AiMarkdownBody({ content: this.streamingText, streaming: this.isLoading,
+        this.AgentTraceAccordion(this.toolCalls, '0', true)
+
+        if (splitInlineThinking(this.streamingText, this.reasoningText).answer.length > 0) {
+          AiMarkdownBody({ content: splitInlineThinking(this.streamingText, this.reasoningText).answer, streaming: this.isLoading,
             fontSize: this.desktopMode ? UI.fontBody : 12 })
             .width('100%').padding({ left: 2, right: 2, top: 4, bottom: 4 })
             .backgroundColor(Color.Transparent).borderRadius(RADIUS.md)
@@ -1574,7 +2012,7 @@ export struct AiAssistantPanel {
     }.width('100%').justifyContent(FlexAlign.Start).padding({ top: 6, bottom: 6 })
   }
 
-  /** DSH-style Agent message row: right-aligned user pill vs left-aligned Agent turn with trace above body & action bar. */
+  /** DSH-style Agent message row: right-aligned user pill vs left-aligned Agent turn with first-class Thinking + Trace + Answer. */
   @Builder
   ChatMessageRow(msg: ChatMessage) {
     if (msg.role === ChatRole.USER) {
@@ -1620,14 +2058,28 @@ export struct AiAssistantPanel {
             }
           }.width('100%').alignItems(VerticalAlign.Center).margin({ bottom: 2 })
 
-          if (msg.role === ChatRole.ASSISTANT) {
-            this.AgentTraceAccordion(msg.tools ?? [], msg.reasoning ?? '', `${msg.timestamp}`, false)
+          if (msg.role === ChatRole.ASSISTANT &&
+            splitInlineThinking(this.messageText(msg), msg.reasoning ?? '').thinking.length > 0) {
+            this.ThinkingDisclosureCard(
+              splitInlineThinking(this.messageText(msg), msg.reasoning ?? '').thinking,
+              `msg:${msg.timestamp}`,
+              false,
+              false,
+              this.isLatestAssistantMessage(msg)
+            )
           }
 
-          if (this.messageText(msg).length > 0) {
+          if (msg.role === ChatRole.ASSISTANT) {
+            this.AgentTraceAccordion(msg.tools ?? [], `${msg.timestamp}`, false)
+          }
+
+          if (splitInlineThinking(this.messageText(msg), msg.reasoning ?? '').answer.length > 0) {
             if (msg.role === ChatRole.ASSISTANT) {
-              AiMarkdownBody({ content: this.messageText(msg), streaming: msg.timestamp === 0 && this.isLoading,
-                fontSize: this.desktopMode ? UI.fontBody : 12 })
+              AiMarkdownBody({
+                content: splitInlineThinking(this.messageText(msg), msg.reasoning ?? '').answer,
+                streaming: msg.timestamp === 0 && this.isLoading,
+                fontSize: this.desktopMode ? UI.fontBody : 12
+              })
                 .width('100%').padding({ left: 2, right: 2, top: 4, bottom: 4 })
                 .backgroundColor(msg.commandStatus === 'failed' ? withAlpha(COLORS.danger, ALPHA.SELECTED) : Color.Transparent)
                 .borderRadius(RADIUS.md)
@@ -1716,15 +2168,22 @@ export struct AiAssistantPanel {
           .padding({ left: 12, right: 12, top: 6 })
       }
       if (!this.showConversations && !this.showContext && !this.showSettings) {
+        if (this.showTaskTemplate) {
+          Column() {
+            this.ArrayTaskTemplate()
+          }.width('100%').padding({ left: 12, right: 12, top: 6 })
+        }
       Row({ space: 8 }) {
         TextInput({ text: $$this.inputText, placeholder: this.pendingSummary.length > 0 ? '继续补充修改要求…' : '描述你的版图需求…' })
           .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+          .onSubmit(() => { this.sendInput(); })
           .layoutWeight(1).height(UI.fieldHeight).fontSize(UI.fontBody)
           .fontColor(COLORS.ink).placeholderColor(COLORS.muted)
           .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
         Button({ type: ButtonType.Normal }) {
           this.SendArrowGlyph()
         }.width(UI.controlHeight).height(UI.controlHeight).padding(0)
+          .focusable(false).focusOnTouch(false)
           .backgroundColor(COLORS.primary).borderRadius(UI.controlRadius)
           .accessibilityText('发送消息')
           .enabled(this.inputText.trim().length > 0 && !this.isLoading && !this.configBusy)
@@ -1803,61 +2262,98 @@ export struct AiAssistantPanel {
   @Builder
   ArrayTaskTemplate() {
     Column({ space: 8 }) {
-      Text('阵列选区 · 参数单位 nm').fontSize(UI.fontBody).fontColor(COLORS.ink).width('100%')
-      Column({ space: 8 }) {
-        Row({ space: 8 }) {
-          Column({ space: 4 }) {
-            Text('行数').fontSize(UI.fontCaption).fontColor(COLORS.muted)
-            // 严守官方规范：CounterComponent 自身不链式追加通用属性，由外层 Column 承载布局
-            Column() {
-              CounterComponent({
-                options: {
-                  type: CounterType.INLINE,
-                  inlineOptions: {
-                    value: Math.max(1, Number.parseInt(this.templateRows) || 2),
-                    min: 1,
-                    max: 1000,
-                    step: 1,
-                    textWidth: 44,
-                    onChange: (val: number) => { this.templateRows = `${val}`; }
-                  }
+      Row() {
+        Text('阵列选区参数（单位 nm）')
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(COLORS.ink)
+          .layoutWeight(1)
+        Button('关闭', { type: ButtonType.Normal })
+          .height(22)
+          .padding({ left: 8, right: 8 })
+          .fontSize(11)
+          .fontColor(COLORS.muted)
+          .backgroundColor(Color.Transparent)
+          .borderRadius(6)
+          .onClick(() => {
+            this.showTaskTemplate = false;
+            this.managementStatus = '';
+          })
+      }.width('100%').alignItems(VerticalAlign.Center)
+
+      Row({ space: 8 }) {
+        Column({ space: 4 }) {
+          Text('行数').fontSize(UI.fontCaption).fontColor(COLORS.muted)
+          // 严守官方规范：CounterComponent 自身不链式追加通用属性，由外层 Column 承载布局
+          Column() {
+            CounterComponent({
+              options: {
+                type: CounterType.INLINE,
+                inlineOptions: {
+                  value: Math.max(1, Number.parseInt(this.templateRows) || 2),
+                  min: 1,
+                  max: 1000,
+                  step: 1,
+                  textWidth: 44,
+                  onChange: (val: number) => { this.templateRows = `${val}`; }
                 }
-              })
-            }
-          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-          Column({ space: 4 }) {
-            Text('列数').fontSize(UI.fontCaption).fontColor(COLORS.muted)
-            Column() {
-              CounterComponent({
-                options: {
-                  type: CounterType.INLINE,
-                  inlineOptions: {
-                    value: Math.max(1, Number.parseInt(this.templateColumns) || 2),
-                    min: 1,
-                    max: 1000,
-                    step: 1,
-                    textWidth: 44,
-                    onChange: (val: number) => { this.templateColumns = `${val}`; }
-                  }
+              }
+            })
+          }
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Column({ space: 4 }) {
+          Text('列数').fontSize(UI.fontCaption).fontColor(COLORS.muted)
+          Column() {
+            CounterComponent({
+              options: {
+                type: CounterType.INLINE,
+                inlineOptions: {
+                  value: Math.max(1, Number.parseInt(this.templateColumns) || 2),
+                  min: 1,
+                  max: 1000,
+                  step: 1,
+                  textWidth: 44,
+                  onChange: (val: number) => { this.templateColumns = `${val}`; }
                 }
-              })
-            }
-          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        }.width('100%')
-        Row({ space: 8 }) {
-          Text('间距 (nm)').fontSize(UI.fontCaption).fontColor(COLORS.muted).width(68)
-          TextInput({ text: this.templatePitch, placeholder: '间距 nm' }).layoutWeight(1).height(UI.fieldHeight)
-            .fontSize(UI.fontBody).fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
-            .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius)
-            .accessibilityText('阵列间距，纳米').onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-            .onChange((value: string) => { this.templatePitch = value; })
-        }.width('100%').alignItems(VerticalAlign.Center)
+              }
+            })
+          }
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       }.width('100%')
-      Button('填入任务', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody)
-        .fontColor(COLORS.primary).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-        .enabled(!this.isLoading && !this.configBusy).onClick(() => this.fillArrayTemplate())
-      if (this.managementStatus.length > 0) { Text(this.managementStatus).fontSize(UI.fontCaption).fontColor(COLORS.muted) }
-    }.width('100%').padding(UI.panelPadding).alignItems(HorizontalAlign.Start)
+
+      Row({ space: 8 }) {
+        Text('间距 (nm)').fontSize(UI.fontCaption).fontColor(COLORS.muted).width(64)
+        TextInput({ text: this.templatePitch, placeholder: '间距 nm' })
+          .id('ai-array-pitch-input')
+          .layoutWeight(1).height(34)
+          .fontSize(UI.fontBody).fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
+          .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius)
+          .accessibilityText('阵列间距，纳米').onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+          .onChange((value: string) => { this.templatePitch = value; })
+        Button('填入任务', { type: ButtonType.Normal })
+          .id('ai-array-fill-btn')
+          .height(34)
+          .padding({ left: 12, right: 12 })
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(COLORS.primary)
+          .backgroundColor(COLORS.primarySoft)
+          .borderRadius(UI.controlRadius)
+          .enabled(!this.isLoading && !this.configBusy)
+          .onClick(() => this.fillArrayTemplate())
+      }.width('100%').alignItems(VerticalAlign.Center)
+
+      if (this.managementStatus.length > 0) {
+        Text(this.managementStatus).fontSize(UI.fontCaption).fontColor(COLORS.danger).width('100%')
+      }
+    }
+    .id('ai-array-template-card')
+    .width('100%')
+    .padding(10)
+    .alignItems(HorizontalAlign.Start)
+    .backgroundColor(COLORS.surface)
+    .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.35) })
+    .borderRadius(12)
   }
 
   @Builder
@@ -1883,6 +2379,8 @@ export struct AiAssistantPanel {
           .borderRadius(UI.controlRadius).enabled(this.messages.length > 0)
           .onClick(() => {
             const md: string = exportConversationAsMarkdown(this.activeConversationTitle(), this.messages);
+            this.managementStatusKind = 'info';
+            this.managementStatus = `已导出当前会话 Markdown 至剪贴板（共 ${this.messages.length} 条消息）`;
             this.copyPlainText(md, '当前会话已导出为 Markdown 并复制');
           })
         Button('新建会话').type(ButtonType.Normal).height(UI.controlHeight)
@@ -1920,7 +2418,10 @@ export struct AiAssistantPanel {
           .border({ width: { bottom: 1 }, color: COLORS.border }).borderRadius(UI.controlRadius)
       }, (item: AiConversationSummary): string => `${item.id}:${item.title}:${item.messageCount}:${this.activeConversationId}`)
       if (this.managementStatus.length > 0) {
-        Text(this.managementStatus).fontSize(UI.fontCaption).fontColor(COLORS.danger).width('100%')
+        Text(this.managementStatus)
+          .fontSize(UI.fontCaption)
+          .fontColor(this.managementStatusKind === 'info' ? COLORS.success : COLORS.danger)
+          .width('100%')
       }
     }.width('100%').padding({ top: 8, bottom: 12 })
   }
@@ -1950,79 +2451,486 @@ export struct AiAssistantPanel {
   }
 
   @Builder
+  ContextWindowPresetChips(currentWindow: number, onPick: (tokens: number) => void) {
+    Row({ space: 6 }) {
+      ForEach([16384, 32768, 65536, 131072, 200000, 262144, 1048576], (win: number) => {
+        Button(formatCompactTokens(win), { type: ButtonType.Normal })
+          .height(26)
+          .padding({ left: 9, right: 9 })
+          .fontSize(11)
+          .fontWeight(currentWindow === win ? FontWeight.Bold : FontWeight.Regular)
+          .fontColor(currentWindow === win ? COLORS.primary : COLORS.muted)
+          .backgroundColor(currentWindow === win ? COLORS.primarySoft : COLORS.surfaceMuted)
+          .borderRadius(RADIUS.capsule)
+          .enabled(!this.isLoading && !this.configBusy)
+          .onClick(() => { onPick(win); })
+      }, (win: number): string => `win-${win}-${currentWindow}`)
+    }
+  }
+
+  @Builder
+  ReasoningEffortChips(currentEffort: AiReasoningEffort, onPick: (effort: AiReasoningEffort) => void) {
+    Row({ space: 6 }) {
+      ForEach(['auto', 'none', 'low', 'medium', 'high'] as AiReasoningEffort[], (effort: AiReasoningEffort) => {
+        Button(reasoningEffortLabel(effort), { type: ButtonType.Normal })
+          .height(26)
+          .padding({ left: 9, right: 9 })
+          .fontSize(11)
+          .fontWeight(currentEffort === effort ? FontWeight.Bold : FontWeight.Regular)
+          .fontColor(currentEffort === effort ? COLORS.primary : COLORS.muted)
+          .backgroundColor(currentEffort === effort ? COLORS.primarySoft : COLORS.surfaceMuted)
+          .borderRadius(RADIUS.capsule)
+          .enabled(!this.isLoading && !this.configBusy)
+          .onClick(() => { onPick(effort); })
+      }, (effort: AiReasoningEffort): string => `eff-${effort}-${currentEffort}`)
+    }
+  }
+
+  /** DSH-Harmony Quick Model & Reasoning Switcher Popover: switch saved models/providers or thinking depth in 1 tap. */
+  @Builder
+  QuickModelPickerPopover() {
+    Column({ space: 8 }) {
+      Row({ space: 6 }) {
+        WorkbenchIcon({ name: 'model', iconSize: 15, color: COLORS.primary })
+        Text('快捷切换模型与思考')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(COLORS.ink)
+          .layoutWeight(1)
+        Button('模型与添加 ›', { type: ButtonType.Normal })
+          .height(24)
+          .padding({ left: 8, right: 8 })
+          .fontSize(11)
+          .fontColor(COLORS.primary)
+          .backgroundColor(COLORS.primarySoft)
+          .borderRadius(RADIUS.capsule)
+          .onClick(() => {
+            this.showQuickModelPicker = false;
+            this.openManagement('settings');
+          })
+        Button({ type: ButtonType.Normal }) {
+          WorkbenchIcon({ name: 'close', iconSize: 14, color: COLORS.muted })
+        }
+        .width(24).height(24).padding(0).backgroundColor(Color.Transparent).borderRadius(6)
+        .onClick(() => { this.showQuickModelPicker = false; })
+      }.width('100%').alignItems(VerticalAlign.Center)
+
+      if (this.providerProfiles.reduce((acc: number, p: AiProviderProfile): number => acc + p.models.length, 0) >= 4) {
+        Search({ value: this.quickModelSearch, placeholder: '搜索已添加模型…' })
+          .height(32)
+          .textFont({ size: 12 })
+          .placeholderFont({ size: 12 })
+          .fontColor(COLORS.ink)
+          .placeholderColor(COLORS.muted)
+          .searchIcon({ size: 14, color: COLORS.muted })
+          .backgroundColor(COLORS.surfaceMuted)
+          .borderRadius(8)
+          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+          .onChange((val: string) => { this.quickModelSearch = val; })
+      }
+
+      Scroll() {
+        Column({ space: 6 }) {
+          ForEach(this.providerProfiles, (profile: AiProviderProfile) => {
+            Column({ space: 3 }) {
+              Row({ space: 6 }) {
+                Text(profile.name)
+                  .fontSize(11)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(COLORS.muted)
+                Text(profile.provider === AiProvider.DEMO_MODE ? '离线演示' : (profile.provider === AiProvider.OLLAMA_LOCAL ? 'Ollama' : 'OpenAI 兼容'))
+                  .fontSize(10)
+                  .fontColor(COLORS.muted)
+              }.width('100%').padding({ left: 6, top: 2 })
+
+              ForEach(
+                profile.models.filter((m: AiSavedModel): boolean =>
+                  this.quickModelSearch.trim().length === 0 ||
+                  m.config.modelName.toLowerCase().includes(this.quickModelSearch.trim().toLowerCase()) ||
+                  profile.name.toLowerCase().includes(this.quickModelSearch.trim().toLowerCase())
+                ),
+                (m: AiSavedModel) => {
+                  Button({ type: ButtonType.Normal }) {
+                    Row({ space: 8 }) {
+                      Circle({ width: 6, height: 6 })
+                        .fill(aiService.getActiveProfileId() === profile.id && profile.activeModelId === m.id
+                          ? COLORS.primary : COLORS.border)
+                      Text(m.config.modelName)
+                        .fontSize(12)
+                        .fontWeight(aiService.getActiveProfileId() === profile.id && profile.activeModelId === m.id
+                          ? FontWeight.Bold : FontWeight.Regular)
+                        .fontColor(aiService.getActiveProfileId() === profile.id && profile.activeModelId === m.id
+                          ? COLORS.primary : COLORS.ink)
+                        .layoutWeight(1)
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      Text(formatCompactTokens(m.config.contextWindowTokens ?? 32768))
+                        .fontSize(10)
+                        .fontFamily('monospace')
+                        .fontColor(COLORS.muted)
+                        .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                        .backgroundColor(COLORS.surfaceMuted)
+                        .borderRadius(RADIUS.capsule)
+                      if (aiService.getActiveProfileId() === profile.id && profile.activeModelId === m.id) {
+                        WorkbenchIcon({ name: 'check', iconSize: 13, color: COLORS.primary })
+                      }
+                    }.width('100%').alignItems(VerticalAlign.Center)
+                  }
+                  .width('100%')
+                  .height(34)
+                  .padding({ left: 8, right: 8 })
+                  .backgroundColor(aiService.getActiveProfileId() === profile.id && profile.activeModelId === m.id
+                    ? COLORS.primarySoft : Color.Transparent)
+                  .borderRadius(8)
+                  .enabled(!this.isLoading && !this.configBusy)
+                  .onClick(() => { this.quickSelectModel(profile.id, m.id); })
+                },
+                (m: AiSavedModel): string => `${profile.id}:${m.id}:${aiService.getActiveProfileId()}:${profile.activeModelId}`
+              )
+            }.width('100%').alignItems(HorizontalAlign.Start)
+          }, (profile: AiProviderProfile): string => `${profile.id}:${profile.models.length}:${profile.activeModelId}`)
+        }.width('100%').alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .constraintSize({ maxHeight: 220 })
+      .scrollBar(BarState.Auto)
+
+      Divider().color(COLORS.border)
+
+      Row({ space: 6 }) {
+        Text('思考强度')
+          .fontSize(11)
+          .fontColor(COLORS.muted)
+        Scroll() {
+          this.ReasoningEffortChips(aiService.getConfig().reasoningEffort ?? 'auto', (effort: AiReasoningEffort) => {
+            this.quickSetReasoningEffort(effort);
+          })
+        }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).layoutWeight(1)
+      }.width('100%').alignItems(VerticalAlign.Center)
+    }
+    .id('ai-quick-model-picker')
+    .width('calc(100% - 20vp)')
+    .padding(12)
+    .backgroundColor(COLORS.surface)
+    .border({ width: 1, color: withAlpha(COLORS.primary, 0.35) })
+    .borderRadius(14)
+    .shadow(hongTuThemeState.elevation('overlay'))
+  }
+
+  /** DSH Full Context & Memory Workbench: live token breakdown, direct 16K~1M window presets, compression & project notes. */
+  @Builder
   ContextSettings() {
-    Column({ space: 14 }) {
-      Text('发送给 AI 的上下文').fontSize(UI.titleSize).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).width('100%')
-      Column({ space: 6 }) {
+    Column({ space: 12 }) {
+      // Card 1: Live Token Budget + Direct Model Context Window Switcher
+      Column({ space: 10 }) {
+        Row({ space: 8 }) {
+          Text('上下文窗口与实时占用')
+            .fontSize(13)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(COLORS.ink)
+            .layoutWeight(1)
+          Text(this.tokenMeterState().badgeText)
+            .fontSize(11)
+            .fontFamily('monospace')
+            .fontColor(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.primary)
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        Progress({ value: this.tokenMeterState().percent, total: 100, type: ProgressType.Linear })
+          .color(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.primary)
+          .backgroundColor(COLORS.surface)
+          .style({ strokeWidth: 7 })
+          .width('100%')
+
+        Column({ space: 5 }) {
+          Row() {
+            Text('系统与工具协议预留').fontSize(11).fontColor(COLORS.muted).layoutWeight(1)
+            Text('6,000 tokens').fontSize(11).fontFamily('monospace').fontColor(COLORS.ink)
+          }.width('100%')
+          Row() {
+            Text('模型最大输出预留').fontSize(11).fontColor(COLORS.muted).layoutWeight(1)
+            Text(`${aiService.getConfig().maxTokens.toLocaleString()} tokens`).fontSize(11).fontFamily('monospace').fontColor(COLORS.ink)
+          }.width('100%')
+          Row() {
+            Text('版图快照 + 历史 + 草稿估算').fontSize(11).fontColor(COLORS.muted).layoutWeight(1)
+            Text(`${Math.max(0, this.tokenMeterState().usedTokens - 6000 - aiService.getConfig().maxTokens).toLocaleString()} tokens`)
+              .fontSize(11).fontFamily('monospace').fontColor(COLORS.primary)
+          }.width('100%')
+          Row() {
+            Text('剩余可用上下文余量').fontSize(11).fontColor(COLORS.muted).layoutWeight(1)
+            Text(`${Math.max(0, this.tokenMeterState().windowTokens - this.tokenMeterState().usedTokens).toLocaleString()} tokens`)
+              .fontSize(11).fontFamily('monospace').fontColor(COLORS.success)
+          }.width('100%')
+        }
+        .width('100%')
+        .padding(9)
+        .backgroundColor(COLORS.surface)
+        .border({ width: 0.6, color: COLORS.border })
+        .borderRadius(8)
+
+        Text('快捷切换当前模型窗口容量')
+          .fontSize(11)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(COLORS.muted)
+          .width('100%')
+
+        Scroll() {
+          this.ContextWindowPresetChips(aiService.getConfig().contextWindowTokens ?? 32768, (win: number) => {
+            this.contextCustomWindowText = String(win);
+            this.quickApplyContextPolicy(win, undefined, undefined);
+          })
+        }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+
+        Row({ space: 8 }) {
+          TextInput({ text: this.contextCustomWindowText, placeholder: '自定义窗口 token（8192–2097152）' })
+            .id('ai-context-window-input')
+            .layoutWeight(1)
+            .height(34)
+            .fontSize(12)
+            .fontColor(COLORS.ink)
+            .backgroundColor(COLORS.surface)
+            .border({ width: 0.8, color: COLORS.border })
+            .borderRadius(8)
+            .enabled(!this.isLoading && !this.configBusy)
+            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+            .onChange((val: string) => { this.contextCustomWindowText = val; })
+          Button('应用容量', { type: ButtonType.Normal })
+            .id('ai-apply-window-btn')
+            .height(34)
+            .padding({ left: 12, right: 12 })
+            .fontSize(12)
+            .fontColor(COLORS.primary)
+            .backgroundColor(COLORS.primarySoft)
+            .borderRadius(8)
+            .enabled(!this.isLoading && !this.configBusy)
+            .onClick(() => {
+              this.quickApplyContextPolicy(Number(this.contextCustomWindowText.trim()), undefined, undefined);
+            })
+        }.width('100%')
+      }
+      .width('100%')
+      .padding(12)
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border })
+      .borderRadius(12)
+
+      // Card 2: Auto-Compression, Summary Inspector & Clear Context
+      Column({ space: 10 }) {
+        Text('历史压缩与上下文清理')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(COLORS.ink)
+          .width('100%')
+
         SettingsToggleRow({
-          title: '会话历史',
+          title: '达到阈值自动压缩早期对话',
+          isOn: aiService.getConfig().autoCompress ?? false,
+          enabledState: !this.isLoading && !this.configBusy,
+          compact: true,
+          onToggle: (value: boolean) => {
+            this.quickApplyContextPolicy(undefined, undefined, value);
+          }
+        })
+
+        Row({ space: 6 }) {
+          Text('压缩触发阈值').fontSize(11).fontColor(COLORS.muted)
+          Blank().layoutWeight(1)
+          ForEach([60, 70, 80, 90], (pct: number) => {
+            Button(`${pct}%`, { type: ButtonType.Normal })
+              .height(24)
+              .padding({ left: 8, right: 8 })
+              .fontSize(11)
+              .fontColor(this.tokenMeterState().thresholdPercent === pct ? COLORS.primary : COLORS.muted)
+              .backgroundColor(this.tokenMeterState().thresholdPercent === pct ? COLORS.primarySoft : COLORS.surface)
+              .borderRadius(RADIUS.capsule)
+              .enabled(!this.isLoading && !this.configBusy)
+              .onClick(() => { this.quickApplyContextPolicy(undefined, pct, undefined); })
+          }, (pct: number): string => `thr-${pct}-${this.tokenMeterState().thresholdPercent}`)
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        Column({ space: 6 }) {
+          Row() {
+            Text((this.compressionSummary || '尚未压缩会话').split('\n')[0])
+              .fontSize(12)
+              .fontColor(COLORS.ink)
+              .layoutWeight(1)
+            if (this.compressionSummary.includes('\n')) {
+              Button(this.showCompressedSummaryText ? '收起摘要' : '查看摘要', { type: ButtonType.Normal })
+                .height(22).padding({ left: 6, right: 6 }).fontSize(11).fontColor(COLORS.primary)
+                .backgroundColor(Color.Transparent)
+                .onClick(() => { this.showCompressedSummaryText = !this.showCompressedSummaryText; })
+            }
+          }.width('100%').alignItems(VerticalAlign.Center)
+
+          if (this.showCompressedSummaryText && this.compressionSummary.includes('\n')) {
+            Text(this.compressionSummary.substring(this.compressionSummary.indexOf('\n') + 1))
+              .fontSize(11)
+              .fontColor(COLORS.muted)
+              .lineHeight(18)
+              .width('100%')
+          }
+        }
+        .width('100%')
+        .padding(10)
+        .backgroundColor(COLORS.surface)
+        .border({ width: 0.6, color: COLORS.border })
+        .borderRadius(8)
+
+        Row({ space: 8 }) {
+          Button('立即压缩历史', { type: ButtonType.Normal })
+            .height(34).layoutWeight(1).fontSize(12)
+            .fontColor(Color.White).backgroundColor(COLORS.primary).borderRadius(8)
+            .enabled(!this.isLoading && !this.configBusy && this.contextOptions.includeHistory && this.messages.length > 0)
+            .onClick(() => { this.compressCurrentConversation(false); })
+          Button('恢复完整原文', { type: ButtonType.Normal })
+            .height(34).layoutWeight(1).fontSize(12)
+            .fontColor(COLORS.ink).backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+            .enabled(!this.isLoading && !this.configBusy)
+            .onClick(() => { this.compressCurrentConversation(true); })
+          Button('清空消息', { type: ButtonType.Normal })
+            .height(34).padding({ left: 10, right: 10 }).fontSize(12)
+            .fontColor(COLORS.danger).backgroundColor(COLORS.dangerSoft).borderRadius(8)
+            .enabled(!this.isLoading && !this.configBusy && this.messages.length > 0)
+            .onClick(() => {
+              AlertDialog.show({
+                title: '清空当前会话消息',
+                message: '清空当前会话中的聊天记录与压缩摘要？版图文件不会受影响。',
+                cornerRadius: 16,
+                primaryButton: { value: '取消', fontColor: COLORS.ink, backgroundColor: COLORS.surfaceMuted, action: () => {} },
+                secondaryButton: { value: '清空', fontColor: COLORS.danger, backgroundColor: COLORS.dangerSoft, action: () => {
+                  this.clearConversationAction();
+                  this.managementStatusKind = 'info';
+                  this.managementStatus = '当前会话上下文已清空';
+                } }
+              });
+            })
+        }.width('100%')
+
+        if (this.errorMessage.length > 0) {
+          Text(this.errorMessage)
+            .fontSize(11)
+            .fontColor(COLORS.danger)
+            .lineHeight(17)
+            .width('100%')
+            .padding(8)
+            .backgroundColor(withAlpha(COLORS.danger, ALPHA.HOVER))
+            .borderRadius(8)
+        } else if (this.lastResult.startsWith('已压缩') || this.lastResult.startsWith('已恢复发送完整历史')) {
+          Text(this.lastResult)
+            .fontSize(11)
+            .fontColor(COLORS.success)
+            .lineHeight(17)
+            .width('100%')
+        }
+      }
+      .width('100%')
+      .padding(12)
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border })
+      .borderRadius(12)
+
+      // Card 3: EDA Payload Scope & Thinking Display Preference
+      Column({ space: 8 }) {
+        Text('上下文注入范围与展示偏好')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(COLORS.ink)
+          .width('100%')
+
+        SettingsToggleRow({
+          title: '携带当前会话历史',
           isOn: this.contextOptions.includeHistory,
           enabledState: !this.isLoading && !this.configBusy,
           compact: true,
           onToggle: (value: boolean) => { this.changeContextOption('history', value); }
         })
         SettingsToggleRow({
-          title: '当前版图摘要',
+          title: '携带当前版图摘要（图层 / Cell / DRC）',
           isOn: this.contextOptions.includeLayout,
           enabledState: !this.isLoading && !this.configBusy,
           compact: true,
           onToggle: (value: boolean) => { this.changeContextOption('layout', value); }
         })
         SettingsToggleRow({
-          title: '当前选区',
+          title: '携带当前选中图形几何明细',
           isOn: this.contextOptions.includeSelection,
           enabledState: !this.isLoading && !this.configBusy,
           compact: true,
           onToggle: (value: boolean) => { this.changeContextOption('selection', value); }
         })
-      }.width('100%')
-      Divider().color(COLORS.border)
-      Row() {
-        Text('上下文占用').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).layoutWeight(1)
-        Text(this.tokenMeterState().badgeText)
+        SettingsToggleRow({
+          title: '默认展开模型思考过程',
+          isOn: this.autoExpandThinking,
+          enabledState: true,
+          compact: true,
+          onToggle: (value: boolean) => { this.toggleAutoExpandThinking(value); }
+        })
+
+        Text(this.contextDetail || this.contextSummary || '当前未附带版图上下文')
           .fontSize(11)
-          .fontFamily('monospace')
-          .fontColor(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.primary)
-      }.width('100%').alignItems(VerticalAlign.Center)
-      Progress({ value: this.tokenMeterState().percent, total: 100, type: ProgressType.Linear })
-        .color(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.primary)
-        .backgroundColor(COLORS.surfaceMuted)
-        .style({ strokeWidth: 6 })
-        .width('100%')
-      Text(`${this.contextUsageSummary || '请求前自动估算'} · 自动压缩阈值 ${this.tokenMeterState().thresholdPercent}%`)
-        .fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%').lineHeight(18)
-      Text(this.contextDetail || this.contextSummary || '当前没有版图上下文')
-        .fontSize(UI.fontCaption).fontColor(COLORS.ink).width('100%').lineHeight(19)
-        .padding(10).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-      Text('当前文档说明').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).width('100%')
-      TextArea({ text: this.projectNoteEditing ? this.projectNoteDraft : this.projectNote, placeholder: '命名规则、尺寸单位或工艺约束' })
-        .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); }).height(112).maxLength(8000)
-        .fontSize(UI.fontBody).fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-        .enabled(!this.isLoading && !this.configBusy)
-        .onChange((text: string): void => { this.projectNoteDraft = text; this.projectNoteEditing = true; })
-      Button('保存文档说明', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody)
-        .fontColor(COLORS.primary).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-        .enabled(!this.isLoading && !this.configBusy && this.projectNoteEditing)
-        .onClick(() => { if (this.saveProjectNoteAction(this.projectNoteDraft)) this.projectNoteEditing = false; })
-      Divider().color(COLORS.border)
-      Text('会话压缩').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).width('100%')
-      Text(this.compressionSummary || '尚未压缩会话')
-        .fontSize(UI.fontBody).fontColor(COLORS.ink).width('100%').lineHeight(20)
-        .padding(12).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-      Row({ space: 8 }) {
-        Button('压缩会话').type(ButtonType.Normal).height(UI.controlHeight).layoutWeight(1)
-          .fontSize(UI.fontBody).fontColor(Color.White).backgroundColor(COLORS.primary)
-          .borderRadius(UI.controlRadius).enabled(!this.isLoading && !this.configBusy && this.contextOptions.includeHistory && this.messages.length > 0)
-          .onClick(() => { this.compressCurrentConversation(false); })
-        Button('恢复完整上下文').type(ButtonType.Normal).height(UI.controlHeight).layoutWeight(1)
-          .fontSize(UI.fontBody).fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
-          .borderRadius(UI.controlRadius).enabled(!this.isLoading && !this.configBusy)
-          .onClick(() => { this.compressCurrentConversation(true); })
-      }.width('100%')
-      if (this.managementStatus.length > 0) {
-        Text(this.managementStatus).fontSize(UI.fontCaption).fontColor(COLORS.danger).width('100%')
+          .fontColor(COLORS.muted)
+          .width('100%')
+          .lineHeight(18)
+          .padding(9)
+          .backgroundColor(COLORS.surface)
+          .border({ width: 0.6, color: COLORS.border })
+          .borderRadius(8)
       }
-    }.width('100%').padding({ top: 8, bottom: 12 })
+      .width('100%')
+      .padding(12)
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border })
+      .borderRadius(12)
+
+      // Card 4: Persistent Document / Process Knowledge Note
+      Column({ space: 8 }) {
+        Text('当前文档持久说明（工艺/命名约束）')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(COLORS.ink)
+          .width('100%')
+        TextArea({
+          text: this.projectNoteEditing ? this.projectNoteDraft : this.projectNote,
+          placeholder: '填写本版图专属规则（如最小线宽 180nm、顶层电源命名 VDD/VSS），每次请求自动附带…'
+        })
+          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+          .height(88)
+          .maxLength(8000)
+          .fontSize(12)
+          .fontColor(COLORS.ink)
+          .backgroundColor(COLORS.surface)
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(8)
+          .enabled(!this.isLoading && !this.configBusy)
+          .onChange((text: string): void => { this.projectNoteDraft = text; this.projectNoteEditing = true; })
+        Button('保存文档说明', { type: ButtonType.Normal })
+          .width('100%')
+          .height(34)
+          .fontSize(12)
+          .fontColor(COLORS.primary)
+          .backgroundColor(COLORS.primarySoft)
+          .borderRadius(8)
+          .enabled(!this.isLoading && !this.configBusy && this.projectNoteEditing)
+          .onClick(() => {
+            if (this.saveProjectNoteAction(this.projectNoteDraft)) {
+              this.projectNoteEditing = false;
+              this.managementStatusKind = 'info';
+              this.managementStatus = '当前文档说明已保存';
+            }
+          })
+      }
+      .width('100%')
+      .padding(12)
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border })
+      .borderRadius(12)
+
+      if (this.managementStatus.length > 0) {
+        Text(this.managementStatus)
+          .fontSize(UI.fontCaption)
+          .fontColor(this.managementStatusKind === 'info' ? COLORS.success : COLORS.danger)
+          .width('100%')
+      }
+    }.width('100%').padding({ top: 8, bottom: 14 })
   }
 
   @Builder
@@ -2052,282 +2960,592 @@ export struct AiAssistantPanel {
       .onClick(() => { if (!this.isLoading && !this.configBusy) this.openManagement('context'); })
   }
 
+  /** DSH-Harmony Multi-Provider & Multi-Model Studio: clean card layout, searchable catalog with [+ 添加], & 16K~1M window pills. */
   @Builder
   DesktopSettings() {
     Column({ space: 12 }) {
-      Text('供应商与模型')
-        .fontSize(UI.titleSize)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(COLORS.ink)
-        .width('100%')
-      Row({ space: 12 }) {
-        Text('已存配置').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        Select(this.profileOptions()).selected(this.selectedProfileIndex())
-          .enabled(!this.isLoading && !this.configBusy)
-          .value(this.selectedProfileId.length > 0 ? this.profileNameText : '新增供应商草稿')
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .layoutWeight(1).height(UI.fieldHeight).font({ size: UI.fontBody }).fontColor(COLORS.ink)
-          .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .onSelect((index: number) => { if (index >= 0 && index < this.providerProfiles.length) this.switchProviderModel(this.providerProfiles[index].id); })
+      // Top Strip: Saved Providers Capsules + [+ 新增供应商]
+      Column({ space: 8 }) {
+        Row({ space: 8 }) {
+          Text('已配置供应商')
+            .fontSize(12)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(COLORS.muted)
+            .layoutWeight(1)
+          if (this.selectedProfileId.length > 0 && this.providerProfiles.length > 1) {
+            Button('删除当前供应商', { type: ButtonType.Normal })
+              .height(22).padding({ left: 6, right: 6 }).fontSize(11)
+              .fontColor(COLORS.danger).backgroundColor(Color.Transparent)
+              .onClick(() => this.deleteProviderOrModel(false))
+          }
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        Scroll() {
+          Row({ space: 6 }) {
+            ForEach(this.providerProfiles, (p: AiProviderProfile) => {
+              Button({ type: ButtonType.Normal }) {
+                Row({ space: 5 }) {
+                  Circle({ width: 6, height: 6 })
+                    .fill(this.selectedProfileId === p.id ? COLORS.primary : COLORS.border)
+                  Text(`${p.name} (${p.models.length})`)
+                    .fontSize(12)
+                    .fontWeight(this.selectedProfileId === p.id ? FontWeight.Bold : FontWeight.Regular)
+                    .fontColor(this.selectedProfileId === p.id ? COLORS.primary : COLORS.ink)
+                }.alignItems(VerticalAlign.Center)
+              }
+              .height(30)
+              .padding({ left: 10, right: 10 })
+              .backgroundColor(this.selectedProfileId === p.id ? COLORS.primarySoft : COLORS.surfaceMuted)
+              .border({ width: 0.8, color: this.selectedProfileId === p.id ? withAlpha(COLORS.primary, 0.35) : COLORS.border })
+              .borderRadius(RADIUS.capsule)
+              .onClick(() => { this.switchProviderModel(p.id); })
+            }, (p: AiProviderProfile): string => `${p.id}:${p.name}:${p.models.length}:${this.selectedProfileId}`)
+
+            Button('+ 新增供应商', { type: ButtonType.Normal })
+              .id('ai-new-provider-btn')
+              .height(30)
+              .padding({ left: 11, right: 11 })
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.selectedProfileId.length === 0 ? Color.White : COLORS.primary)
+              .backgroundColor(this.selectedProfileId.length === 0 ? COLORS.primary : COLORS.surface)
+              .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.4) })
+              .borderRadius(RADIUS.capsule)
+              .onClick(() => this.newProviderDraft())
+          }
+        }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
       }.width('100%')
-      Row({ space: 8 }) {
-        Button('新增供应商', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody)
-          .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .onClick(() => this.newProviderDraft())
-        Button('删除供应商', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody)
-          .fontColor(COLORS.danger).backgroundColor(COLORS.dangerSoft).borderRadius(UI.controlRadius)
-          .enabled(this.selectedProfileId.length > 0 && this.providerProfiles.length > 1)
-          .onClick(() => this.deleteProviderOrModel(false))
-      }.width('100%')
-      Row({ space: 12 }) {
-        Text('配置名称').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        TextInput({ text: this.profileNameText, placeholder: '如 公司网关 / 本地模型' })
+
+      // Card 1: Provider Connection & Preset Catalog
+      Column({ space: 10 }) {
+        Row({ space: 8 }) {
+          Text(this.selectedProfileId.length > 0 ? '服务商连接与凭据' : '新建供应商草稿')
+            .fontSize(13)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(COLORS.ink)
+            .layoutWeight(1)
+          Button(this.showPresetTemplates ? '收起预设模板' : '套用主流预设 ▾', { type: ButtonType.Normal })
+            .height(24)
+            .padding({ left: 8, right: 8 })
+            .fontSize(11)
+            .fontColor(COLORS.primary)
+            .backgroundColor(COLORS.primarySoft)
+            .borderRadius(RADIUS.capsule)
+            .onClick(() => { this.showPresetTemplates = !this.showPresetTemplates; })
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        if (this.showPresetTemplates || this.selectedProfileId.length === 0) {
+          Scroll() {
+            Row({ space: 6 }) {
+              ForEach(PRESET_PROVIDERS, (preset: PresetProvider, idx: number) => {
+                Button(preset.name, { type: ButtonType.Normal })
+                  .height(26)
+                  .padding({ left: 10, right: 10 })
+                  .fontSize(11)
+                  .fontColor(this.selectedProviderIndex === idx ? COLORS.primary : COLORS.ink)
+                  .backgroundColor(this.selectedProviderIndex === idx ? COLORS.primarySoft : COLORS.surface)
+                  .border({ width: 0.7, color: this.selectedProviderIndex === idx ? withAlpha(COLORS.primary, 0.4) : COLORS.border })
+                  .borderRadius(RADIUS.capsule)
+                  .onClick(() => { this.applyProviderPreset(idx); })
+              }, (preset: PresetProvider, idx: number): string => `preset-${idx}-${preset.name}`)
+            }
+          }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+        }
+
+        Row({ space: 6 }) {
+          ForEach(
+            [AiProvider.OPENAI_COMPATIBLE, AiProvider.OLLAMA_LOCAL, AiProvider.DEMO_MODE],
+            (proto: AiProvider) => {
+              Button(
+                proto === AiProvider.OPENAI_COMPATIBLE
+                  ? 'OpenAI 兼容'
+                  : (proto === AiProvider.OLLAMA_LOCAL ? 'Ollama 本地' : '离线演示'),
+                { type: ButtonType.Normal }
+              )
+                .layoutWeight(1)
+                .height(28)
+                .fontSize(11)
+                .fontWeight(this.providerValue === proto ? FontWeight.Bold : FontWeight.Regular)
+                .fontColor(this.providerValue === proto ? COLORS.primary : COLORS.muted)
+                .backgroundColor(this.providerValue === proto ? COLORS.primarySoft : COLORS.surface)
+                .border({ width: 0.7, color: this.providerValue === proto ? withAlpha(COLORS.primary, 0.35) : COLORS.border })
+                .borderRadius(8)
+                .onClick(() => {
+                  this.providerValue = proto;
+                  this.discoveredModels = [];
+                  this.discoveredCatalog = [];
+                })
+            },
+            (proto: AiProvider): string => `${proto}:${this.providerValue}`
+          )
+        }.width('100%')
+
+        TextInput({ text: this.profileNameText, placeholder: '供应商显示名称（如 WorkBuddy / 硅基流动 / DeepSeek）' })
           .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .layoutWeight(1).height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink)
-          .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
+          .width('100%').height(36).fontSize(12).fontColor(COLORS.ink)
+          .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
           .onChange((value: string) => { this.profileNameText = value; })
-      }.width('100%')
-      Row({ space: 12 }) {
-        Text('快速模板').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        Select(this.providerOptions())
-          .enabled(!this.isLoading && !this.configBusy)
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .selected(this.selectedProviderIndex)
-          .value(this.selectedProviderName())
-          .layoutWeight(1)
-          .height(UI.fieldHeight)
-          .font({ size: UI.fontBody })
-          .fontColor(COLORS.ink)
-          .backgroundColor(COLORS.surfaceMuted)
-          .borderRadius(UI.controlRadius)
-          .onSelect((index: number) => {
-            this.applyProviderPreset(index);
+
+        if (this.providerValue !== AiProvider.DEMO_MODE) {
+          TextInput({ text: this.endpointText, placeholder: 'API 基础地址（如 https://api.deepseek.com/v1）' })
+            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+            .width('100%').height(36).fontSize(12).fontColor(COLORS.ink)
+            .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+            .onChange((value: string) => { this.endpointText = value; this.discoveredModels = []; this.discoveredCatalog = []; })
+
+          TextInput({
+            text: this.apiKeyText,
+            placeholder: this.credentialReady && this.selectedProfileId.length > 0
+              ? 'API Key 已存系统安全凭据（留空保留原密钥，输入则替换）'
+              : '填写该服务商的 API Key（本地免密服务可留空）'
           })
-      }.width('100%')
-      Row({ space: 12 }) {
-        Text('协议').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        Select([{ value: 'OpenAI 兼容' }, { value: 'Ollama 本地' }, { value: '演示模式' }])
-          .enabled(!this.isLoading && !this.configBusy)
-          .selected(this.providerValue === AiProvider.OPENAI_COMPATIBLE ? 0 : (this.providerValue === AiProvider.OLLAMA_LOCAL ? 1 : 2))
-          .value(this.providerValue === AiProvider.OPENAI_COMPATIBLE ? 'OpenAI 兼容' : (this.providerValue === AiProvider.OLLAMA_LOCAL ? 'Ollama 本地' : '演示模式'))
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .layoutWeight(1).height(UI.fieldHeight).font({ size: UI.fontBody }).fontColor(COLORS.ink)
-          .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .onSelect((index: number) => { this.providerValue = [AiProvider.OPENAI_COMPATIBLE, AiProvider.OLLAMA_LOCAL, AiProvider.DEMO_MODE][index]; this.discoveredModels = []; })
-      }.width('100%')
-      Row({ space: 12 }) {
-        Text('服务地址').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        TextInput({ text: this.endpointText, placeholder: 'Endpoint' })
-          .enabled(!this.isLoading && !this.configBusy)
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .layoutWeight(1)
-          .height(UI.fieldHeight)
-          .fontSize(UI.fontBody)
-          .fontColor(COLORS.ink)
-          .placeholderColor(COLORS.muted)
-          .borderRadius(UI.controlRadius)
-          .backgroundColor(COLORS.surfaceMuted)
-          .onChange((value: string) => { this.endpointText = value; this.discoveredModels = []; })
-      }.width('100%')
-      Row({ space: 12 }) {
-        Text('API Key').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        TextInput({ text: this.apiKeyText, placeholder: 'API key（本地或演示模式可留空）' })
-          .enabled(!this.isLoading && !this.configBusy)
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .layoutWeight(1)
-          .type(InputType.Password)
-          .height(UI.fieldHeight)
-          .fontSize(UI.fontBody)
-          .fontColor(COLORS.ink)
-          .placeholderColor(COLORS.muted)
-          .borderRadius(UI.controlRadius)
-          .backgroundColor(COLORS.surfaceMuted)
-          .onChange((value: string) => { this.apiKeyText = value; this.discoveredModels = []; })
-      }.width('100%')
-      if (!this.credentialReady && this.selectedProfileId.length > 0) {
-        Text('原凭据状态未知。请重试读取，或明确填写新的 API Key；空白草稿不会覆盖已保存的凭据。')
-          .fontSize(UI.fontCaption).fontColor(COLORS.warning).width('100%').lineHeight(18)
-        Button('重试读取已存配置', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody)
-          .fontColor(COLORS.primary).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
-          .enabled(!this.isLoading && !this.configBusy).onClick(() => { this.reloadProviderCredentials(); })
-      }
-      Row({ space: 12 }) {
-        Text('列表地址').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        TextInput({ text: this.modelsEndpointText, placeholder: '留空按协议从服务地址推导' })
-          .enabled(!this.isLoading && !this.configBusy)
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .layoutWeight(1).height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink)
-          .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .onChange((value: string) => { this.modelsEndpointText = value; this.discoveredModels = []; })
-      }.width('100%')
-      if (this.discoveredModels.length > 0) {
-        Select(this.discoveredModelOptions()).value('选择获取到的模型')
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .width('100%').height(UI.fieldHeight).font({ size: UI.fontBody }).fontColor(COLORS.ink)
-          .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .onSelect((index: number) => this.chooseDiscoveredModel(index))
-      }
-      Row({ space: 12 }) {
-        Text('保存模型').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        Select(this.savedModelOptions()).selected(this.selectedModelIndex())
-          .value(this.selectedModelId.length > 0 ? this.modelNameText : '新增模型草稿')
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .layoutWeight(1).height(UI.fieldHeight).font({ size: UI.fontBody }).fontColor(COLORS.ink)
-          .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .enabled(this.selectedProfileId.length > 0)
-          .onSelect((index: number) => { const models: AiSavedModel[] = this.savedModels(); if (index >= 0 && index < models.length) this.switchProviderModel(this.selectedProfileId, models[index].id); })
-      }.width('100%')
-      Row({ space: 8 }) {
-        Button('新增模型', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody)
-          .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .enabled(this.selectedProfileId.length > 0).onClick(() => this.newModelDraft())
-        Button('删除模型', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody)
-          .fontColor(COLORS.danger).backgroundColor(COLORS.dangerSoft).borderRadius(UI.controlRadius)
-          .enabled(this.selectedModelId.length > 0 && this.savedModels().length > 1)
-          .onClick(() => this.deleteProviderOrModel(true))
-      }.width('100%')
-      Row({ space: 12 }) {
-        Text('模型名称').fontSize(UI.fontBody).fontColor(COLORS.ink).width(72)
-        TextInput({ text: this.modelNameText, placeholder: 'Model name' })
-          .enabled(!this.isLoading && !this.configBusy)
-          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-          .layoutWeight(1)
-          .height(UI.fieldHeight)
-          .fontSize(UI.fontBody)
-          .fontColor(COLORS.ink)
-          .placeholderColor(COLORS.muted)
-          .borderRadius(UI.controlRadius)
-          .backgroundColor(COLORS.surfaceMuted)
-          .onChange((value: string) => { this.modelNameText = value; })
-      }.width('100%')
-      Divider().color(COLORS.border).margin({ top: 4, bottom: 4 })
-      Text('Agent 任务连接').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).width('100%')
-      Text(this.agentConnectionText).fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%').lineHeight(18)
-      Row({ space: 8 }) {
-        Button('连接设置', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody).layoutWeight(1)
-          .fontColor(COLORS.primary).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .enabled(!this.isLoading && !this.configBusy).onClick(this.openAgentConnectionAction)
-        Button('检查连接', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody).layoutWeight(1)
-          .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-          .enabled(!this.connectionBusy && !this.isLoading).onClick(() => { this.refreshAgentConnection(true); })
-      }.width('100%')
-      Divider().color(COLORS.border).margin({ top: 4, bottom: 4 })
-      Text('生成与上下文').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).width('100%')
-      SettingsToggleRow({
-        title: '启用当前模型',
-        isOn: this.configEnabled,
-        enabledState: !this.isLoading && !this.configBusy,
-        compact: true,
-        onToggle: (value: boolean) => {
-          if (value === this.configEnabled) return;
-          this.configEnabled = value;
+            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+            .type(InputType.Password)
+            .width('100%').height(36).fontSize(12).fontColor(COLORS.ink)
+            .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+            .onChange((value: string) => { this.apiKeyText = value; this.discoveredModels = []; this.discoveredCatalog = []; })
+
+          if (!this.credentialReady && this.selectedProfileId.length > 0) {
+            Row({ space: 8 }) {
+              Text('系统凭据待重新读取').fontSize(11).fontColor(COLORS.warning).layoutWeight(1)
+              Button('重试读取', { type: ButtonType.Normal }).height(24).padding({ left: 8, right: 8 }).fontSize(11)
+                .fontColor(COLORS.primary).backgroundColor(COLORS.primarySoft).borderRadius(6)
+                .onClick(() => { this.reloadProviderCredentials(); })
+            }.width('100%')
+          }
+
+          Row({ space: 8 }) {
+            Button(this.showAdvancedModelsUrl ? '收起自定义目录地址' : '自定义模型目录地址（可选）', { type: ButtonType.Normal })
+              .height(22).padding(0).fontSize(11).fontColor(COLORS.muted).backgroundColor(Color.Transparent)
+              .onClick(() => { this.showAdvancedModelsUrl = !this.showAdvancedModelsUrl; })
+            Blank().layoutWeight(1)
+            Button('伴随服务设置', { type: ButtonType.Normal })
+              .height(24).padding({ left: 8, right: 8 }).fontSize(11)
+              .fontColor(COLORS.primary).backgroundColor(COLORS.surface)
+              .border({ width: 0.7, color: COLORS.border }).borderRadius(RADIUS.capsule)
+              .onClick(this.openAgentConnectionAction)
+            Button('检查伴随端', { type: ButtonType.Normal })
+              .height(24).padding({ left: 8, right: 8 }).fontSize(11)
+              .fontColor(COLORS.ink).backgroundColor(COLORS.surface)
+              .border({ width: 0.7, color: COLORS.border }).borderRadius(RADIUS.capsule)
+              .enabled(!this.connectionBusy)
+              .onClick(() => { this.refreshAgentConnection(true); })
+          }.width('100%').alignItems(VerticalAlign.Center)
+
+          if (this.showAdvancedModelsUrl) {
+            TextInput({ text: this.modelsEndpointText, placeholder: '留空自动拼接 /models；特殊网关可填完整目录 URL' })
+              .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+              .width('100%').height(34).fontSize(12).fontColor(COLORS.ink)
+              .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+              .onChange((value: string) => { this.modelsEndpointText = value; this.discoveredModels = []; this.discoveredCatalog = []; })
+          }
+          Text(this.agentConnectionText).fontSize(11).fontColor(COLORS.muted).width('100%').maxLines(2)
         }
-      })
-      Row({ space: 12 }) {
-        Column({ space: 6 }) {
-          Text('温度（0–2）').fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%')
-          TextInput({ text: this.temperatureText, placeholder: '如 0.3' })
-            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-            .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink)
-            .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-            .enabled(!this.isLoading && !this.configBusy)
-            .onChange((value: string) => { this.temperatureText = value; })
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Column({ space: 6 }) {
-          Text('最大输出（128–65536 tokens）').fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%')
-          TextInput({ text: this.maxTokensText, placeholder: '如 8192' })
-            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-            .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink)
-            .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-            .enabled(!this.isLoading && !this.configBusy)
-            .onChange((value: string) => { this.maxTokensText = value; })
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      }.width('100%')
-      Row({ space: 12 }) {
-        Column({ space: 6 }) {
-          Text('超时（1–180 秒）').fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%')
-          TextInput({ text: this.timeoutSecondsText, placeholder: '如 120' })
-            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-            .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink)
-            .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-            .enabled(!this.isLoading && !this.configBusy)
-            .onChange((value: string) => { this.timeoutSecondsText = value; })
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Column({ space: 6 }) {
-          Text('上下文窗口（8192–2097152 tokens）').fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%')
-          TextInput({ text: this.contextWindowText, placeholder: '如 32768' })
-            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-            .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink)
-            .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-            .enabled(!this.isLoading && !this.configBusy)
-            .onChange((value: string) => { this.contextWindowText = value; })
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      }.width('100%')
-      Text('自动压缩阈值（50–95%）').fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%')
-      TextInput({ text: this.compressionThresholdText, placeholder: '如 80' })
-        .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-        .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink)
-        .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-        .enabled(!this.isLoading && !this.configBusy)
-        .onChange((value: string) => { this.compressionThresholdText = value; })
-      SettingsToggleRow({
-        title: '达到阈值自动压缩',
-        isOn: this.autoCompressValue,
-        enabledState: !this.isLoading && !this.configBusy,
-        compact: true,
-        onToggle: (value: boolean) => {
-          if (value === this.autoCompressValue) return;
-          this.autoCompressValue = value;
-        }
-      })
-      if (this.isLoading) {
-        Text('任务运行中，配置将在任务结束后才能保存或测试')
-          .fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%')
       }
+      .width('100%')
+      .padding(12)
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border })
+      .borderRadius(12)
+
+      // Card 2: Saved Models Pool + Manual [+ 添加] + Searchable Remote Model Catalog with [+ 添加]
+      Column({ space: 10 }) {
+        Row({ space: 8 }) {
+          Text(`已添加的模型（${this.selectedProfileId.length > 0 ? this.savedModels().length : Math.max(this.pendingDraftModels.length, this.modelNameText.trim().length > 0 ? 1 : 0)}）`)
+            .fontSize(13)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(COLORS.ink)
+            .layoutWeight(1)
+          if (this.discoveryBusy) {
+            LoadingProgress().width(16).height(16).color(COLORS.primary)
+            Button('取消获取', { type: ButtonType.Normal })
+              .height(26).padding({ left: 8, right: 8 }).fontSize(11)
+              .fontColor(COLORS.ink).backgroundColor(COLORS.surface).borderRadius(RADIUS.capsule)
+              .onClick(() => aiService.cancelModelDiscovery())
+          } else if (this.providerValue === AiProvider.OPENAI_COMPATIBLE || this.providerValue === AiProvider.OLLAMA_LOCAL) {
+            Button('获取远端模型目录', { type: ButtonType.Normal })
+              .id('ai-fetch-models-btn')
+              .height(28)
+              .padding({ left: 10, right: 10 })
+              .fontSize(11)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.primary)
+              .backgroundColor(COLORS.primarySoft)
+              .borderRadius(RADIUS.capsule)
+              .onClick(() => { this.fetchModels(); })
+          }
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        // Saved models list under this provider
+        if (this.selectedProfileId.length > 0 && this.savedModels().length > 0) {
+          Column({ space: 4 }) {
+            ForEach(this.savedModels(), (m: AiSavedModel) => {
+              Row({ space: 6 }) {
+                Button({ type: ButtonType.Normal }) {
+                  Row({ space: 6 }) {
+                    Circle({ width: 7, height: 7 })
+                      .fill(this.selectedModelId === m.id ? COLORS.primary : COLORS.border)
+                    Text(m.config.modelName)
+                      .fontSize(12)
+                      .fontWeight(this.selectedModelId === m.id ? FontWeight.Bold : FontWeight.Regular)
+                      .fontColor(this.selectedModelId === m.id ? COLORS.primary : COLORS.ink)
+                      .layoutWeight(1)
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    Text(formatCompactTokens(m.config.contextWindowTokens ?? 32768))
+                      .fontSize(10)
+                      .fontFamily('monospace')
+                      .fontColor(COLORS.muted)
+                      .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                      .backgroundColor(COLORS.surfaceMuted)
+                      .borderRadius(RADIUS.capsule)
+                    if (this.selectedModelId === m.id) {
+                      Text('当前')
+                        .fontSize(10)
+                        .fontColor(COLORS.primary)
+                        .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                        .backgroundColor(COLORS.primarySoft)
+                        .borderRadius(RADIUS.capsule)
+                    }
+                  }.width('100%').alignItems(VerticalAlign.Center)
+                }
+                .layoutWeight(1)
+                .height(34)
+                .padding({ left: 8, right: 8 })
+                .backgroundColor(this.selectedModelId === m.id ? COLORS.surface : Color.Transparent)
+                .borderRadius(8)
+                .onClick(() => { this.switchProviderModel(this.selectedProfileId, m.id); })
+
+                if (this.savedModels().length > 1) {
+                  Button({ type: ButtonType.Normal }) {
+                    WorkbenchIcon({ name: 'delete', iconSize: 13, color: COLORS.danger })
+                  }
+                  .width(28).height(28).padding(0)
+                  .backgroundColor(COLORS.dangerSoft).borderRadius(6)
+                  .accessibilityText(`移除模型 ${m.config.modelName}`)
+                  .onClick(() => { this.deleteProviderOrModel(true, m.id); })
+                }
+              }.width('100%').alignItems(VerticalAlign.Center)
+            }, (m: AiSavedModel): string => `${m.id}:${m.config.modelName}:${m.config.contextWindowTokens}:${this.selectedModelId}`)
+          }.width('100%')
+        } else if (this.pendingDraftModels.length > 0) {
+          Scroll() {
+            Row({ space: 6 }) {
+              ForEach(this.pendingDraftModels, (draftId: string) => {
+                Button(`${draftId} ×`, { type: ButtonType.Normal })
+                  .height(26).padding({ left: 8, right: 8 }).fontSize(11)
+                  .fontColor(this.modelNameText === draftId ? COLORS.primary : COLORS.ink)
+                  .backgroundColor(COLORS.surface).borderRadius(RADIUS.capsule)
+                  .onClick(() => {
+                    this.pendingDraftModels = this.pendingDraftModels.filter((x: string): boolean => x !== draftId);
+                    if (this.modelNameText === draftId) {
+                      this.modelNameText = this.pendingDraftModels[0] ?? '';
+                    }
+                  })
+              }, (draftId: string): string => draftId)
+            }
+          }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+        }
+
+        // Manual quick-add model ID bar
+        Row({ space: 6 }) {
+          TextInput({ text: this.manualNewModelText, placeholder: '输入模型 ID 手动添加（如 deepseek-reasoner / qwen3-coder）' })
+            .id('ai-manual-model-input')
+            .layoutWeight(1)
+            .height(34)
+            .fontSize(12)
+            .fontColor(COLORS.ink)
+            .backgroundColor(COLORS.surface)
+            .border({ width: 0.8, color: COLORS.border })
+            .borderRadius(8)
+            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+            .onChange((val: string) => { this.manualNewModelText = val; })
+            .onSubmit(() => { this.addModelFromInputOrCatalog(this.manualNewModelText, 0, true); })
+          Button('+ 添加模型', { type: ButtonType.Normal })
+            .id('ai-manual-add-model-btn')
+            .height(34)
+            .padding({ left: 11, right: 11 })
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(Color.White)
+            .backgroundColor(COLORS.primary)
+            .borderRadius(8)
+            .enabled(this.manualNewModelText.trim().length > 0)
+            .onClick(() => { this.addModelFromInputOrCatalog(this.manualNewModelText, 0, true); })
+        }.width('100%')
+
+        // Interactive Searchable Remote Model Catalog (replaces old bare dropdown!)
+        if (this.discoveredCatalog.length > 0) {
+          Column({ space: 8 }) {
+            Row({ space: 6 }) {
+              Text(`远端目录（共 ${this.discoveredCatalog.length} 个，筛选 ${this.filteredCatalogModels().length} 个）`)
+                .fontSize(11)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(COLORS.ink)
+                .layoutWeight(1)
+              Button('批量添加前 8 项', { type: ButtonType.Normal })
+                .height(22).padding({ left: 8, right: 8 }).fontSize(10)
+                .fontColor(COLORS.primary).backgroundColor(COLORS.primarySoft).borderRadius(RADIUS.capsule)
+                .onClick(() => { this.batchAddFilteredCatalogModels(); })
+              Button('收起', { type: ButtonType.Normal })
+                .height(22).padding({ left: 6, right: 6 }).fontSize(10)
+                .fontColor(COLORS.muted).backgroundColor(Color.Transparent)
+                .onClick(() => { this.discoveredCatalog = []; this.discoveredModels = []; })
+            }.width('100%').alignItems(VerticalAlign.Center)
+
+            Search({ value: this.catalogSearchText, placeholder: '在已获取目录中搜索模型名或关键词…' })
+              .id('ai-catalog-search')
+              .height(32)
+              .textFont({ size: 12 })
+              .placeholderFont({ size: 12 })
+              .fontColor(COLORS.ink)
+              .placeholderColor(COLORS.muted)
+              .searchIcon({ size: 14, color: COLORS.muted })
+              .backgroundColor(COLORS.surfaceMuted)
+              .borderRadius(8)
+              .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+              .onChange((val: string) => { this.catalogSearchText = val; })
+
+            Row({ space: 6 }) {
+              ForEach(['全部', '推理', '文本', '视觉'], (cat: string) => {
+                Button(cat, { type: ButtonType.Normal })
+                  .height(24).padding({ left: 9, right: 9 }).fontSize(11)
+                  .fontColor(this.catalogCategory === cat ? COLORS.primary : COLORS.muted)
+                  .backgroundColor(this.catalogCategory === cat ? COLORS.primarySoft : COLORS.surfaceMuted)
+                  .borderRadius(RADIUS.capsule)
+                  .onClick(() => { this.catalogCategory = cat; })
+              }, (cat: string): string => `cat-${cat}-${this.catalogCategory}`)
+            }.width('100%')
+
+            Scroll() {
+              Column({ space: 4 }) {
+                ForEach(this.filteredCatalogModels(), (spec: AiDiscoveredModelSpec) => {
+                  Row({ space: 8 }) {
+                    Column({ space: 2 }) {
+                      Text(spec.id)
+                        .fontSize(12)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(COLORS.ink)
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      Text(`${spec.categories.join(' · ')} · 默认窗口 ${formatCompactTokens(spec.contextWindow)}`)
+                        .fontSize(10)
+                        .fontColor(COLORS.muted)
+                    }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+
+                    if (this.isModelSavedInCurrentDraft(spec.id)) {
+                      Button('已添加 · 选用', { type: ButtonType.Normal })
+                        .height(26).padding({ left: 9, right: 9 }).fontSize(11)
+                        .fontColor(COLORS.success).backgroundColor(withAlpha(COLORS.success, 0.12))
+                        .borderRadius(RADIUS.capsule)
+                        .onClick(() => { this.addModelFromInputOrCatalog(spec.id, spec.contextWindow, true); })
+                    } else {
+                      Button('+ 添加', { type: ButtonType.Normal })
+                        .height(26).padding({ left: 10, right: 10 }).fontSize(11)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(COLORS.primary).backgroundColor(COLORS.primarySoft)
+                        .borderRadius(RADIUS.capsule)
+                        .onClick(() => { this.addModelFromInputOrCatalog(spec.id, spec.contextWindow, true); })
+                    }
+                  }
+                  .width('100%')
+                  .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+                  .border({ width: { bottom: 0.5 }, color: COLORS.border })
+                }, (spec: AiDiscoveredModelSpec): string => `${spec.id}:${this.isModelSavedInCurrentDraft(spec.id)}`)
+              }.width('100%')
+            }
+            .width('100%')
+            .constraintSize({ maxHeight: 220 })
+            .scrollBar(BarState.Auto)
+          }
+          .width('100%')
+          .padding(10)
+          .backgroundColor(COLORS.surface)
+          .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.32) })
+          .borderRadius(10)
+        }
+      }
+      .width('100%')
+      .padding(12)
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border })
+      .borderRadius(12)
+
+      // Card 3: Current Model Context Window, Thinking Effort & Output Tuning (Prominently Accessible!)
+      Column({ space: 10 }) {
+        Row({ space: 6 }) {
+          Text('当前模型上下文窗口与推理参数')
+            .fontSize(13)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(COLORS.ink)
+            .layoutWeight(1)
+        }.width('100%')
+
+        Row({ space: 8 }) {
+          Text('当前编辑模型').fontSize(11).fontColor(COLORS.muted).width(74)
+          TextInput({ text: this.modelNameText, placeholder: '当前激活模型 ID' })
+            .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+            .layoutWeight(1).height(34).fontSize(12).fontColor(COLORS.ink)
+            .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+            .onChange((value: string) => { this.modelNameText = value; })
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        Text('模型上下文窗口容量（点击预设或手动填写）')
+          .fontSize(11)
+          .fontColor(COLORS.muted)
+          .width('100%')
+
+        Scroll() {
+          this.ContextWindowPresetChips(Number(this.contextWindowText) || 32768, (win: number) => {
+            this.applyWindowPresetInSettings(win);
+          })
+        }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+
+        Row({ space: 8 }) {
+          Column({ space: 4 }) {
+            Text('窗口上限 (tokens)').fontSize(11).fontColor(COLORS.muted)
+            TextInput({ text: this.contextWindowText, placeholder: '如 131072' })
+              .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+              .height(34).fontSize(12).fontColor(COLORS.ink)
+              .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+              .onChange((value: string) => { this.contextWindowText = value; })
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+
+          Column({ space: 4 }) {
+            Text('最大输出 (tokens)').fontSize(11).fontColor(COLORS.muted)
+            TextInput({ text: this.maxTokensText, placeholder: '如 8192' })
+              .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+              .height(34).fontSize(12).fontColor(COLORS.ink)
+              .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+              .onChange((value: string) => { this.maxTokensText = value; })
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        }.width('100%')
+
+        Row({ space: 6 }) {
+          Text('输出快捷档').fontSize(11).fontColor(COLORS.muted)
+          Scroll() {
+            Row({ space: 6 }) {
+              ForEach([2048, 4096, 8192, 16384, 32768], (outTok: number) => {
+                Button(formatCompactTokens(outTok), { type: ButtonType.Normal })
+                  .height(24).padding({ left: 8, right: 8 }).fontSize(11)
+                  .fontColor(Number(this.maxTokensText) === outTok ? COLORS.primary : COLORS.muted)
+                  .backgroundColor(Number(this.maxTokensText) === outTok ? COLORS.primarySoft : COLORS.surface)
+                  .borderRadius(RADIUS.capsule)
+                  .onClick(() => {
+                    this.maxTokensText = String(outTok);
+                    const curWin: number = Number(this.contextWindowText) || 32768;
+                    if (outTok + 6000 >= curWin) {
+                      this.contextWindowText = String(Math.max(32768, outTok * 2));
+                    }
+                  })
+              }, (outTok: number): string => `out-${outTok}-${this.maxTokensText}`)
+            }
+          }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).layoutWeight(1)
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        Row({ space: 6 }) {
+          Text('思考强度').fontSize(11).fontColor(COLORS.muted)
+          Scroll() {
+            this.ReasoningEffortChips(this.reasoningEffortValue, (effort: AiReasoningEffort) => {
+              this.reasoningEffortValue = effort;
+            })
+          }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).layoutWeight(1)
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        Row({ space: 8 }) {
+          Column({ space: 4 }) {
+            Text('采样温度 (0–2)').fontSize(11).fontColor(COLORS.muted)
+            TextInput({ text: this.temperatureText, placeholder: '0.3' })
+              .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+              .height(34).fontSize(12).fontColor(COLORS.ink)
+              .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+              .onChange((value: string) => { this.temperatureText = value; })
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+
+          Column({ space: 4 }) {
+            Text('请求超时 (秒)').fontSize(11).fontColor(COLORS.muted)
+            TextInput({ text: this.timeoutSecondsText, placeholder: '120' })
+              .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+              .height(34).fontSize(12).fontColor(COLORS.ink)
+              .backgroundColor(COLORS.surface).border({ width: 0.8, color: COLORS.border }).borderRadius(8)
+              .onChange((value: string) => { this.timeoutSecondsText = value; })
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        }.width('100%')
+
+        SettingsToggleRow({
+          title: '启用当前模型',
+          isOn: this.configEnabled,
+          enabledState: !this.isLoading && !this.configBusy,
+          compact: true,
+          onToggle: (value: boolean) => { this.configEnabled = value; }
+        })
+      }
+      .width('100%')
+      .padding(12)
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border })
+      .borderRadius(12)
     }
     .width('100%')
-    .padding(0)
-    .backgroundColor(COLORS.surface)
-    .borderRadius(RADIUS.md)
-    .margin({ bottom: 12 })
+    .padding({ top: 6, bottom: 14 })
     .enabled(!this.isLoading && !this.configBusy)
-    .transition(panelTransition(TransitionEdge.TOP))
   }
 
+  /** Compact Single-Row Settings Footer (replaces the old 220vp 4-row stacked footer). */
   @Builder
   SettingsFooter() {
-    Column({ space: 8 }) {
+    Column({ space: 6 }) {
       if (this.testStatusText.length > 0) {
-        Text(this.testStatusText).fontSize(UI.fontCaption).fontColor(COLORS.muted).lineHeight(17).width('100%')
+        Text(this.testStatusText)
+          .fontSize(11)
+          .fontColor(/失败|无效|错误|超时/.test(this.testStatusText) ? COLORS.danger : COLORS.primary)
+          .lineHeight(16)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
       }
-      if (this.discoveryBusy) {
-        Row({ space: 8 }) {
-          LoadingProgress().width(18).height(18).color(COLORS.primary)
-          Text('正在获取模型列表').fontSize(UI.fontCaption).fontColor(COLORS.muted).layoutWeight(1)
-          Button('取消获取', { type: ButtonType.Normal }).height(UI.controlHeight).fontSize(UI.fontBody)
-            .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-            .onClick(() => aiService.cancelModelDiscovery())
-        }.width('100%')
-      }
-      Button('一键获取模型列表', { type: ButtonType.Normal }).width('100%').height(UI.controlHeight).fontSize(UI.fontBody)
-        .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-        .enabled(!this.isLoading && !this.configBusy && (this.providerValue === AiProvider.OPENAI_COMPATIBLE || this.providerValue === AiProvider.OLLAMA_LOCAL))
-        .onClick(() => { this.fetchModels(); })
-      Button('诊断模型工具调用', { type: ButtonType.Normal }).width('100%').height(UI.controlHeight).fontSize(UI.fontBody)
-        .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-        .enabled(!this.isLoading && !this.configBusy && this.providerValue !== AiProvider.DEMO_MODE)
-        .onClick(() => { this.diagnoseAgent(); })
       Row({ space: 8 }) {
-        Button('测试连接').type(ButtonType.Normal).height(UI.controlHeight).fontSize(UI.fontBody).layoutWeight(1)
-          .backgroundColor(COLORS.surfaceMuted).fontColor(COLORS.ink)
-          .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius)
-          .enabled(!this.isLoading && !this.configBusy).onClick(() => { this.testAiConfig(); })
-        Button('保存配置').type(ButtonType.Normal).height(UI.controlHeight).fontSize(UI.fontBody).layoutWeight(1)
-          .backgroundColor(COLORS.primary).fontColor(Color.White).borderRadius(UI.controlRadius)
-          .enabled(!this.isLoading && !this.configBusy && this.canSaveProviderDraft() && this.profileNameText.trim().length > 0)
+        Button('测试连接', { type: ButtonType.Normal })
+          .height(36)
+          .padding({ left: 10, right: 10 })
+          .fontSize(12)
+          .backgroundColor(COLORS.surfaceMuted)
+          .fontColor(COLORS.ink)
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(UI.controlRadius)
+          .enabled(!this.isLoading && !this.configBusy)
+          .onClick(() => { this.testAiConfig(); })
+
+        if (this.providerValue !== AiProvider.DEMO_MODE) {
+          Button('工具诊断', { type: ButtonType.Normal })
+            .height(36)
+            .padding({ left: 10, right: 10 })
+            .fontSize(12)
+            .backgroundColor(COLORS.surfaceMuted)
+            .fontColor(COLORS.ink)
+            .border({ width: 0.8, color: COLORS.border })
+            .borderRadius(UI.controlRadius)
+            .enabled(!this.isLoading && !this.configBusy)
+            .onClick(() => { this.diagnoseAgent(); })
+        }
+
+        Button('保存配置', { type: ButtonType.Normal })
+          .id('ai-save-config-btn')
+          .height(36)
+          .layoutWeight(1)
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .backgroundColor(COLORS.primary)
+          .fontColor(Color.White)
+          .borderRadius(UI.controlRadius)
+          .enabled(!this.isLoading && !this.configBusy && this.canSaveProviderDraft())
           .onClick(() => { this.saveAiConfig(); })
       }.width('100%')
-    }.width('100%').padding(UI.panelPadding).border({ width: { top: 1 }, color: COLORS.border })
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 8, bottom: 10 })
+    .backgroundColor(COLORS.surface)
+    .border({ width: { top: 0.8 }, color: COLORS.border })
   }
 
   @Builder
@@ -2486,7 +3704,6 @@ export struct AiAssistantPanel {
         } else if (this.showSettings) {
           this.DesktopSettings()
         } else {
-          if (this.showTaskTemplate) { this.ArrayTaskTemplate() }
           if (this.checkpointSummary.length > 0) {
             Text(this.checkpointSummary).fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%').lineHeight(18)
               .padding(UI.panelPadding).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
@@ -2522,39 +3739,49 @@ export struct AiAssistantPanel {
             this.ChatMessageRow(msg)
           }, (msg: ChatMessage, idx: number) =>
             `${this.activeConversationId}_${idx}_${msg.timestamp}_${msg.commandStatus ?? 'none'}`)
-          if (this.liveAssistantVisible()) {
+          if (this.isLoading || this.liveAssistantVisible()) {
             this.LiveAssistantRow()
           }
-          if (this.isLoading && !this.liveAssistantVisible()) {
-            Row({ space: 8 }) {
-              LoadingProgress().width(16).height(16).color(COLORS.primary)
-              Text(this.generationStatus || '正在连接模型…').fontSize(12).fontColor(COLORS.muted).layoutWeight(1)
+          if (this.errorMessage.length > 0) {
+            Column({ space: 8 }) {
+              Text(this.errorMessage)
+                .fontSize(12)
+                .fontColor(COLORS.danger)
+                .lineHeight(19)
+                .width('100%')
+              if (/连接设置|HTTP 401|HTTP 403|认证失败|令牌/.test(this.errorMessage)) {
+                Button('打开连接设置', { type: ButtonType.Normal })
+                  .height(26)
+                  .padding({ left: 10, right: 10 })
+                  .fontSize(11)
+                  .fontColor(COLORS.primary)
+                  .backgroundColor(COLORS.surface)
+                  .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.35) })
+                  .borderRadius(RADIUS.capsule)
+                  .enabled(!this.isLoading && !this.configBusy)
+                  .onClick(this.openAgentConnectionAction)
+              }
             }
             .width('100%')
-            .padding({ top: 10, bottom: 10 })
+            .alignItems(HorizontalAlign.Start)
+            .padding(10)
+            .backgroundColor(withAlpha(COLORS.danger, ALPHA.HOVER))
+            .borderRadius(UI.controlRadius)
+            .margin({ top: 8 })
           }
-          if (this.errorMessage.length > 0) {
-            Text(this.errorMessage)
-              .fontSize(12)
-              .fontColor(COLORS.danger)
-              .lineHeight(19)
-              .width('100%')
-              .padding(10)
-              .backgroundColor(withAlpha(COLORS.danger, ALPHA.HOVER))
-              .borderRadius(UI.controlRadius)
-              .margin({ top: 8 })
-          }
-          if (!this.isLoading && this.pendingSummary.length === 0 && (this.hasInterruptedTurn() || this.checkpointSummary.length > 0)) {
+          if (!this.isLoading && this.pendingSummary.length === 0 && (this.hasInterruptedTurn() || this.hasRecoverableArtifact)) {
             Row({ space: 8 }) {
-              Button('继续任务', { type: ButtonType.Normal }).height(28).padding({ left: 10, right: 10 }).fontSize(UI.fontCaption)
-                .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(RADIUS.capsule)
-                .enabled(!this.configBusy && this.contextOptions.includeHistory).onClick(() => this.continueAgent(false))
-              if (this.errorMessage.length > 0) {
+              if (this.hasInterruptedTurn()) {
+                Button('继续任务', { type: ButtonType.Normal }).height(28).padding({ left: 10, right: 10 }).fontSize(UI.fontCaption)
+                  .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(RADIUS.capsule)
+                  .enabled(!this.configBusy && this.contextOptions.includeHistory).onClick(() => this.continueAgent(false))
+              }
+              if (this.errorMessage.length > 0 || this.hasInterruptedTurn()) {
                 Button('重试未完成', { type: ButtonType.Normal }).height(28).padding({ left: 10, right: 10 }).fontSize(UI.fontCaption)
                   .fontColor(COLORS.primary).backgroundColor(COLORS.primarySoft).borderRadius(RADIUS.capsule)
                   .enabled(!this.configBusy && this.contextOptions.includeHistory && this.latestUserPrompt().length > 0).onClick(() => this.continueAgent(true))
               }
-              if (this.checkpointSummary.length > 0) {
+              if (this.hasRecoverableArtifact) {
                 Button('恢复未载入产物', { type: ButtonType.Normal }).height(28).padding({ left: 10, right: 10 }).fontSize(UI.fontCaption)
                   .fontColor(COLORS.primary).backgroundColor(COLORS.primarySoft).borderRadius(RADIUS.capsule)
                   .enabled(!this.configBusy).onClick(this.recoverArtifactAction)
@@ -2596,9 +3823,11 @@ export struct AiAssistantPanel {
       }
       .width('100%')
       .padding({ left: 16, right: 16, bottom: 12 })
-      .onAreaChange((oldArea: Area, newArea: Area) => {
-        if (Number(oldArea.height) !== Number(newArea.height)) {
-          this.scrollConversationToLatest();
+      .onAreaChange((_oldArea: Area, newArea: Area) => {
+        const nextContentH: number = Number(newArea.height);
+        if (Number.isFinite(nextContentH) && Math.abs(nextContentH - this.chatContentHeight) > 0.5) {
+          this.chatContentHeight = nextContentH;
+          this.pinConversationToBottomInstant();
         }
       })
     }
@@ -2607,6 +3836,13 @@ export struct AiAssistantPanel {
     .align(Alignment.Top)
     .scrollBar(BarState.Auto)
     .clip(true)
+    .onAreaChange((_oldArea: Area, newArea: Area) => {
+      const nextViewportH: number = Number(newArea.height);
+      if (Number.isFinite(nextViewportH) && Math.abs(nextViewportH - this.chatViewportHeight) > 0.5) {
+        this.chatViewportHeight = nextViewportH;
+        this.pinConversationToBottomInstant();
+      }
+    })
     .onAppear(() => { this.scrollConversationToLatest(); })
     .onWillScroll((_xOffset: number, _yOffset: number, _state: ScrollState, source: ScrollSource) => {
       if (source === ScrollSource.DRAG || source === ScrollSource.FLING ||
@@ -2777,8 +4013,18 @@ export struct AiAssistantPanel {
       .borderRadius(RADIUS.capsule)
       .layoutWeight(1)
       .enabled(!this.isLoading && !this.configBusy)
-      .accessibilityText('上下文范围')
+      .accessibilityText('上下文管理')
       .onClick(() => this.openManagement('context'))
+
+      Button(`上下文 ${this.tokenMeterState().percent}%`, { type: ButtonType.Normal })
+        .height(26)
+        .padding({ left: 8, right: 8 })
+        .fontSize(11)
+        .fontColor(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.muted)
+        .backgroundColor(COLORS.surfaceMuted)
+        .borderRadius(RADIUS.capsule)
+        .enabled(!this.isLoading && !this.configBusy)
+        .onClick(() => this.openManagement('context'))
 
       if (aiService.getConfig().provider !== AiProvider.DEMO_MODE) {
         Button('连接设置', { type: ButtonType.Normal })
@@ -2793,33 +4039,35 @@ export struct AiAssistantPanel {
       }
     }
     .width('100%')
-    .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+    .padding({ left: 12, right: 12, top: 6, bottom: 6 })
     .border({ width: { bottom: 0.6 }, color: COLORS.border })
   }
 
   @Builder
   DesktopPanel() {
+    Stack({ alignContent: Alignment.Top }) {
     Column() {
-      // Single-row compact DSH Agent Header (with Minimize-to-Canvas-HUD button)
-      Row({ space: 5 }) {
+      // Single-row compact DSH Agent Header (Quick Model Popover Pill + Settings Gear + New Chat + Minimize + Close)
+      Row({ space: 4 }) {
         Button({ type: ButtonType.Normal }) {
           WorkbenchIcon({ name: this.showConversations || this.showContext || this.showSettings ? 'chevronLeft' : 'menu',
             iconSize: 17, color: COLORS.ink })
-        }.width(30).height(30).padding(0).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
+        }.width(28).height(28).padding(0).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
           .accessibilityText(this.showConversations || this.showContext || this.showSettings ? '返回聊天' : '会话管理')
           .onClick(() => {
+            this.showQuickModelPicker = false;
             if (this.showConversations || this.showContext || this.showSettings) {
               this.showConversations = false; this.showContext = false; this.showSettings = false;
               this.followsLatest = true; this.scrollConversationToLatest();
             } else { this.openManagement('conversations'); }
           })
 
-        Text(this.showConversations ? '会话管理' : (this.showContext ? '上下文' : (this.showSettings ? '模型设置' : 'AI 助手')))
-          .fontSize(15).fontWeight(FontWeight.Bold).fontColor(COLORS.ink).maxLines(1)
+        Text(this.showConversations ? '会话管理' : (this.showContext ? '上下文管理' : (this.showSettings ? '模型与供应商' : 'AI 助手')))
+          .fontSize(14).fontWeight(FontWeight.Bold).fontColor(COLORS.ink).maxLines(1)
 
         if (!this.showConversations && !this.showContext && !this.showSettings) {
           Button({ type: ButtonType.Normal }) {
-            Row({ space: 5 }) {
+            Row({ space: 4 }) {
               Circle({ width: 6, height: 6 })
                 .fill(aiService.getConfig().provider === AiProvider.DEMO_MODE ? COLORS.muted : COLORS.success)
               Text(this.shortModelPillLabel())
@@ -2827,17 +4075,34 @@ export struct AiAssistantPanel {
                 .fontColor(COLORS.ink)
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
-              WorkbenchIcon({ name: 'chevronDown', iconSize: 10, color: COLORS.muted })
+              WorkbenchIcon({ name: this.showQuickModelPicker ? 'chevronUp' : 'chevronDown', iconSize: 10, color: COLORS.muted })
             }.alignItems(VerticalAlign.Center)
           }
+          .id('ai-header-model-pill')
           .height(28)
           .padding({ left: 8, right: 7 })
-          .backgroundColor(COLORS.surface)
-          .border({ width: 0.8, color: COLORS.border })
+          .backgroundColor(this.showQuickModelPicker ? COLORS.primarySoft : COLORS.surface)
+          .border({ width: 0.8, color: this.showQuickModelPicker ? withAlpha(COLORS.primary, 0.4) : COLORS.border })
           .borderRadius(RADIUS.capsule)
           .layoutWeight(1)
-          .accessibilityText('供应商/模型')
-          .onClick(() => this.openManagement('settings'))
+          .enabled(!this.isLoading && !this.configBusy)
+          .accessibilityText('快捷切换模型')
+          .onClick(() => {
+            this.quickModelSearch = '';
+            this.showQuickModelPicker = !this.showQuickModelPicker;
+          })
+
+          Button({ type: ButtonType.Normal }) {
+            WorkbenchIcon({ name: 'settings', iconSize: 15, color: COLORS.ink })
+          }
+          .id('ai-open-settings-btn')
+          .width(28).height(28).padding(0)
+          .backgroundColor(COLORS.surface)
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(UI.controlRadius)
+          .enabled(!this.isLoading && !this.configBusy)
+          .accessibilityText('打开模型与供应商设置')
+          .onClick(() => { this.openManagement('settings'); })
 
           Button({ type: ButtonType.Normal }) {
             WorkbenchIcon({ name: 'plus', iconSize: 15, color: COLORS.ink })
@@ -2867,7 +4132,7 @@ export struct AiAssistantPanel {
         Button({ type: ButtonType.Normal }) { WorkbenchIcon({ name: 'close', iconSize: 17, color: COLORS.muted }) }
           .width(28).height(28).padding(0).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
           .accessibilityText('关闭 AI 助手').onClick(() => this.closeAction())
-      }.width('100%').height(46).padding({ left: 10, right: 10 })
+      }.width('100%').height(46).padding({ left: 8, right: 8 })
         .backgroundColor(withAlpha(COLORS.surfaceMuted, 0.72)).border({ width: { bottom: 0.8 }, color: COLORS.border })
 
       if ((this.showConversations || this.showContext || this.showSettings) && (this.isLoading || this.configBusy)) {
@@ -2891,12 +4156,15 @@ export struct AiAssistantPanel {
         }.width('100%').padding({ left: 12, right: 12, bottom: 4 })
       }
 
-      // Unified Modern Agent Input Dock (Slash Commands + Agent/ReadOnly Mode Pill + Enter-to-Send)
+      // Unified Modern Agent Input Dock (Slash Commands + Array Template + Agent/ReadOnly Mode Pill + Enter-to-Send)
       if (!this.showConversations && !this.showContext && !this.showSettings) {
         Column({ space: 6 }) {
           this.SlashCommandPalette()
+          if (this.showTaskTemplate) {
+            this.ArrayTaskTemplate()
+          }
 
-          if (this.showQuickActions && this.messages.length > 0 && this.pendingSummary.length === 0 && this.visibleSlashCommands().length === 0) {
+          if (this.showQuickActions && !this.showTaskTemplate && this.pendingSummary.length === 0 && this.visibleSlashCommands().length === 0) {
             Scroll() {
               Row({ space: 6 }) {
                 this.QuickPrompt('解释图形', '解释当前选中的图形及其用途')
@@ -2917,11 +4185,35 @@ export struct AiAssistantPanel {
                 : (this.pendingSummary.length > 0 ? '继续补充修改要求，或输入 / 唤出快捷指令…' : '描述版图需求（Enter 发送，Shift+Enter 换行，/ 快捷指令）…')
             })
               .id('ai-composer-textarea')
+              .enterKeyType(this.desktopMode ? EnterKeyType.Send : EnterKeyType.NEW_LINE)
               .onKeyEvent((event: KeyEvent) => {
                 event.stopPropagation();
-                if (this.desktopMode && event.type === KeyType.Down &&
-                  canvasKeyName(event.keyCode, event.keyText) === 'ENTER' &&
-                  event.getModifierKeyState?.(['Shift']) !== true) {
+                const keyName: string = canvasKeyName(event.keyCode, event.keyText);
+                const modShift: boolean = event.getModifierKeyState?.(['Shift']) === true;
+                if (keyName === 'SHIFT' || event.keyCode === 2047 || event.keyCode === 2048) {
+                  this.composerShiftHeld = event.type === KeyType.Down;
+                  return;
+                }
+                this.composerShiftHeld = modShift;
+                if (this.desktopMode && event.type === KeyType.Down && keyName === 'ENTER' && !modShift) {
+                  this.sendInput();
+                }
+              })
+              .onWillInsert((info: InsertValue): boolean => {
+                if (this.desktopMode && !this.composerShiftHeld &&
+                  (info.insertValue === '\n' || info.insertValue === '\r' || info.insertValue === '\r\n')) {
+                  setTimeout(() => {
+                    if (!this.panelDisposed) {
+                      this.sendInput();
+                    }
+                  }, 0);
+                  return false;
+                }
+                return true;
+              })
+              .onSubmit((_enterKey: EnterKeyType, event?: SubmitEvent) => {
+                if (this.desktopMode && !this.composerShiftHeld) {
+                  event?.keepEditableState?.();
                   this.sendInput();
                 }
               })
@@ -2935,12 +4227,12 @@ export struct AiAssistantPanel {
                 }
               })
 
-            Row({ space: 5 }) {
+            Row({ space: 4 }) {
               Button({ type: ButtonType.Normal }) {
                 Row({ space: 4 }) {
                   Circle({ width: 6, height: 6 })
                     .fill(this.sessionMode === 'readonly' ? COLORS.warning : COLORS.primary)
-                  Text(this.sessionMode === 'readonly' ? '只读问答' : 'Agent')
+                  Text(this.sessionMode === 'readonly' ? '只读' : 'Agent')
                     .fontSize(11)
                     .fontWeight(FontWeight.Medium)
                     .fontColor(this.sessionMode === 'readonly' ? COLORS.warning : COLORS.primary)
@@ -2956,6 +4248,26 @@ export struct AiAssistantPanel {
               .onClick(() => this.toggleSessionModeAction())
 
               Button({ type: ButtonType.Normal }) {
+                Row({ space: 3 }) {
+                  WorkbenchIcon({ name: 'think', iconSize: 12, color: (aiService.getConfig().reasoningEffort ?? 'auto') === 'none' ? COLORS.muted : COLORS.primary })
+                  Text(`思考·${reasoningEffortLabel(aiService.getConfig().reasoningEffort)}`)
+                    .fontSize(11)
+                    .fontColor((aiService.getConfig().reasoningEffort ?? 'auto') === 'none' ? COLORS.muted : COLORS.ink)
+                }.alignItems(VerticalAlign.Center)
+              }
+              .id('ai-thinking-effort-pill')
+              .height(26)
+              .padding({ left: 7, right: 7 })
+              .backgroundColor(COLORS.surfaceMuted)
+              .borderRadius(RADIUS.capsule)
+              .enabled(!this.isLoading && !this.configBusy)
+              .accessibilityText('切换模型与思考强度')
+              .onClick(() => {
+                this.quickModelSearch = '';
+                this.showQuickModelPicker = !this.showQuickModelPicker;
+              })
+
+              Button({ type: ButtonType.Normal }) {
                 WorkbenchIcon({ name: 'slash', iconSize: 13, color: this.visibleSlashCommands().length > 0 ? COLORS.primary : COLORS.muted })
               }
               .id('ai-slash-menu-btn')
@@ -2967,42 +4279,68 @@ export struct AiAssistantPanel {
               .onClick(() => { this.slashMenuForced = !this.slashMenuForced; })
 
               Button('阵列', { type: ButtonType.Normal })
-                .height(26).padding({ left: 8, right: 8 }).fontSize(11)
+                .id('ai-array-toggle-btn')
+                .height(26).padding({ left: 7, right: 7 }).fontSize(11)
                 .fontColor(this.showTaskTemplate ? COLORS.primary : COLORS.muted)
                 .backgroundColor(this.showTaskTemplate ? COLORS.primarySoft : COLORS.surfaceMuted)
                 .borderRadius(RADIUS.capsule)
                 .enabled(!this.isLoading && !this.configBusy)
                 .onClick(() => { this.showTaskTemplate = !this.showTaskTemplate; })
 
-              Button('Python', { type: ButtonType.Normal })
-                .height(26).padding({ left: 8, right: 8 }).fontSize(11)
-                .fontColor(COLORS.muted).backgroundColor(COLORS.surfaceMuted).borderRadius(RADIUS.capsule)
-                .enabled(!this.isLoading && !this.configBusy)
-                .onClick(this.openPythonAction)
+              if (!this.isCompact) {
+                Button('Python', { type: ButtonType.Normal })
+                  .height(26).padding({ left: 7, right: 7 }).fontSize(11)
+                  .fontColor(COLORS.muted).backgroundColor(COLORS.surfaceMuted).borderRadius(RADIUS.capsule)
+                  .enabled(!this.isLoading && !this.configBusy)
+                  .onClick(this.openPythonAction)
+              }
 
               Blank()
 
-              if (this.messages.length > 0 && this.pendingSummary.length === 0 && !this.isCompact) {
-                Button(this.showQuickActions ? '收起建议' : '建议', { type: ButtonType.Normal })
-                  .height(26).padding({ left: 5, right: 5 }).fontSize(11)
-                  .fontColor(COLORS.muted).backgroundColor(Color.Transparent).borderRadius(RADIUS.capsule)
-                  .onClick(() => { this.showQuickActions = !this.showQuickActions; })
+              // DSH Inline Context Usage Ring (live updates with draft text; click opens Context Workbench)
+              Button({ type: ButtonType.Normal }) {
+                Row({ space: 4 }) {
+                  Progress({ value: this.tokenMeterState().percent, total: 100, type: ProgressType.Ring })
+                    .width(13)
+                    .height(13)
+                    .color(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.primary)
+                    .backgroundColor(COLORS.border)
+                    .style({ strokeWidth: 2 })
+                  Text(`${this.tokenMeterState().percent}%`)
+                    .fontSize(10)
+                    .fontFamily('monospace')
+                    .fontColor(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.muted)
+                }.alignItems(VerticalAlign.Center)
               }
+              .id('ai-composer-context-ring')
+              .height(26)
+              .padding({ left: 6, right: 6 })
+              .backgroundColor(Color.Transparent)
+              .borderRadius(RADIUS.capsule)
+              .enabled(!this.isLoading && !this.configBusy)
+              .accessibilityText('查看并调整上下文窗口容量')
+              .onClick(() => { this.openManagement('context'); })
 
               if (this.isLoading && this.canCancel) {
                 Button('停止', { type: ButtonType.Normal })
-                  .height(30).padding({ left: 12, right: 12 }).fontSize(12)
+                  .height(36).padding({ left: 12, right: 12 }).fontSize(12)
                   .fontColor(Color.White).backgroundColor(COLORS.danger).borderRadius(RADIUS.capsule)
                   .accessibilityText('取消生成')
                   .onClick(this.cancelGenerationAction)
               } else {
                 Button({ type: ButtonType.Normal }) {
                   this.SendArrowGlyph()
-                }.width(32).height(32).padding(0)
+                }
+                  .id('ai-send-btn')
+                  .width(36).height(36).padding(0)
+                  .focusable(false)
+                  .focusOnTouch(false)
+                  .responseRegion({ x: -6, y: -6, width: 48, height: 48 })
                   .backgroundColor(this.inputText.trim().length > 0 ? COLORS.primary : COLORS.surfaceMuted)
                   .borderRadius(RADIUS.capsule)
                   .enabled(this.inputText.trim().length > 0 && !this.isLoading && !this.configBusy)
-                  .accessibilityText('发送消息').onClick(() => this.sendInput())
+                  .accessibilityText('发送消息')
+                  .onClick(() => this.sendInput())
               }
             }.width('100%').padding({ left: 8, right: 8, bottom: 8 }).alignItems(VerticalAlign.Center)
           }
@@ -3019,6 +4357,28 @@ export struct AiAssistantPanel {
           .padding({ left: 12, right: 12, top: 8, bottom: 12 })
           .border({ width: { top: 0.8 }, color: COLORS.border })
       }
+    }
+    .width('100%')
+    .height('100%')
+
+    if (this.showQuickModelPicker && !this.showConversations && !this.showContext && !this.showSettings) {
+      Stack({ alignContent: Alignment.Top }) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#00000000')
+          .onClick(() => { this.showQuickModelPicker = false; })
+        Column() {
+          this.QuickModelPickerPopover()
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Center)
+        .margin({ top: 48 })
+      }
+      .width('100%')
+      .height('100%')
+      .zIndex(30)
+    }
     }.width(this.desktopMode ? this.panelWidth : Math.min(this.panelWidth, this.isCompact ? 324 : 380))
       .height(this.desktopMode ? this.panelHeight : Math.min(this.panelHeight, 640))
       .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay'))).clip(true)

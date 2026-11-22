@@ -290,6 +290,8 @@ export class AiAssistantStore {
   @Trace pendingAiCommands: ParsedCommand[] = [];
   @Trace pendingAiContext: AiContext | null = null;
   @Trace aiCheckpointSummary: string = '';
+  @Trace aiHasInterruptedCheckpoint: boolean = false;
+  @Trace aiHasRecoverableArtifact: boolean = false;
   @Trace aiProjectNote: string = '';
   @Trace aiReviewGroups: AiReviewGroup[] = [];
   @Trace aiRunStartedAt: number = 0;

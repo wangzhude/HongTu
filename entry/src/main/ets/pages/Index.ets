@@ -582,6 +582,9 @@ struct Index {
   private aiNativeImportSelection: ImportMergeFileSelection | undefined = undefined;
   private aiRequestGeneration: number = 0;
   private aiOperationTicket: number = 0;
+  private aiStreamFlushTimer: number = -1;
+  private aiStreamBufferedText: string = '';
+  private aiStreamBufferedReasoning: string = '';
   private aiPythonPhase: string = '';
   private aiGeneratedFitAction: (() => void) | null = null;
   private aiGeneratedFitTimer: number = -1;
@@ -1498,7 +1501,8 @@ struct Index {
 
   private propertyX(): number {
     const minLeft: number = this.isDesktopWorkspace() ? 76 : 12;
-    const maxX: number = Math.max(minLeft, this.viewportStore.canvasViewportWidth - 324);
+    const aiOverlayReserve: number = (this.isDesktopWorkspace() && this.panelStore.showAiPanel) ? 476 : 0;
+    const maxX: number = Math.max(minLeft, this.viewportStore.canvasViewportWidth - aiOverlayReserve - 324);
     if (this.panelStore.propertyPanelPinned) return maxX;
     const shape: Shape | undefined = this.shapes.find((item: Shape) => item.id === this.viewportStore.selectedShapeId);
     if (shape === undefined) return maxX;
@@ -2972,6 +2976,7 @@ struct Index {
               })
                 .position({ x: 14, y: 14 })
             }
+            this.buildAgentLiveHud()
           }
           .layoutWeight(1)
           .width('100%')
@@ -3336,27 +3341,42 @@ struct Index {
     .transition(this.floatingTransition(TransitionEdge.BOTTOM))
   }
 
-  private agentHudWidthVp(): number {
-    if (this.isDesktopWorkspace()) {
-      const rightReserved: number = this.panelStore.showAiPanel ? 484 : 32;
-      const available: number = Math.max(280, this.panelStore.windowWidthVp - rightReserved - 24);
-      return Math.min(500, available);
+  private agentCanvasStageWidthVp(): number {
+    if (this.viewportStore.canvasViewportWidth > 160) {
+      return this.viewportStore.canvasViewportWidth;
     }
-    return Math.min(440, Math.max(256, this.panelStore.windowWidthVp - 24));
+    return Math.max(320, this.panelStore.windowWidthVp - (this.isDesktopWorkspace() ? 276 : 0));
+  }
+
+  private agentHudWidthVp(): number {
+    const stageW: number = this.agentCanvasStageWidthVp();
+    if (this.isDesktopWorkspace()) {
+      const leftReserved: number = 204;
+      const rightReserved: number = this.panelStore.showAiPanel
+        ? 484
+        : (this.floatingShapePropertiesVisible() ? 268 : 20);
+      const available: number = Math.max(248, stageW - leftReserved - rightReserved);
+      return Math.min(480, available);
+    }
+    return Math.min(440, Math.max(240, stageW - 24));
   }
 
   private agentHudLeftVp(): number {
+    const stageW: number = this.agentCanvasStageWidthVp();
     const w: number = this.agentHudWidthVp();
-    if (this.isDesktopWorkspace() && this.panelStore.showAiPanel) {
-      const canvasRegionWidth: number = Math.max(w + 24, this.panelStore.windowWidthVp - 476);
-      return Math.max(16, Math.round((canvasRegionWidth - w) / 2));
+    if (this.isDesktopWorkspace()) {
+      const leftReserved: number = 204;
+      const rightReserved: number = this.panelStore.showAiPanel
+        ? 484
+        : (this.floatingShapePropertiesVisible() ? 268 : 20);
+      const corridor: number = Math.max(w, stageW - leftReserved - rightReserved);
+      return Math.max(76, Math.min(Math.max(76, stageW - w - 12), leftReserved + Math.round((corridor - w) / 2)));
     }
-    return Math.max(12, Math.round((this.panelStore.windowWidthVp - w) / 2));
+    return Math.max(12, Math.round((stageW - w) / 2));
   }
 
   private agentHudTopVp(): number {
-    const baseTop: number = (this.isDesktopWorkspace() ? 70 : 62) + Math.max(0, this.safeAreaTopVp);
-    return this.docStore.activeNativeJobId.length > 0 ? baseTop + 58 : baseTop;
+    return this.docStore.activeNativeJobId.length > 0 ? 68 : 14;
   }
 
   @Builder
@@ -3658,6 +3678,7 @@ struct Index {
               compressionSummary: this.aiCompressionLabel(),
               contextDetail: this.aiContextDetail(),
               checkpointSummary: this.aiStore.aiCheckpointSummary,
+              hasRecoverableArtifact: this.aiStore.aiHasRecoverableArtifact,
               projectNote: this.aiStore.aiProjectNote,
               projectIdentity: this.docStore.activeWorkspaceId,
               saveProjectNoteAction: (text: string): boolean => {
@@ -3670,6 +3691,7 @@ struct Index {
               switchConversationAction: (id: string) => this.handleAiConversationAction('switch', id),
               renameConversationAction: (id: string, title: string) => this.handleAiConversationAction('rename', id, title),
               deleteConversationAction: (id: string) => this.handleAiConversationAction('delete', id),
+              clearConversationAction: () => this.handleAiConversationAction('clear'),
               setContextOptionsAction: (options: AiContextOptions) => this.setAiContextOptions(options),
               compressConversationAction: () => { this.compressAiConversation(); },
               clearCompressionAction: () => this.clearAiCompression(),
@@ -3939,7 +3961,6 @@ struct Index {
       if (this.docStore.activeNativeJobId.length > 0) {
         this.buildLiveJobCapsule()
       }
-      this.buildAgentLiveHud()
 
       // LVS 连通性预检查半模态宿主（全尺寸无触摸穿透锚点，避免 SheetType.POPUP 在大屏锚定到 0x0 左上角）
       Stack()
@@ -4394,7 +4415,13 @@ struct Index {
     }
     const latestShapes: Shape[] = editService.getShapes().slice();
     this.refreshPortProjection();
-    this.viewportStore.selectedShapeCount = editService.getSelectedIds().length;
+    const currentSelectedIds: number[] = editService.getSelectedIds();
+    this.viewportStore.selectedShapeCount = currentSelectedIds.length;
+    if (currentSelectedIds.length === 0) {
+      this.viewportStore.selectedShapeId = -1;
+    } else if (!currentSelectedIds.includes(this.viewportStore.selectedShapeId)) {
+      this.viewportStore.selectedShapeId = currentSelectedIds[0];
+    }
     this.shapes = latestShapes;
     this.refreshLayerCounts(latestShapes, preserveLayerOwnFields);
     if (this.viewWorkspaceInitialized && this.viewWorkspaceDocumentId === this.docStore.activeWorkspaceId) this.refreshViewWorkspaceOverlays();
@@ -7357,10 +7384,12 @@ struct Index {
     }
   }
 
-  private runDrc(): void {
-    this.verifyStore.drcDockCollapsed = false;
-    // 使用当前规则集；完整性提示不等同于几何违规。
-    this.viewportStore.currentModule = WorkModule.Verify;
+  private runDrc(preserveWorkspaceModule: boolean = false): void {
+    if (!preserveWorkspaceModule) {
+      this.verifyStore.drcDockCollapsed = false;
+      // 使用当前规则集；完整性提示不等同于几何违规。
+      this.viewportStore.currentModule = WorkModule.Verify;
+    }
     this.panelStore.statusText = '正在运行 DRC 检查...';
     try {
       if (!this.synchronizeCurrentDocument()) throw new Error(this.panelStore.statusText);
@@ -7376,6 +7405,10 @@ struct Index {
         cleanDbuNm(this.docStore.docPhysicalUnits)
       );
       this.verifyStore.drcIssues = this.convertViolationsToIssues(result.violations);
+      if (preserveWorkspaceModule && result.violations.length > 0) {
+        this.verifyStore.drcDockCollapsed = false;
+        this.viewportStore.currentModule = WorkModule.Verify;
+      }
       this.verifyStore.highlightedViolationId = -1;
       this.verifyStore.highlightedViolation = null;
       this.verifyStore.lastDrcElapsed = result.elapsed;
@@ -7392,7 +7425,9 @@ struct Index {
       this.panelStore.statusText = `${summary} (用时 ${result.elapsed}ms)`
         + ` · 层级${depthApplied >= 1 ? depthApplied : '未展开'}`
         + (fallbackRules > 0 ? ` · ${fallbackRules} 条规则未展开` : '');
-      showAppSnackBar(this.getUIContext(), summary, { icon: $r('sys.symbol.checkmark_circle'), duration: AppToastDuration.NORMAL });
+      if (!preserveWorkspaceModule || result.violations.length > 0) {
+        showAppSnackBar(this.getUIContext(), summary, { icon: $r('sys.symbol.checkmark_circle'), duration: AppToastDuration.NORMAL });
+      }
     } catch (e) {
       // INDEX-13: DRC 异常时复位状态并提示，避免界面卡在"正在运行..."
       this.verifyStore.highlightedViolationId = -1;
@@ -8588,7 +8623,31 @@ struct Index {
     const phaseIds: string[] = ['running', 'pending', 'applying', 'applied', 'failed', 'cancelled', 'completed'];
     const phaseLabels: string[] = ['上轮运行未结束，可核对后继续', '方案待确认；重新打开后需重新核对版图',
       '应用回执不完整，需先核对版图', '修改已应用，请查看复检回执', '上轮未完成', '上轮已取消等待', '上轮已结束'];
-    this.aiStore.aiCheckpointSummary = checkpoint === undefined ? '' : `${phaseLabels[phaseIds.indexOf(checkpoint.phase)]} · ${checkpoint.tools.filter((tool: AiChatToolState): boolean => tool.status === 'completed').length} 个工具步骤已记录`;
+    let hasUnloadedArtifact: boolean = false;
+    if (checkpoint !== undefined && !checkpoint.task.readOnly && checkpoint.task.artifactGenerationAllowed &&
+      checkpoint.phase !== 'applying' && checkpoint.documentIdentity === this.docStore.activeWorkspaceId) {
+      let latestArtifactId: string = '';
+      for (const tool of checkpoint.tools) {
+        if (tool.status !== 'completed' || !['create_cmos_inverter', 'execute_layout_python'].includes(tool.name)) continue;
+        try {
+          const val: Record<string, Object> = JSON.parse(tool.result) as Record<string, Object>;
+          const artId: Object | undefined = val['artifactId'];
+          if (val['success'] === true && typeof artId === 'string' && /^[a-f0-9-]{32,36}$/i.test(artId)) {
+            latestArtifactId = artId;
+          }
+        } catch (_) {}
+      }
+      if (latestArtifactId.length > 0 && !(checkpoint.loadedArtifacts ?? []).includes(latestArtifactId)) {
+        hasUnloadedArtifact = true;
+      }
+    }
+    const isInterruptedCheckpoint: boolean = checkpoint !== undefined &&
+      ['running', 'applying', 'failed', 'cancelled'].includes(checkpoint.phase);
+    this.aiStore.aiHasRecoverableArtifact = hasUnloadedArtifact;
+    this.aiStore.aiHasInterruptedCheckpoint = isInterruptedCheckpoint;
+    this.aiStore.aiCheckpointSummary = (checkpoint !== undefined && (isInterruptedCheckpoint || hasUnloadedArtifact))
+      ? `${phaseLabels[phaseIds.indexOf(checkpoint.phase)]} · ${checkpoint.tools.filter((tool: AiChatToolState): boolean => tool.status === 'completed').length} 个工具步骤已记录`
+      : '';
     const error: string = aiService.getConversationError();
     if (error.length > 0) this.aiStore.aiError = error;
   }
@@ -8596,7 +8655,7 @@ struct Index {
   private handleAiConversationAction(action: string, id: string = '', title: string = ''): void {
     if (this.aiStore.aiLoading) { this.aiStore.aiError = '请先完成或取消当前运行，再管理会话'; return; }
     try {
-      if (action === 'new' || action === 'switch' || (action === 'delete' && id === this.aiStore.aiActiveConversationId)) {
+      if (action === 'new' || action === 'clear' || action === 'switch' || (action === 'delete' && id === this.aiStore.aiActiveConversationId)) {
         this.cancelPendingAiCommands(false);
       }
       let changed: boolean = false;
@@ -8604,6 +8663,7 @@ struct Index {
       else if (action === 'switch') changed = aiService.switchConversation(id);
       else if (action === 'rename') changed = aiService.renameConversation(id, title);
       else if (action === 'delete') changed = aiService.deleteConversation(id);
+      else if (action === 'clear') changed = aiService.clearCurrentConversation();
       if (!changed) throw new Error('会话操作未完成，请重试');
       this.aiStore.aiError = ''; this.aiStore.aiLastResult = ''; this.aiStore.aiCanUndo = false;
       this.aiStore.aiStreamingText = ''; this.aiStore.aiReasoningText = ''; this.aiStore.aiToolCalls = [];
@@ -8710,8 +8770,8 @@ struct Index {
       onHistoryInput: (_request: string, _task: AiAgentTask | undefined, redact: (text: string) => string): void => {
         onHistoryRedaction?.(redact);
       },
-      onText: (delta: string): void => { if (isCurrent()) this.aiStore.aiStreamingText += delta; },
-      onReasoning: (delta: string): void => { if (isCurrent()) this.aiStore.aiReasoningText += delta; },
+      onText: (delta: string): void => { if (isCurrent()) this.appendAiStreamUiDelta('text', delta); },
+      onReasoning: (delta: string): void => { if (isCurrent()) this.appendAiStreamUiDelta('reasoning', delta); },
       onTool: (): void => {},
       onStatus: (status: string): void => { if (isCurrent()) this.panelStore.statusText = status; },
       onContextUsage: (usage: HarnessContextUsage): void => {
@@ -8738,7 +8798,7 @@ struct Index {
     if (!aiService.applyCompression(reply.text, sourceMessageCount, conversationId, revision, config.modelName)) {
       throw new Error('压缩期间会话已改变，保留原上下文，请重新压缩');
     }
-    this.refreshAiConversation(); this.aiStore.aiStreamingText = ''; this.aiStore.aiReasoningText = '';
+    this.clearAiStreamUiBuffer(true); this.refreshAiConversation();
     this.aiStore.aiLastResult = `已压缩前 ${sourceMessageCount} 条消息；最近两轮与原始聊天完整保留`;
     this.panelStore.statusText = this.aiStore.aiLastResult;
   }
@@ -8752,7 +8812,7 @@ struct Index {
     this.aiOperationTicket = ticket;
     const conversationId: string = aiService.getActiveConversationId();
     this.aiStore.aiRunStartedAt = Date.now(); this.aiStore.aiMinimizedNotice = '';
-    this.aiStore.aiLoading = true; this.aiStore.aiError = ''; this.aiStore.aiStreamingText = ''; this.aiStore.aiReasoningText = ''; this.aiStore.aiToolCalls = [];
+    this.aiStore.aiLoading = true; this.aiStore.aiError = ''; this.clearAiStreamUiBuffer(true); this.aiStore.aiToolCalls = [];
     try { await this.compressAiHistory(ticket, conversationId); }
     catch (error) {
       if (this.pageAlive && generation === this.pageGeneration) {
@@ -8763,7 +8823,7 @@ struct Index {
     } finally {
       if (this.aiOperationTicket === ticket) { this.aiOperationTicket = 0; this.aiStore.aiLoading = false; this.aiStore.aiCanCancel = false; this.aiPythonPhase = ''; }
       if (this.pageAlive && generation === this.pageGeneration) {
-        this.aiStore.aiStreamingText = ''; this.aiStore.aiReasoningText = ''; this.aiStore.aiToolCalls = [];
+        this.clearAiStreamUiBuffer(true); this.aiStore.aiToolCalls = [];
         this.refreshAiConversation();
       }
     }
@@ -8796,9 +8856,8 @@ struct Index {
       this.aiStore.aiCanCancel = true;
       this.aiStore.aiError = '';
       this.aiStore.aiLastResult = '';
-      // AI-15: 流式增量显示——清空 streamingText
-      this.aiStore.aiStreamingText = '';
-      this.aiStore.aiReasoningText = '';
+      // AI-15: 流式增量显示——清空 streamingText 与节流缓冲
+      this.clearAiStreamUiBuffer(true);
       this.aiStore.aiToolCalls = [];
       await aiService.ensureReady();
       this.assertAiRequestCurrent(ticket, requestContext);
@@ -8830,7 +8889,7 @@ struct Index {
             this.panelStore.statusText = compressionNotice;
           }
           this.assertAiRequestCurrent(ticket, requestContext);
-          this.aiStore.aiStreamingText = ''; this.aiStore.aiReasoningText = ''; this.aiStore.aiToolCalls = [];
+          this.clearAiStreamUiBuffer(true); this.aiStore.aiToolCalls = [];
           this.aiStore.aiMessages = aiService.getChatHistory().slice().concat([{ role: ChatRole.USER, content: prompt, timestamp: Date.now() }]);
         }
         harnessStarted = true;
@@ -8845,20 +8904,21 @@ struct Index {
       await aiService.sendMessage(prompt, context, {
         onStreamReset: () => {
           if (ticket !== this.aiRequestGeneration || requestContext !== this.aiRequestContext()) return;
-          this.aiStore.aiStreamingText = '';
+          this.clearAiStreamUiBuffer(true);
         },
         onChunk: (text: string) => {
           if (ticket !== this.aiRequestGeneration || requestContext !== this.aiRequestContext()) return;
-          if (text.trim().length > 0) {
-            // AI-15: 累加流式文本到 streamingText，UI 实时渲染
-            this.aiStore.aiStreamingText += text;
-            this.panelStore.statusText = 'AI: 正在生成回复...';
+          if (text.length > 0) {
+            this.appendAiStreamUiDelta('text', text);
+            if (this.panelStore.statusText !== 'AI: 正在生成回复...') {
+              this.panelStore.statusText = 'AI: 正在生成回复...';
+            }
           }
         },
         onComplete: (fullText: string, commands: ParsedCommand[]) => {
           if (!this.pageAlive || generation !== this.pageGeneration || ticket !== this.aiRequestGeneration) return;
           // AI-15: 完成后清空 streamingText（完整文本已作为 ChatMessage 入历史）
-          this.aiStore.aiStreamingText = '';
+          this.clearAiStreamUiBuffer(true);
           // AI-10: 刷新聊天消息列表（触发 UI 重渲染）
           this.aiStore.aiMessages = aiService.getChatHistory().slice();
           if (requestContext !== this.aiRequestContext()) {
@@ -8919,10 +8979,59 @@ struct Index {
       // Cancellation does not release this lock until both model/host promises have settled.
       if (this.aiOperationTicket === ticket) { this.aiOperationTicket = 0; this.aiStore.aiLoading = false; this.aiStore.aiCanCancel = false; this.aiPythonPhase = ''; }
       if (this.pageAlive && generation === this.pageGeneration) {
-        this.aiStore.aiStreamingText = ''; this.aiStore.aiReasoningText = ''; this.aiStore.aiToolCalls = [];
+        this.clearAiStreamUiBuffer(true); this.aiStore.aiToolCalls = [];
         this.refreshAiConversation();
       }
     }
+  }
+
+  private clearAiStreamUiBuffer(resetStore: boolean = false): void {
+    if (this.aiStreamFlushTimer >= 0) {
+      clearTimeout(this.aiStreamFlushTimer);
+      this.aiStreamFlushTimer = -1;
+    }
+    this.aiStreamBufferedText = '';
+    this.aiStreamBufferedReasoning = '';
+    if (resetStore) {
+      this.aiStore.aiStreamingText = '';
+      this.aiStore.aiReasoningText = '';
+    }
+  }
+
+  private flushAiStreamUiNow(): void {
+    if (this.aiStreamFlushTimer >= 0) {
+      clearTimeout(this.aiStreamFlushTimer);
+      this.aiStreamFlushTimer = -1;
+    }
+    if (this.aiStore.aiStreamingText !== this.aiStreamBufferedText) {
+      this.aiStore.aiStreamingText = this.aiStreamBufferedText;
+    }
+    if (this.aiStore.aiReasoningText !== this.aiStreamBufferedReasoning) {
+      this.aiStore.aiReasoningText = this.aiStreamBufferedReasoning;
+    }
+  }
+
+  private appendAiStreamUiDelta(kind: 'text' | 'reasoning', delta: string): void {
+    if (kind === 'text') {
+      this.aiStreamBufferedText += delta;
+    } else {
+      this.aiStreamBufferedReasoning += delta;
+    }
+    if (this.aiStreamFlushTimer >= 0) {
+      return;
+    }
+    this.aiStreamFlushTimer = setTimeout((): void => {
+      this.aiStreamFlushTimer = -1;
+      if (!this.pageAlive || !this.aiStore.aiLoading) {
+        return;
+      }
+      if (this.aiStore.aiStreamingText !== this.aiStreamBufferedText) {
+        this.aiStore.aiStreamingText = this.aiStreamBufferedText;
+      }
+      if (this.aiStore.aiReasoningText !== this.aiStreamBufferedReasoning) {
+        this.aiStore.aiReasoningText = this.aiStreamBufferedReasoning;
+      }
+    }, 32);
   }
 
   private aiRequestContext(): string {
@@ -9110,13 +9219,20 @@ struct Index {
           },
           onText: (delta: string): void => {
             capturedText += delta;
-            if (ticket === this.aiRequestGeneration && requestContext === this.aiRequestContext()) this.aiStore.aiStreamingText += delta;
+            if (ticket === this.aiRequestGeneration && requestContext === this.aiRequestContext()) {
+              this.appendAiStreamUiDelta('text', delta);
+            }
           },
           onReasoning: (delta: string): void => {
             capturedReasoning += delta;
-            if (ticket === this.aiRequestGeneration && requestContext === this.aiRequestContext()) this.aiStore.aiReasoningText += delta;
+            if (ticket === this.aiRequestGeneration && requestContext === this.aiRequestContext()) {
+              this.appendAiStreamUiDelta('reasoning', delta);
+            }
           },
           onTool: (tool: HarnessToolState): void => {
+            if (ticket === this.aiRequestGeneration && requestContext === this.aiRequestContext()) {
+              this.flushAiStreamUiNow();
+            }
             const copy: AiChatToolState = { id: tool.id, name: tool.name, status: tool.status,
               arguments: tool.arguments, result: tool.result };
             const capturedIndex: number = capturedTools.findIndex((item: AiChatToolState): boolean => item.id === tool.id);
@@ -9142,6 +9258,7 @@ struct Index {
         }, task.requiredValidationProfile, conversationId, '', task, resumeTask);
       capturedTools = reply.tools.slice();
       this.assertAiRequestCurrent(ticket, requestContext);
+      this.clearAiStreamUiBuffer(false);
       this.aiStore.aiStreamingText = reply.text;
       this.aiStore.aiReasoningText = reply.reasoning;
       this.aiStore.aiToolCalls = reply.tools.slice();
@@ -9195,7 +9312,7 @@ struct Index {
         let check: string = '当前规则检查未完成';
         try {
           setLocalStage('drc', 'running', '正在执行当前可用的设计规则');
-          this.runDrc();
+          this.runDrc(true);
           check = this.aiDrcResultSummary();
           const checked: boolean = this.verifyStore.drcHasRun && this.drcSnapshotRevision === this.docStore.editorRevision &&
             drcService.getLastResult() !== null;
@@ -9337,7 +9454,7 @@ struct Index {
       if (!loaded) throw new Error(this.panelStore.statusText);
       checkpoint.loadedArtifacts = (checkpoint.loadedArtifacts ?? []).concat([artifactId]);
       checkpoint.phase = 'applied'; checkpoint.updatedAt = Date.now();
-      this.runDrc(); checkpoint.receipt = `已恢复并载入现有生成产物 ${artifactId}，没有重新调用模型。${this.aiDrcResultSummary()}`;
+      this.runDrc(true); checkpoint.receipt = `已恢复并载入现有生成产物 ${artifactId}，没有重新调用模型。${this.aiDrcResultSummary()}`;
       aiService.saveTaskCheckpoint(checkpoint); aiService.recordExecutionReceipt(checkpoint.receipt);
       pythonWorkspaceService.record(checkpoint.task.originalRequest, artifact.script ?? '', '{}', 'new', true, checkpoint.receipt, artifact);
       this.aiStore.aiLastResult = checkpoint.receipt; this.aiStore.aiError = ''; this.fitAllShapes();
@@ -10072,7 +10189,7 @@ struct Index {
         committed = true;
         this.syncShapesFromEditService(); this.rebuildCellTree();
         this.aiUndoMarker = editService.getUndoMarker(); this.aiStore.aiCanUndo = this.aiUndoMarker !== marker;
-        try { this.runDrc(); results.push(aiNativeResult(true,this.aiDrcResultSummary(),undefined,'verification')); }
+        try { this.runDrc(true); results.push(aiNativeResult(true,this.aiDrcResultSummary(),undefined,'verification')); }
         catch (error) { results.push(aiNativeResult(true,`修改已应用，DRC 复检未完成：${String(error)}`,undefined,'verification_incomplete')); }
       } else {
         results.push(await this.runAiNativeAction(calls[0]));
@@ -10170,7 +10287,7 @@ struct Index {
     }
     if (!batchFailed && hasEditCommand && editService.getUndoMarker() !== beforeMarker) {
       try {
-        this.runDrc();
+        this.runDrc(true);
         messages.push(this.verifyStore.drcHasRun ? this.aiDrcResultSummary() : `复检未完成：${this.panelStore.statusText}`);
       } catch (error) { messages.push(`修改已应用，复检未完成：${String(error)}`); }
     }

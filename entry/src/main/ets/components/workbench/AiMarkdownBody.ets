@@ -9,17 +9,124 @@ import { UI } from '../../common/UiTokens';
 import {
   AiGfmTable,
   AiMarkdownSegment,
+  AiStreamingBlock,
   formatGfmTableTsv,
   repairStreamingMarkdown,
   splitMarkdownSegments,
+  splitStreamingMarkdownBlocks,
   stripInlineMarkdownDecorators
 } from '../../services/AiAgentPresentation';
 
 @Component
-struct AiMarkdownChunkView {
-  @Prop @Watch('onTextChanged') text: string = '';
+struct AiStreamingBlockView {
+  @Prop blockKind: string = 'paragraph';
+  @Prop text: string = '';
+  @Prop language: string = '';
+  @Prop level: number = 0;
+  @Prop marker: string = '';
   @Prop fontSize: number = UI.fontBody;
   @Prop muted: boolean = false;
+
+  private headingSize(): number {
+    if (this.level === 1) return this.fontSize + 5;
+    if (this.level === 2) return this.fontSize + 3;
+    if (this.level === 3) return this.fontSize + 2;
+    return this.fontSize + 1;
+  }
+
+  build() {
+    if (this.blockKind === 'code') {
+      Column({ space: 0 }) {
+        if (this.language.length > 0) {
+          Row() {
+            Text(this.language)
+              .fontSize(10)
+              .fontFamily('monospace')
+              .fontColor(COLORS.muted)
+          }
+          .width('100%')
+          .padding({ left: 10, right: 10, top: 6, bottom: 5 })
+          .border({ width: { bottom: 0.6 }, color: COLORS.border })
+        }
+        Scroll() {
+          Text(this.text.length > 0 ? this.text : ' ')
+            .fontSize(Math.max(11, this.fontSize - 1))
+            .lineHeight(Math.max(18, this.fontSize + 6))
+            .fontFamily('monospace')
+            .fontColor(COLORS.ink)
+            .copyOption(CopyOptions.LocalDevice)
+            .padding(10)
+        }
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Auto)
+        .width('100%')
+        .align(Alignment.TopStart)
+      }
+      .width('100%')
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.7, color: COLORS.border })
+      .borderRadius(8)
+    } else if (this.blockKind === 'heading') {
+      Text(this.text)
+        .fontSize(this.headingSize())
+        .lineHeight(this.headingSize() + 8)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.muted ? COLORS.muted : COLORS.ink)
+        .wordBreak(WordBreak.BREAK_WORD)
+        .copyOption(CopyOptions.LocalDevice)
+        .width('100%')
+        .margin({ top: 4, bottom: 2 })
+    } else if (this.blockKind === 'quote') {
+      Row() {
+        Text(this.text)
+          .fontSize(this.fontSize)
+          .lineHeight(this.fontSize + 8)
+          .fontColor(COLORS.muted)
+          .wordBreak(WordBreak.BREAK_WORD)
+          .copyOption(CopyOptions.LocalDevice)
+          .width('100%')
+      }
+      .width('100%')
+      .padding({ left: 10, right: 6, top: 4, bottom: 4 })
+      .backgroundColor(withAlpha(COLORS.surfaceMuted, 0.5))
+      .border({ width: { left: 2.5 }, color: withAlpha(COLORS.primary, 0.45) })
+      .borderRadius({ topRight: 6, bottomRight: 6 })
+    } else if (this.blockKind === 'list') {
+      Row({ space: 6 }) {
+        Text(this.marker || '•')
+          .fontSize(this.fontSize)
+          .lineHeight(this.fontSize + 8)
+          .fontColor(COLORS.muted)
+          .width(this.marker.length > 1 ? 22 : 12)
+          .textAlign(TextAlign.End)
+        Text(this.text)
+          .fontSize(this.fontSize)
+          .lineHeight(this.fontSize + 8)
+          .fontColor(this.muted ? COLORS.muted : COLORS.ink)
+          .wordBreak(WordBreak.BREAK_WORD)
+          .copyOption(CopyOptions.LocalDevice)
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+      .padding({ left: this.level * 12 })
+    } else {
+      Text(this.text)
+        .fontSize(this.fontSize)
+        .lineHeight(this.fontSize + 8)
+        .fontColor(this.muted ? COLORS.muted : COLORS.ink)
+        .wordBreak(WordBreak.BREAK_WORD)
+        .copyOption(CopyOptions.LocalDevice)
+        .width('100%')
+    }
+  }
+}
+
+@Component
+struct AiMarkdownChunkView {
+  @Prop text: string = '';
+  @Prop @Watch('onStyleChanged') fontSize: number = UI.fontBody;
+  @Prop @Watch('onStyleChanged') muted: boolean = false;
   @Prop isCodeFence: boolean = false;
   @Prop rawCopyText: string = '';
   private controller: MarkdownController = new MarkdownController();
@@ -34,7 +141,7 @@ struct AiMarkdownChunkView {
     this.disposed = true;
   }
 
-  onTextChanged(): void {
+  onStyleChanged(): void {
     if (!this.disposed) {
       this.configureController();
     }
@@ -117,8 +224,9 @@ struct AiMarkdownChunkView {
 }
 
 /**
- * 原生 Markdown + DSH-Harmony 横向可滑动 GFM 表格渲染器：
- * 常规段落与代码块交由 `@luvi/lv-markdown-in`，GFM 宽表格独立渲染于横向 Scroll 容器内，彻底消除侧栏坐标列裁切。
+ * 原生零抖动流式 Markdown + DSH-Harmony 横向可滑动 GFM 表格渲染器：
+ * - 流式生成期（`streaming === true`）：使用纯同步原生 ArkUI 块（稳定索引 key，不随字符数销毁重建），高度单调平滑增长、零跳动；
+ * - 落盘完成期（`streaming === false`）：切换为完整 `@luvi/lv-markdown-in` 富文本与横向可滑动表格。
  */
 @Component
 export struct AiMarkdownBody {
@@ -154,11 +262,11 @@ export struct AiMarkdownBody {
     this.updateTimer = setTimeout((): void => {
       this.updateTimer = -1;
       if (!this.disposed) this.flushContent();
-    }, 64);
+    }, 40);
   }
 
   onStreamingChanged(): void {
-    if (!this.streaming && !this.disposed) {
+    if (!this.disposed) {
       this.flushContent();
     }
   }
@@ -299,31 +407,83 @@ export struct AiMarkdownBody {
     .margin({ top: 4, bottom: 4 })
   }
 
+  @Builder
+  private StreamingTextSegment(rawText: string, segIdx: number) {
+    Column({ space: 6 }) {
+      ForEach(
+        splitStreamingMarkdownBlocks(rawText),
+        (blk: AiStreamingBlock, blkIdx: number) => {
+          AiStreamingBlockView({
+            blockKind: blk.kind,
+            text: blk.text,
+            language: blk.language,
+            level: blk.level,
+            marker: blk.marker,
+            fontSize: this.fontSize,
+            muted: this.muted
+          })
+        },
+        (blk: AiStreamingBlock, blkIdx: number): string => `sblk-${segIdx}-${blkIdx}-${blk.kind}`
+      )
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
   build() {
     Column({ space: 6 }) {
       if (this.code) {
-        AiMarkdownChunkView({
-          text: this.codeFenceText,
-          fontSize: this.fontSize,
-          muted: this.muted,
-          isCodeFence: true,
-          rawCopyText: this.codeCopyText
-        })
+        if (this.streaming) {
+          AiStreamingBlockView({
+            blockKind: 'code',
+            text: this.codeCopyText,
+            language: 'json',
+            level: 0,
+            marker: '',
+            fontSize: this.fontSize,
+            muted: this.muted
+          })
+        } else {
+          AiMarkdownChunkView({
+            text: this.codeFenceText,
+            fontSize: this.fontSize,
+            muted: this.muted,
+            isCodeFence: true,
+            rawCopyText: this.codeCopyText
+          })
+        }
+      } else if (this.streaming) {
+        ForEach(
+          this.segments,
+          (seg: AiMarkdownSegment, segIdx: number) => {
+            if (seg.kind === 'table') {
+              this.NativeScrollableTable(seg.table, segIdx)
+            } else {
+              this.StreamingTextSegment(seg.text, segIdx)
+            }
+          },
+          (seg: AiMarkdownSegment, segIdx: number): string =>
+            `stream-${segIdx}:${seg.kind}:${seg.kind === 'table' ? seg.table.headers.length : 0}`
+        )
       } else {
-        ForEach(this.segments, (seg: AiMarkdownSegment, segIdx: number) => {
-          if (seg.kind === 'table') {
-            this.NativeScrollableTable(seg.table, segIdx)
-          } else {
-            AiMarkdownChunkView({
-              text: seg.text,
-              fontSize: this.fontSize,
-              muted: this.muted,
-              isCodeFence: false,
-              rawCopyText: ''
-            })
-          }
-        }, (seg: AiMarkdownSegment, segIdx: number): string =>
-          `${segIdx}:${seg.kind}:${seg.kind === 'table' ? `${seg.table.rows.length}x${seg.table.headers.length}:${seg.table.totalWidth}` : seg.text.length}`)
+        ForEach(
+          this.segments,
+          (seg: AiMarkdownSegment, segIdx: number) => {
+            if (seg.kind === 'table') {
+              this.NativeScrollableTable(seg.table, segIdx)
+            } else {
+              AiMarkdownChunkView({
+                text: seg.text,
+                fontSize: this.fontSize,
+                muted: this.muted,
+                isCodeFence: false,
+                rawCopyText: ''
+              })
+            }
+          },
+          (seg: AiMarkdownSegment, segIdx: number): string =>
+            `done-${segIdx}:${seg.kind}:${seg.kind === 'table' ? seg.table.headers.length : 0}`
+        )
       }
     }
     .width('100%')

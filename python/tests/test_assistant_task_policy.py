@@ -131,6 +131,8 @@ class AssistantTaskPolicy(unittest.IsolatedAsyncioTestCase):
             "将当前选中的矩形向右移动10000纳米，先预览待确认的修改，不要直接执行。",
             "将当前选中的矩形向右移动10000纳米。请生成待确认方案，不要直接执行。",
             "请把当前选中的矩形向右移动10000纳米，只生成待确认预览，不要直接执行。",
+            "根据当前选区与 DRC 证据，提出最小修复方案供我预览确认，并在修改后复检；资料不足时先说明，不猜测工艺规则。",
+            "修复反相器间距违例，提出最小修复方案供我预览确认；若无法确认规则先说明。",
             "Move selected rectangle right by 10000 nm, preview pending changes and do not directly execute.",
         ):
             with self.subTest(goal=goal):
@@ -142,6 +144,42 @@ class AssistantTaskPolicy(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(state.read_only)
                 self.assertEqual(state.commands_proposed, 1)
                 self.assertTrue(any(e.get("name") == "hongtu.commands" for e in parse_sse(chunks)))
+
+    async def test_factory_slash_prompts_and_auto_open_inverter_metadata(self):
+        self.assertEqual(mod._task_policy("解释当前选中的图形及其用途"), (True, False, ""))
+        self.assertEqual(mod._task_policy("检查当前版图并说明需要关注的问题"), (True, False, ""))
+        self.assertEqual(
+            mod._task_policy("根据当前 DRC 具体问题，选中并定位第一个问题涉及的图形，不修改几何。"),
+            (False, False, ""),
+        )
+        self.assertEqual(
+            mod._task_policy("根据当前选区与 DRC 证据，提出最小修复方案供我预览确认，并在修改后复检；资料不足时先说明，不猜测工艺规则。"),
+            (False, False, ""),
+        )
+        self.assertEqual(mod._task_policy("画一个反相器"), (False, True, "generic_inverter"))
+
+        chunks, _ = await collect(mod.build_agent(tool_model("create_cmos_inverter", {})), payload=request_payload("画一个反相器"))
+        events = parse_sse(chunks)
+        artifact_evt = next(e["value"] for e in events if e.get("name") == "hongtu.artifact")
+        self.assertIn("自动在新标签页校验并打开", artifact_evt["summary"])
+        self.assertNotIn("尚待编辑器加载", artifact_evt["summary"])
+        stored = mod.get_artifact(artifact_evt["artifactId"])
+        self.assertEqual(stored["fileName"], "INVERTER.gds")
+
+    def test_model_config_accepts_dsh_reasoning_effort_levels(self):
+        for effort in ("auto", "none", "low", "medium", "high"):
+            payload = request_payload("画一个反相器")
+            payload["forwardedProps"]["modelConfig"]["reasoningEffort"] = effort
+            _, cfg, _ = mod._prepare(payload)
+            self.assertEqual(cfg.reasoningEffort, effort)
+            _, client, settings = mod._model_client(cfg)
+            self.addCleanup(client.close)
+            if effort == "none":
+                self.assertEqual(settings["extra_body"], {"thinking": {"type": "disabled"}})
+            else:
+                self.assertEqual(settings["extra_body"], {"thinking": {"type": "enabled"}})
+                expected_eff = "low" if effort == "auto" else effort
+                self.assertEqual(settings["openai_reasoning_effort"], expected_eff)
 
     def test_legacy_and_empty_profile_cannot_downgrade_original_inverter_requirement(self):
         for value in (None, "", "generic_inverter"):

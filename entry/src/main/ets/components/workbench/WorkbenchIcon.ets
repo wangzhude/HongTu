@@ -12,7 +12,8 @@ export struct WorkbenchIcon {
       this.name === 'polygon' || this.name === 'path' || this.name === 'instance' || this.name === 'mirror' ||
       this.name === 'mirrorV' || this.name === 'duplicate' || this.name === 'cornerRound' ||
       this.name === 'continuePath' || this.name === 'magnet' || this.name === 'ortho' || this.name === 'loupe' ||
-      this.name === 'copy' || this.name === 'slash' || this.name === 'minimize';
+      this.name === 'copy' || this.name === 'slash' || this.name === 'minimize' ||
+      this.name === 'think' || this.name === 'model';
   }
 
   private symbolResource(): Resource {
@@ -82,6 +83,10 @@ export struct WorkbenchIcon {
         return 'M16 4L8 20';
       case 'minimize':
         return 'M5 12H19M9 16L12 19L15 16';
+      case 'think':
+        return 'M12 3A6 6 0 0 0 8 13.5V16.5A1.5 1.5 0 0 0 9.5 18H14.5A1.5 1.5 0 0 0 16 16.5V13.5A6 6 0 0 0 12 3ZM9.5 21H14.5';
+      case 'model':
+        return 'M12 2L20 6.5V17.5L12 22L4 17.5V6.5ZM12 12L20 6.5M12 12L4 6.5M12 12V22';
       case 'cornerRound':
         return 'M5 19V12A7 7 0 0 1 12 5H19M4 18H6V20H4ZM18 4H20V6H18Z';
       case 'continuePath':

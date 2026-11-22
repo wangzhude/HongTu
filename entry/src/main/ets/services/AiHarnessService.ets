@@ -42,7 +42,7 @@ interface HarnessMessage { id: string; role: string; content: string; }
 interface HarnessModelConfig {
   provider: string; endpoint: string; apiKey: string; modelName: string;
   temperature: number; maxTokens: number; timeoutMs: number;
-  contextWindowTokens: number;
+  contextWindowTokens: number; reasoningEffort?: string;
 }
 interface HarnessForwardedProps {
   modelConfig: HarnessModelConfig; layoutContext: AiContext;
@@ -212,7 +212,8 @@ export class AiHarnessService {
         threadId: this.conversationId(sessionId, runId), runId, messages, tools: [], context: [], state: {},
         forwardedProps: { modelConfig: { provider: config.provider, endpoint: config.endpoint,
           apiKey: safeForwardedKey, modelName: config.modelName, temperature: config.temperature,
-          maxTokens: config.maxTokens, timeoutMs: config.timeoutMs, contextWindowTokens: budget.contextWindowTokens },
+          maxTokens: config.maxTokens, timeoutMs: config.timeoutMs, contextWindowTokens: budget.contextWindowTokens,
+          reasoningEffort: config.reasoningEffort ?? 'auto' },
           layoutContext: context, availableTabs, originalRequest: prompt,
           requiredValidationProfile: task?.requiredValidationProfile ?? requiredValidationProfile, conversationSummary: summary,
           taskOriginalRequest: task?.originalRequest, resumeTask: task === undefined ? undefined : resumeTask,
@@ -330,9 +331,28 @@ export class AiHarnessService {
         clearTimeout(idleTimer);
         idleTimer = setTimeout(() => fail('助手连接读取超时'), Math.min(45000, timeoutMs));
       };
+      let sawSseFrame: boolean = false;
+      let nonSseSample: string = '';
+      const formatHttpFailure = (statusCode: number): string => {
+        if (statusCode === 401 || statusCode === 403) {
+          return `Agent 伴随服务认证失败（HTTP ${statusCode}）：当前保存的令牌与正在运行的伴随端不一致，请点击「连接设置」更新伴随服务令牌`;
+        }
+        let detail: string = '';
+        if (nonSseSample.trim().length > 0) {
+          try {
+            const parsed: Record<string, Object> = JSON.parse(nonSseSample.trim()) as Record<string, Object>;
+            const errField: Object | undefined = parsed['error'];
+            if (typeof errField === 'string' && errField.trim().length > 0) {
+              detail = `：${errField.trim().substring(0, 200)}`;
+            }
+          } catch (_) {}
+        }
+        return `助手服务请求失败（HTTP ${statusCode}）${detail}，请点击「连接设置」检查或更新伴随服务`;
+      };
       const finishIfReady = (): void => {
         if (finished || !dataEnded || code === 0) return;
-        if (code !== 200) { fail(`助手服务请求失败（HTTP ${code}）`); return; }
+        if (code !== 200) { fail(formatHttpFailure(code)); return; }
+        if (!sawSseFrame && nonSseSample.trim().length > 0) { fail('助手服务返回了无效 AG-UI 流'); return; }
         if (!runFinished) { fail('助手流式响应中断，未载入未完成结果'); return; }
         if (ticket !== this.serial) { fail('助手请求已取消'); return; }
         if (result.text.trim().length === 0 && result.artifacts.length === 0 && result.commandsJson.length === 0 && result.workflow === undefined) {
@@ -358,7 +378,18 @@ export class AiHarnessService {
         if (finished || ticket !== this.serial) return;
         const trimmed: string = line.trim();
         if (trimmed.length === 0 || trimmed.startsWith(':') || /^(?:id|event|retry):/.test(trimmed)) return;
-        if (!trimmed.startsWith('data:')) { fail('助手服务返回了无效 AG-UI 流'); return; }
+        if (!trimmed.startsWith('data:')) {
+          if (!sawSseFrame && code === 0) {
+            if (nonSseSample.length < 2048) {
+              nonSseSample += (nonSseSample.length > 0 ? '\n' : '') + trimmed.substring(0, 512);
+            }
+            return;
+          }
+          if (code !== 0 && code !== 200) { fail(formatHttpFailure(code)); return; }
+          fail('助手服务返回了无效 AG-UI 流');
+          return;
+        }
+        sawSseFrame = true;
         let event: AguiEvent;
         try { event = JSON.parse(trimmed.substring(5).trim()) as AguiEvent; } catch (_) {
           fail('助手服务返回了无效 AG-UI 事件'); return;
@@ -514,8 +545,7 @@ export class AiHarnessService {
       }).then((responseCode: number): void => {
         code = responseCode;
         if (code !== 200) {
-          fail(code === 401 || code === 403 ? `Agent 连接认证失败（HTTP ${code}），请打开助手连接设置更新伴随服务令牌` :
-            `助手服务请求失败（HTTP ${code}），请打开助手连接设置检查或更新伴随服务`); return;
+          fail(formatHttpFailure(code)); return;
         }
         finishIfReady();
       }).catch((_error: Object): void => fail('助手流式连接失败，请打开助手连接设置检查伴随服务地址、令牌和网络')); }
