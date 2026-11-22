@@ -92,6 +92,7 @@ export struct GlCanvas {
   private cachedOriginX: number = 0;
   private cachedOriginY: number = 0;
   private cachedZoomScale: number = 100;
+  private cachedSingleCleanMain: boolean = false;
 
   private nativeModule: HongTuNative = hongtu;
   private xcomponentId: string = 'hongtu-gl-canvas';
@@ -248,8 +249,12 @@ export struct GlCanvas {
         return false;
       }
     }
-    // 多源场景在大幅缩小时屏幕字号文本包围盒在世界域会放大，限制缩小倍数 <= 2x 以内直接复用
-    if (this.renderSceneProvider !== null && this.zoomScale < this.cachedZoomScale * 0.5) {
+    // 多源场景在大幅缩小时屏幕字号文本包围盒在世界域会放大；单源 C++ 直通路径无该膨胀，放宽复用窗口至扩边视口边界
+    if (this.renderSceneProvider !== null && !this.cachedSingleCleanMain && this.zoomScale < this.cachedZoomScale * 0.5) {
+      return false;
+    }
+    // 鸟瞰态子像素代理矩形在放大超过 2.4 倍后触发增量补精，确保曲线波导/光栅边缘恢复完整矢量细节
+    if (this.cachedZoomScale < 25 && this.zoomScale > this.cachedZoomScale * 2.4) {
       return false;
     }
     // 亚像素精度守卫：确保已上传 VBO 的局部原点在当前缩放率下最大 FP32 量化误差 <= 0.015 vp
@@ -647,6 +652,7 @@ export struct GlCanvas {
         }
         if (direct === true) {
           this.surfaceAlive = true;
+          this.cachedSingleCleanMain = true;
           this.recordCachedViewport(usedVp, false);
           this.restoreCompleteGlFrame();
           this.refreshRenderStats();
@@ -654,6 +660,7 @@ export struct GlCanvas {
         }
       }
 
+      this.cachedSingleCleanMain = false;
       const nativeSources = this.sceneService.nativeSources(sources);
       this.sceneStyleLimited = sources.some((source: ViewSceneSource): boolean => source.opacity > 0 &&
         source.layers.some((l: UiLayer): boolean => l.visible &&

@@ -1,5 +1,6 @@
 import { describe, beforeEach, it, expect } from '@ohos/hypium';
-import { Shape, ShapeType, Point, getShapeBounds, packShapesCoordinates, nativeShapesToShapes } from '../main/ets/models/GdsiiData';
+import { snapService } from '../main/ets/services/SnapService';
+import { Shape, ShapeType, Point, getShapeBounds, packShapesCoordinates, nativeShapesToShapes, hasKeyholeBridgeEdges, extractKeyholeCleanLoops } from '../main/ets/models/GdsiiData';
 import { cleanDbuNm } from '../main/ets/services/PrecisionService';
 import { GdsByteWriter } from '../main/ets/services/LayoutExportService';
 import { formatZoomPercent, worldToScreenPx, screenToWorldPx } from '../main/ets/common/constants';
@@ -11,7 +12,7 @@ import { EditService, editService, EditStructureState } from '../main/ets/servic
 import { advEditService } from '../main/ets/services/AdvancedEditService';
 import { flattenPreviewService } from '../main/ets/services/FlattenPreviewService';
 import { legacyDocumentPrecision } from '../main/ets/services/PrecisionService';
-import { cloneShapeArray } from '../main/ets/common/CloneUtils';
+import { cloneShapeArray, markImmutablePointArray } from '../main/ets/common/CloneUtils';
 import {
   computeShapeDigest,
   IncrementalDocumentSnapshotCache,
@@ -581,6 +582,81 @@ export default function localUnitTest(): void {
       expect(JSON.stringify(svc.getCurrentCellStack())).assertEqual('[2]');
       expect(svc.navigateToCellDefinition(3)).assertTrue();
       expect(JSON.stringify(svc.getCurrentCellStack())).assertEqual('[3]');
+    });
+
+    it('extracts_clean_loops_from_keyhole_bridged_polygon_and_caches_immutable_bounds', 0, (): void => {
+      const keyholePts: Point[] = [
+        { x: -1500, y: -1500 },
+        { x: 1500, y: -1500 },
+        { x: 1500, y: 0 },
+        { x: 500, y: 0 },
+        { x: 0, y: -500 },
+        { x: -500, y: 0 },
+        { x: 0, y: 500 },
+        { x: 500, y: 0 },
+        { x: 1500, y: 0 },
+        { x: 1500, y: 1500 },
+        { x: -1500, y: 1500 }
+      ];
+      expect(hasKeyholeBridgeEdges(keyholePts)).assertTrue();
+      const loops: Point[][] = extractKeyholeCleanLoops(keyholePts);
+      expect(loops.length).assertEqual(2);
+      expect(loops[0].length + loops[1].length).assertEqual(9);
+
+      const simplePts: Point[] = [{ x: 0, y: 0 }, { x: 200, y: 0 }, { x: 200, y: 200 }, { x: 0, y: 200 }];
+      expect(hasKeyholeBridgeEdges(simplePts)).assertFalse();
+      expect(extractKeyholeCleanLoops(simplePts).length).assertEqual(1);
+
+      const keyholeShape: Shape = { id: 10, type: ShapeType.POLYGON, layerNumber: 4, datatype: 0, points: keyholePts, selected: false };
+      expect(advEditService.isVertexEditable(keyholeShape)).assertFalse();
+      const simpleShape: Shape = { id: 11, type: ShapeType.POLYGON, layerNumber: 4, datatype: 0, points: simplePts, selected: false };
+      expect(advEditService.isVertexEditable(simpleShape)).assertTrue();
+
+      const packed = packShapesCoordinates([keyholeShape]);
+      const unpacked = nativeShapesToShapes(
+        [{ id: 10, type: 'polygon', layerNumber: 4, datatype: 0, points: [], pathWidth: 0, text: '', cellName: '', ownerCellId: 0, cellId: -1, rotation: 0, mirror: 0, magnification: 1 }],
+        packed.packedCoords, packed.pointOffsets, packed.pointCounts
+      );
+      expect(unpacked.length).assertEqual(1);
+      const b1 = getShapeBounds(unpacked[0]);
+      expect(b1.minX).assertEqual(-1500);
+      expect(b1.maxX).assertEqual(1500);
+      b1.minX = 999999;
+      const b2 = getShapeBounds(unpacked[0]);
+      expect(b2.minX).assertEqual(-1500);
+      expect(b2.maxY).assertEqual(1500);
+    });
+
+    it('accelerates_million_vertex_immutable_snapshot_and_dense_polygon_snap', 0, (): void => {
+      const cache: IncrementalDocumentSnapshotCache = new IncrementalDocumentSnapshotCache();
+      const ringPts: Point[] = [];
+      for (let i = 0; i < 4096; i++) {
+        const ang: number = (2 * Math.PI * i) / 4096;
+        ringPts.push({ x: Math.round(Math.cos(ang) * 500000), y: Math.round(Math.sin(ang) * 500000) });
+      }
+      markImmutablePointArray(ringPts);
+      const bigShapes: Shape[] = [];
+      for (let s = 0; s < 64; s++) {
+        bigShapes.push({
+          id: s + 1,
+          type: ShapeType.POLYGON,
+          layerNumber: 1,
+          datatype: 0,
+          points: ringPts,
+          selected: false,
+          ownerCellId: 0
+        });
+      }
+      const snapA: Shape[] = cache.captureReadOnlyShapes('bjut-doc', bigShapes);
+      const snapB: Shape[] = cache.captureReadOnlyShapes('bjut-doc', bigShapes);
+      expect(snapA.length).assertEqual(64);
+      expect(snapB[0] === snapA[0]).assertTrue();
+      expect(snapA[0].points === ringPts).assertTrue();
+
+      const snapIdx = snapService.ensureSpatialIndex('bjut-ring-test', [bigShapes[0]]);
+      const rich = snapService.snapRich(500005, 2, snapIdx, true, 50, ['顶点', '中点', '边'], false, 0, false, 0);
+      expect(rich.snappedGeometry).assertTrue();
+      expect(Math.abs(rich.point.x - 500000) <= 50).assertTrue();
     });
   });
 }

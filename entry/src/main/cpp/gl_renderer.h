@@ -61,6 +61,7 @@ struct RenderBatch {
     // Default zero preserves the existing single-layout contract.
     int sourceOrder = 0;
     bool preserveOpacity = false;
+    bool mayHaveKeyholeBridge = true;
     /**
      * LINE_STRIP（PATH）的真实线宽，世界坐标 nm。
      * 0 = 无宽度（hairline 描边）。GLES 的 glLineWidth 通常只保证 1px，

@@ -304,10 +304,17 @@ def _demo_mos4(path, reference, cell_name, folder):
         holder, actual = extract_fn(path, cell_name) if len(params) >= 2 else extract_fn(path)
     else:
         holder, actual = _builtin_extract_mos4(path, cell_name)
-    circuit = actual.cell_by_name(cell_name) if cell_name and hasattr(actual, "cell_by_name") else actual.top_circuit()
+    check_layout = db.Layout()
+    check_layout.read(str(Path(path)))
+    requested_top = check_layout.cell(cell_name) if cell_name else check_layout.top_cell()
+    if requested_top is None:
+        raise ValueError("demo extraction does not contain the requested top circuit")
+    circuit = actual.circuit_by_name(cell_name) if cell_name and hasattr(actual, "circuit_by_name") else actual.top_circuit()
     if circuit is None:
         circuit = actual.top_circuit()
-    if circuit is None or (cell_name and circuit.name != cell_name):
+    if circuit is None:
+        raise ValueError("demo MOS4 extraction found no devices")
+    if cell_name and circuit.name != cell_name:
         raise ValueError("demo extraction does not contain the requested top circuit")
     if not list(circuit.each_device()):
         raise ValueError("demo MOS4 extraction found no devices")

@@ -100,6 +100,11 @@ struct SceneShape {
     // Properties (GDSII PROPATTR/PROPVALUE, OASIS PROPERTY)
     std::vector<SceneProperty> properties;
 
+    // Persistent render-time local contour BBox & ear-clipping index cache (computed lazily once per immutable SceneShape)
+    mutable BBox cachedRenderLocalBox;
+    mutable std::vector<uint32_t> cachedRenderTriangles;
+    mutable uint8_t renderCacheFlags = 0; // bit0: localBox ready, bit1: triangulation attempted, bit2: triangulated
+
     BBox bbox() const {
         BBox box;
         for (const auto& p : points) {

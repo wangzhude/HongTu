@@ -2425,7 +2425,6 @@ struct Index {
             currentModule: WorkModule.Verify,
             editable: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT,
             panelWidth: this.panelStore.windowWidthVp,
-            shapes: $shapes,
             issues: unwrapObserved(this.verifyStore.drcIssues),
             highlightedViolationId: this.verifyStore.highlightedViolationId,
             lastDrcElapsed: this.verifyStore.lastDrcElapsed,
@@ -2446,7 +2445,6 @@ struct Index {
           showShortcutFooter: !this.isDesktopWorkspace(),
           sidebarWidth: this.sidebarWidth(),
           layers: this.layersForDisplay(),
-          shapes: $shapes,
           selectedLayerNumber: this.viewportStore.selectedLayerNumber,
           selectedDatatype: this.viewportStore.selectedDatatype,
           cellTree: unwrapObserved(this.docStore.cellTreeData),
@@ -2525,14 +2523,13 @@ struct Index {
             panelWidth: this.inspectorWidth(),
             currentModule: this.viewportStore.currentModule,
             layers: this.layersForDisplay(),
-            shapes: $shapes,
             issues: unwrapObserved(this.verifyStore.drcIssues),
             selectedLayerNumber: this.viewportStore.selectedLayerNumber,
           selectedDatatype: this.viewportStore.selectedDatatype,
             selectedShapeId: this.viewportStore.selectedShapeId,
             zoomPercent: this.viewportStore.zoomPercent,
             highlightedViolationId: this.verifyStore.highlightedViolationId,
-            selectedShape: this.viewportStore.selectedShapeId >= 0 ? this.shapes.find((s: Shape) => s.id === this.viewportStore.selectedShapeId) ?? null : null,
+            selectedShape: this.viewportStore.selectedShapeId >= 0 ? editService.getShapeById(this.viewportStore.selectedShapeId) ?? null : null,
             lastDrcElapsed: this.verifyStore.lastDrcElapsed,
             docLibName: this.docStore.docLibName,
             docCellCount: this.docStore.docCellCount,
@@ -2999,7 +2996,7 @@ struct Index {
                 panelHeight: Math.min(596, Math.max(160, this.viewportStore.canvasViewportHeight - 28)),
                 documentId: this.docStore.activeWorkspaceId,
                 revision: this.docStore.editorRevision,
-                selectedShape: this.shapes.find((s: Shape) => s.id === this.viewportStore.selectedShapeId) ?? null,
+                selectedShape: this.viewportStore.selectedShapeId >= 0 ? editService.getShapeById(this.viewportStore.selectedShapeId) ?? null : null,
                 selectedShapes: editService.getSelectedShapes(),
                 cells: this.propertyCellOptions(),
                 onPropertiesSubmit: (ids: number[], property: string, value: string, documentId: string, revision: number): string =>
@@ -4388,14 +4385,13 @@ struct Index {
     const selected: Shape[] = editService.getSelectedShapes();
     if (selected.length === 0 || selected.some((shape: Shape): boolean =>
       !editService.isShapeInCurrentCell(shape) || !editService.canEditLayer(shape.layerNumber, shape.datatype))) return false;
-    // Only actual main-document objects can make its editor writable. An overlay
-    // or stale checkpoint sharing a numeric ID remains a read-only presentation.
-    const remaining: Set<Shape> = new Set<Shape>(selected);
-    for (const shape of this.shapes) {
-      remaining.delete(shape);
-      if (remaining.size === 0) return true;
+    // Only actual main-document objects can make its editor writable.
+    for (let i = 0; i < selected.length; i++) {
+      const target: Shape = unwrapObserved(selected[i]);
+      const live: Shape | undefined = editService.getShapeById(target.id);
+      if (live === undefined || unwrapObserved(live) !== target) return false;
     }
-    return false;
+    return true;
   }
 
   private submitSelectedProperties(ids: number[], property: string, value: string,
@@ -4658,7 +4654,13 @@ struct Index {
     }
     this.bindViewWorkspaceSources();
     const restoreExisting: boolean = restore && core.exportRecovery().documents.some((document): boolean => document.documentId === this.docStore.activeWorkspaceId);
-    const current: ViewRecord = core.ensureDocument(this.docStore.activeWorkspaceId, this.viewWorkspaceCapture());
+    const initialCapture: ViewPresentation = this.viewWorkspaceCapture();
+    const topCellId: number = editService.getTopCellId();
+    if (topCellId >= 0 && topCellId < this.docCellKeys.length &&
+        (initialCapture.location.cellStackKeys.length === 0 || initialCapture.location.cellStackKeys[0] !== this.docCellKeys[topCellId])) {
+      initialCapture.location = { cellStackKeys: [this.docCellKeys[topCellId]], placements: [] };
+    }
+    const current: ViewRecord = core.ensureDocument(this.docStore.activeWorkspaceId, initialCapture);
     this.viewWorkspaceDocumentId = this.docStore.activeWorkspaceId; this.viewportStore.viewWorkspaceActiveId = current.id;
     // A newly captured view already matches the canvas; applying it would round-trip its camera.
     try { if (restoreExisting && this.viewWorkspaceIdle()) core.activateView(current.id, this.viewWorkspaceRuntime()); }
@@ -4771,6 +4773,8 @@ struct Index {
 
   private persistViewWorkspacePresentation(): boolean {
     if (!this.viewWorkspaceInitialized || this.viewWorkspaceCore === null || this.viewWorkspaceDocumentId !== this.docStore.activeWorkspaceId) return true;
+    const activeStack: number[] = editService.getCurrentCellStack();
+    if (activeStack.length === 0 || activeStack[0] !== editService.getTopCellId()) return true;
     try {
       const current: ViewPresentation = this.viewWorkspaceCapture();
       if (JSON.stringify(this.viewWorkspaceCore.getView(this.viewportStore.viewWorkspaceActiveId).presentation) !== JSON.stringify(current)) {
@@ -5753,7 +5757,7 @@ struct Index {
     this.finishNudgeTransaction();
     if (this.viewWorkspaceInitialized && !this.persistViewWorkspacePresentation()) throw new Error(this.viewportStore.viewWorkspaceStatus);
     const isCleanTab: boolean = !editService.isDirty() && !this.docStore.documentDirty && !this.localPythonDraftDirty;
-    const session: EditSessionState = isCleanTab ? editService.captureReadOnlySession() : editService.captureSession();
+    const session: EditSessionState = isCleanTab ? editService.captureReadOnlySession(this.docStore.activeWorkspaceId) : editService.captureSession();
     const record: WorkspaceDocument = this.workspaceDocument();
     record.shapes = session.shapes;
     const prepared: WorkspacePreparedDraft | undefined = this.docStore.workspaceReady ? workspaceService.prepareDraft(record) : undefined;
@@ -5832,7 +5836,8 @@ struct Index {
         if (key !== this.workspaceViewKey) {
           this.workspaceViewKey = key;
           if (this.viewWorkspaceInitialized) this.persistViewWorkspacePresentation();
-          this.scheduleWorkspaceDraft();
+          const viewOnlyOnCleanDoc: boolean = !editService.isDirty() && !this.docStore.documentDirty && !this.localPythonDraftDirty;
+          this.scheduleWorkspaceDraft(viewOnlyOnCleanDoc ? 4000 : 1500);
         }
       }, 2000);
       this.scheduleWorkspaceDraft();
@@ -6170,7 +6175,7 @@ struct Index {
     this.saveWorkspaceDraft(false, true);
   }
 
-  private scheduleWorkspaceDraft(): void {
+  private scheduleWorkspaceDraft(delayMs: number = 1500): void {
     if (!this.docStore.workspaceReady || this.workspaceCloseConfirming) return;
     if (this.autosaveTimer >= 0) clearTimeout(this.autosaveTimer);
     this.autosaveTimer = setTimeout(() => {
@@ -6178,7 +6183,7 @@ struct Index {
       if (!this.workspaceCloseConfirming) {
         this.saveWorkspaceDraft();
       }
-    }, 1500);
+    }, delayMs);
   }
 
   private currentWorkspaceViewKey(): string {
@@ -13254,10 +13259,14 @@ struct Index {
   /** 按当前层级的完整几何和端口 aperture 范围适配，端口显示列表上限不影响范围。 */
   private fitAllShapes(): void {
     let summary: HierarchyDisplaySummary;
+    const hiddenLayers: Set<string> = new Set<string>();
+    for (let i = 0; i < this.docStore.layers.length; i++) {
+      const l: UiLayer = this.docStore.layers[i];
+      if (l.visible === false) hiddenLayers.add(`${l.layerNumber}:${l.datatype}`);
+    }
     try {
       summary = summarizeCellDisplayShapes(editService.getShapes(), editService.getCurrentCellId(), this.docStore.hierarchyDepth,
-        (number: number, datatype: number): boolean => this.docStore.layers.find((layer: UiLayer): boolean =>
-          layer.layerNumber === number && layer.datatype === datatype)?.visible !== false);
+        (number: number, datatype: number): boolean => !hiddenLayers.has(`${number}:${datatype}`));
     } catch (error) {
       this.panelStore.statusText = `无法适配完整图形范围：${error}`;
       return;

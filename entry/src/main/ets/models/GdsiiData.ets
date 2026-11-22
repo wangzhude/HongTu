@@ -12,7 +12,7 @@ import { LAYER_NAME_MAP, getDefaultLayerColor } from '../common/constants';
 import type { GdsiiResult, LayerInfo, NativeShape, LayoutPropRecord, SourceLayerDefinition } from '../../cpp/types/libhongtu/Index';
 import { normalizeLayoutSemantics } from './LayoutPort';
 import type { LayoutSemanticState } from './LayoutPort';
-import { cloneStructured, markImmutablePointArray } from '../common/CloneUtils';
+import { cloneStructured, markImmutablePointArray, isImmutablePointArray, markFiniteValidatedPointArray } from '../common/CloneUtils';
 
 /** 图形元素类型 */
 export enum ShapeType {
@@ -241,9 +241,29 @@ function convertSingleNativeShape(
     const ptOffset: number = shapePointOffsets[index];
     points = new Array<Point>(ptCount);
     let base: number = ptOffset * 2;
+    let pMinX: number = Infinity;
+    let pMinY: number = Infinity;
+    let pMaxX: number = -Infinity;
+    let pMaxY: number = -Infinity;
+    let allFinite: boolean = true;
     for (let j = 0; j < ptCount; j++) {
-      points[j] = { x: packedCoords[base], y: packedCoords[base + 1] };
+      const px: number = packedCoords[base];
+      const py: number = packedCoords[base + 1];
+      if (Number.isFinite(px) && Number.isFinite(py)) {
+        if (px < pMinX) pMinX = px;
+        if (py < pMinY) pMinY = py;
+        if (px > pMaxX) pMaxX = px;
+        if (py > pMaxY) pMaxY = py;
+      } else {
+        allFinite = false;
+      }
+      points[j] = { x: px, y: py };
       base += 2;
+    }
+    markImmutablePointArray(points);
+    if (allFinite) {
+      markFiniteValidatedPointArray(points);
+      cacheImmutablePointsBounds(points, { minX: pMinX, minY: pMinY, maxX: pMaxX, maxY: pMaxY });
     }
   } else {
     if (native.points === undefined || native.points.length === 0) {
@@ -251,11 +271,30 @@ function convertSingleNativeShape(
     }
     const ptCount: number = native.points.length;
     points = new Array<Point>(ptCount);
+    let pMinX: number = Infinity;
+    let pMinY: number = Infinity;
+    let pMaxX: number = -Infinity;
+    let pMaxY: number = -Infinity;
+    let allFinite: boolean = true;
     for (let j = 0; j < ptCount; j++) {
-      points[j] = { x: native.points[j].x, y: native.points[j].y };
+      const px: number = native.points[j].x;
+      const py: number = native.points[j].y;
+      if (Number.isFinite(px) && Number.isFinite(py)) {
+        if (px < pMinX) pMinX = px;
+        if (py < pMinY) pMinY = py;
+        if (px > pMaxX) pMaxX = px;
+        if (py > pMaxY) pMaxY = py;
+      } else {
+        allFinite = false;
+      }
+      points[j] = { x: px, y: py };
+    }
+    markImmutablePointArray(points);
+    if (allFinite) {
+      markFiniteValidatedPointArray(points);
+      cacheImmutablePointsBounds(points, { minX: pMinX, minY: pMinY, maxX: pMaxX, maxY: pMaxY });
     }
   }
-  markImmutablePointArray(points);
 
   const type: ShapeType = nativeShapeType(native.type);
   const shape: Shape = {
@@ -539,18 +578,157 @@ export interface ShapeBounds {
   maxY: number;
 }
 
-/** 计算矩形的边界框 */
-export function getShapeBounds(shape: Shape): ShapeBounds {
-  if (shape.points.length === 0) {
-    const empty: ShapeBounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
-    return empty;
+const _immutablePointBoundsCache: WeakMap<Point[], ShapeBounds> = new WeakMap<Point[], ShapeBounds>();
+
+/** 预存不可变点集的原始点包围盒（供 GDS/OASIS 解包时零额外遍历写入） */
+export function cacheImmutablePointsBounds(points: Point[], bounds: ShapeBounds): void {
+  if (points.length > 0) {
+    _immutablePointBoundsCache.set(points, bounds);
   }
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of shape.points) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
+}
+
+/**
+ * 判定闭合多边形顶点序列是否含反向重合的 Keyhole 桥接切缝边（u -> v 与 v -> u）。
+ * 普通简单多边形在 O(n) 重复顶点快速筛查阶段直接返回 false。
+ */
+export function hasKeyholeBridgeEdges(points: Point[]): boolean {
+  const n: number = points.length;
+  if (n < 8) return false;
+  const seenVerts: Set<string> = new Set<string>();
+  let hasDup: boolean = false;
+  for (let i = 0; i < n; i++) {
+    const k: string = `${points[i].x},${points[i].y}`;
+    if (seenVerts.has(k)) {
+      hasDup = true;
+      break;
+    }
+    seenVerts.add(k);
+  }
+  if (!hasDup) return false;
+  const forwardEdges: Set<string> = new Set<string>();
+  for (let i = 0; i < n; i++) {
+    const a: Point = points[i];
+    const b: Point = points[(i + 1) % n];
+    if (a.x === b.x && a.y === b.y) continue;
+    const revKey: string = `${b.x},${b.y}>${a.x},${a.y}`;
+    if (forwardEdges.has(revKey)) return true;
+    forwardEdges.add(`${a.x},${a.y}>${b.x},${b.y}`);
+  }
+  return false;
+}
+
+/**
+ * 标记闭合多边形中成对抵消的反向重合 Keyhole 桥接边下标（跳过后仅保留真实外环与内孔轮廓边）。
+ */
+export function markKeyholeBridgeEdgeFlags(points: Point[]): boolean[] {
+  const n: number = points.length;
+  const skip: boolean[] = new Array<boolean>(n).fill(false);
+  if (n < 8) return skip;
+  const firstByDir: Map<string, number[]> = new Map<string, number[]>();
+  for (let i = 0; i < n; i++) {
+    const a: Point = points[i];
+    const b: Point = points[(i + 1) % n];
+    if (a.x === b.x && a.y === b.y) {
+      skip[i] = true;
+      continue;
+    }
+    const revKey: string = `${b.x},${b.y}>${a.x},${a.y}`;
+    const revList: number[] | undefined = firstByDir.get(revKey);
+    if (revList !== undefined && revList.length > 0) {
+      const partner: number = revList.pop()!;
+      skip[partner] = true;
+      skip[i] = true;
+    } else {
+      const fwdKey: string = `${a.x},${a.y}>${b.x},${b.y}`;
+      const list: number[] | undefined = firstByDir.get(fwdKey);
+      if (list !== undefined) list.push(i);
+      else firstByDir.set(fwdKey, [i]);
+    }
+  }
+  return skip;
+}
+
+/**
+ * 将含 Keyhole 切缝桥接的单个多边形还原为互不相交的独立闭合轮廓环（外轮廓 CCW + 各内孔 CW），
+ * 用于 ArkUI Path / 预览 Canvas 无接缝描边与填充。
+ */
+export function extractKeyholeCleanLoops(points: Point[]): Point[][] {
+  const n: number = points.length;
+  if (n < 3) return [];
+  const skip: boolean[] = markKeyholeBridgeEdgeFlags(points);
+  let anySkipped: boolean = false;
+  for (let i = 0; i < n; i++) {
+    if (skip[i]) { anySkipped = true; break; }
+  }
+  if (!anySkipped) return [points];
+
+  const edgeUsed: boolean[] = skip.slice();
+  const adj: Map<string, number[]> = new Map<string, number[]>();
+  for (let i = 0; i < n; i++) {
+    if (edgeUsed[i]) continue;
+    const key: string = `${points[i].x},${points[i].y}`;
+    const list: number[] | undefined = adj.get(key);
+    if (list !== undefined) list.push(i);
+    else adj.set(key, [i]);
+  }
+  const loops: Point[][] = [];
+  for (let start = 0; start < n; start++) {
+    if (edgeUsed[start]) continue;
+    const loop: Point[] = [];
+    const startKey: string = `${points[start].x},${points[start].y}`;
+    let cur: number = start;
+    while (!edgeUsed[cur]) {
+      edgeUsed[cur] = true;
+      loop.push(points[cur]);
+      const nextVert: Point = points[(cur + 1) % n];
+      const nextKey: string = `${nextVert.x},${nextVert.y}`;
+      if (nextKey === startKey) break;
+      const candidates: number[] | undefined = adj.get(nextKey);
+      if (candidates === undefined) break;
+      let nextEdge: number = -1;
+      for (let c = 0; c < candidates.length; c++) {
+        if (!edgeUsed[candidates[c]]) {
+          nextEdge = candidates[c];
+          break;
+        }
+      }
+      if (nextEdge < 0) break;
+      cur = nextEdge;
+    }
+    if (loop.length >= 3) loops.push(loop);
+  }
+  return loops.length > 0 ? loops : [points];
+}
+
+/** 计算图形的边界框（对不可变点集采用 WeakMap O(1) 缓存，消除百万顶点全图适配主线程阻塞） */
+export function getShapeBounds(shape: Shape): ShapeBounds {
+  const pts: Point[] = shape.points;
+  const len: number = pts.length;
+  if (len === 0) {
+    return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  }
+  let minX: number = Infinity;
+  let minY: number = Infinity;
+  let maxX: number = -Infinity;
+  let maxY: number = -Infinity;
+  const immutable: boolean = isImmutablePointArray(pts);
+  const cached: ShapeBounds | undefined = immutable ? _immutablePointBoundsCache.get(pts) : undefined;
+  if (cached !== undefined) {
+    minX = cached.minX;
+    minY = cached.minY;
+    maxX = cached.maxX;
+    maxY = cached.maxY;
+  } else {
+    for (let i = 0; i < len; i++) {
+      const p: Point = pts[i];
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    if (immutable) {
+      _immutablePointBoundsCache.set(pts, { minX: minX, minY: minY, maxX: maxX, maxY: maxY });
+    }
   }
   // G1.5-FIX: PATH 中心线顶点算 bounds 需向外扩展 pathWidth/2，否则框选/DRC 间距判定偏小
   if (shape.type === ShapeType.PATH) {
@@ -558,8 +736,7 @@ export function getShapeBounds(shape: Shape): ShapeBounds {
       Math.max(Math.abs(shape.pathBeginExtension ?? 0), Math.abs(shape.pathEndExtension ?? 0)) : 0);
     minX -= half; maxX += half; minY -= half; maxY += half;
   }
-  const result: ShapeBounds = { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
-  return result;
+  return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
 }
 
 /** 计算图形面积（nm²） */

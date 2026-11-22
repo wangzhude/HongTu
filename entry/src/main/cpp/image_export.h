@@ -28,6 +28,7 @@
 #include "png_writer.h"
 #include <string>
 #include <vector>
+#include <map>
 #include <sstream>
 #include <iomanip>
 #include <cmath>
@@ -61,6 +62,92 @@ struct Contour {
  * 导出几何 = 自顶层 Cell 的层级展开结果（含 SREF/AREF 变换、PATH 轮廓）。
  * 顶层未知时退回各 Cell 本地图形，保证永不导出空图。
  */
+/** Detect antiparallel keyhole bridge segments (u->v paired with v->u) so SVG/PNG
+ * strokes only real outer/hole contours and never paints internal keyhole slits.
+ */
+inline std::vector<uint8_t> markKeyholeBridgeEdges(const std::vector<Vec2>& pts) {
+    const size_t n = pts.size();
+    std::vector<uint8_t> skip(n, 0);
+    if (n < 8) return skip;
+    auto qKey = [](const Vec2& p) -> std::pair<int64_t, int64_t> {
+        return {std::llround(p.x * 1024.0), std::llround(p.y * 1024.0)};
+    };
+    struct SegKey {
+        int64_t x0, y0, x1, y1;
+        bool operator<(const SegKey& o) const noexcept {
+            if (x0 != o.x0) return x0 < o.x0;
+            if (y0 != o.y0) return y0 < o.y0;
+            if (x1 != o.x1) return x1 < o.x1;
+            return y1 < o.y1;
+        }
+    };
+    std::map<SegKey, std::vector<size_t>> seen;
+    for (size_t i = 0; i < n; ++i) {
+        const auto a = qKey(pts[i]);
+        const auto b = qKey(pts[(i + 1) % n]);
+        if (a == b) {
+            skip[i] = 1;
+            continue;
+        }
+        auto it = seen.find({b.first, b.second, a.first, a.second});
+        if (it != seen.end() && !it->second.empty()) {
+            skip[it->second.back()] = 1;
+            it->second.pop_back();
+            skip[i] = 1;
+        } else {
+            seen[{a.first, a.second, b.first, b.second}].push_back(i);
+        }
+    }
+    return skip;
+}
+
+inline std::vector<std::vector<Vec2>> splitKeyholeLoops(const std::vector<Vec2>& pts,
+                                                        const std::vector<uint8_t>& skip) {
+    const size_t n = pts.size();
+    auto qKey = [](const Vec2& p) -> std::pair<int64_t, int64_t> {
+        return {std::llround(p.x * 1024.0), std::llround(p.y * 1024.0)};
+    };
+    std::map<std::pair<int64_t, int64_t>, std::vector<std::pair<size_t, size_t>>> adj;
+    std::vector<bool> edgeUsed(n, false);
+    size_t activeEdges = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (skip[i]) {
+            edgeUsed[i] = true;
+            continue;
+        }
+        adj[qKey(pts[i])].push_back({i, (i + 1) % n});
+        ++activeEdges;
+    }
+    std::vector<std::vector<Vec2>> loops;
+    if (activeEdges == 0) return loops;
+    for (size_t startEdge = 0; startEdge < n; ++startEdge) {
+        if (edgeUsed[startEdge]) continue;
+        std::vector<Vec2> loop;
+        const auto startKey = qKey(pts[startEdge]);
+        size_t curEdge = startEdge;
+        while (!edgeUsed[curEdge]) {
+            edgeUsed[curEdge] = true;
+            loop.push_back(pts[curEdge]);
+            const size_t nextVert = (curEdge + 1) % n;
+            const auto nextKey = qKey(pts[nextVert]);
+            if (nextKey == startKey) break;
+            auto it = adj.find(nextKey);
+            if (it == adj.end()) break;
+            bool advanced = false;
+            for (const auto& cand : it->second) {
+                if (!edgeUsed[cand.first]) {
+                    curEdge = cand.first;
+                    advanced = true;
+                    break;
+                }
+            }
+            if (!advanced) break;
+        }
+        if (loop.size() >= 3) loops.push_back(std::move(loop));
+    }
+    return loops;
+}
+
 inline std::vector<Contour> collectContours(const Layout& layout) {
     std::vector<Contour> out;
     auto emit = [&out](const SceneShape& s, const GeometryEngine::Transform2D& xf) {
@@ -335,6 +422,25 @@ public:
             if (groupIt != byLayer.end()) {
                 for (const auto* c : groupIt->second) {
                     if (!GeometryEngine::computeBBox(c->points).intersects(region)) continue;
+                    const std::vector<uint8_t> skip = imagedetail::markKeyholeBridgeEdges(c->points);
+                    bool hasKeyhole = false;
+                    for (uint8_t flag : skip) if (flag) { hasKeyhole = true; break; }
+                    if (hasKeyhole) {
+                        const auto loops = imagedetail::splitKeyholeLoops(c->points, skip);
+                        if (!loops.empty()) {
+                            body << "    <path fill-rule=\"evenodd\" d=\"";
+                            for (size_t li = 0; li < loops.size(); ++li) {
+                                if (li > 0) body << " ";
+                                for (size_t pi = 0; pi < loops[li].size(); ++pi) {
+                                    body << (pi == 0 ? "M" : " L")
+                                         << toSvgX(loops[li][pi].x) << "," << toSvgY(loops[li][pi].y);
+                                }
+                                body << " Z";
+                            }
+                            body << "\"/>\n";
+                            continue;
+                        }
+                    }
                     body << "    <polygon points=\"";
                     for (size_t i = 0; i < c->points.size(); i++) {
                         if (i > 0) body << " ";
@@ -550,7 +656,9 @@ private:
         const double period = strokeDashPeriod(lineStyle);
         double phase = 0.0;
         constexpr size_t workLimit = 128u * 1024u * 1024u;
+        const std::vector<uint8_t> skipBridge = imagedetail::markKeyholeBridgeEdges(points);
         for (size_t i = 0; i < points.size(); i++) {
+            if (skipBridge[i]) continue;
             const size_t j = (i + 1) % points.size();
             const double x0 = proj.toPixelX(points[i].x);
             const double y0 = proj.toPixelY(points[i].y);

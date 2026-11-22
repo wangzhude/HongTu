@@ -34,7 +34,6 @@ export struct WorkbenchInspector {
   /** Desktop B layout already shows layers in the left dock. */
   @Prop desktopCanvasFirst: boolean = false;
   @Prop layers: UiLayer[] = [];
-  @Link shapes: Shape[];
   @Prop issues: DrcIssue[] = [];
   @Prop selectedLayerNumber: number = 1;
   @Prop selectedDatatype: number = 0;
@@ -82,7 +81,6 @@ export struct WorkbenchInspector {
         LayerInspector({
           layers: this.layers,
           editable: this.editable,
-          shapes: $shapes,
           selectedLayerNumber: this.selectedLayerNumber,
           selectedDatatype: this.selectedDatatype,
           selectedShapeId: this.selectedShapeId,
@@ -127,7 +125,6 @@ export struct WorkbenchInspector {
 struct LayerInspector {
   @Prop layers: UiLayer[] = [];
   @Prop editable: boolean = true;
-  @Link shapes: Shape[];
   @Prop selectedLayerNumber: number = 1;
   @Prop selectedDatatype: number = 0;
   @Prop selectedShapeId: number = -1;
@@ -176,15 +173,7 @@ struct LayerInspector {
     .height('100%')
   }
 
-  private countShapesOnLayer(layerNumber: number, datatype: number): number {
-    let count = 0;
-    for (let i = 0; i < this.shapes.length; i++) {
-      if (this.shapes[i].layerNumber === layerNumber && this.shapes[i].datatype === datatype) {
-        count++;
-      }
-    }
-    return count;
-  }
+
 }
 
 /** Independent desktop rule configuration; result rows stay in DrcResultsDock. */

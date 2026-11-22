@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace {
 constexpr unsigned int HONGTU_LOG_DOMAIN = 0x3200;
@@ -470,7 +471,7 @@ bool GLRenderer::triangulatePolygonCached(const std::vector<GLVertex>& verts, in
         return true;
     }
 
-    const bool cacheable = (n >= 4 && n <= 2048 && std::isfinite(verts[0].x) && std::isfinite(verts[0].y));
+    const bool cacheable = (n >= 4 && n <= 8192 && std::isfinite(verts[0].x) && std::isfinite(verts[0].y));
     uint64_t hash = 0;
     if (cacheable) {
         hash = HashRelativePolygon(verts, n);
@@ -597,6 +598,175 @@ void GLRenderer::applyStrokeWidth(float desiredPx) {
     }
 }
 
+static uint64_t packVertexKey(const GLVertex& v) noexcept {
+    uint32_t bx = 0, by = 0;
+    std::memcpy(&bx, &v.x, sizeof(uint32_t));
+    std::memcpy(&by, &v.y, sizeof(uint32_t));
+    if (bx == 0x80000000u) bx = 0u;
+    if (by == 0x80000000u) by = 0u;
+    return (static_cast<uint64_t>(bx) << 32) | static_cast<uint64_t>(by);
+}
+
+struct DirectedEdgeKey {
+    uint64_t u;
+    uint64_t v;
+    bool operator==(const DirectedEdgeKey& o) const noexcept { return u == o.u && v == o.v; }
+};
+
+struct DirectedEdgeKeyHash {
+    size_t operator()(const DirectedEdgeKey& k) const noexcept {
+        uint64_t h = k.u ^ (k.v + 0x9e3779b97f4a7c15ULL + (k.u << 6) + (k.u >> 2));
+        return static_cast<size_t>(h);
+    }
+};
+
+// Emit polygon boundary segments into GL_LINES while cancelling exact antiparallel
+// zero-width keyhole bridge pairs (u -> v and v -> u). Fast-paths ordinary simple
+// polygons with zero heap allocations via a tiny stack duplicate-vertex hash table.
+static void appendPolygonOutlineEdges(const std::vector<GLVertex>& verts, size_t n,
+                                      std::vector<GLVertex>& outEdges,
+                                      bool mayHaveKeyholeBridge = true) {
+    if (n < 2) return;
+    // Strip trailing closing vertex if identical to verts[0] so simple GDS rings never trigger duplicate path
+    while (n > 2 && packVertexKey(verts[n - 1]) == packVertexKey(verts[0])) {
+        --n;
+    }
+    if (n < 2) return;
+    if (!mayHaveKeyholeBridge || n < 6) {
+        for (size_t p = 0; p < n; ++p) {
+            outEdges.push_back(verts[p]);
+            outEdges.push_back(verts[(p + 1) % n]);
+        }
+        return;
+    }
+
+    // Zero-heap-allocation open-addressing vertex duplicate check + antiparallel bridge cancellation
+    constexpr uint32_t kCap = 32768u;
+    constexpr uint32_t kMask = kCap - 1u;
+    thread_local uint64_t tlVertKeys[kCap];
+    thread_local uint32_t tlVertStamp[kCap] = {};
+    thread_local uint32_t tlGen = 1u;
+
+    bool hasDupVert = (n > 16384);
+    if (!hasDupVert) {
+        ++tlGen;
+        if (tlGen == 0u) {
+            std::memset(tlVertStamp, 0, sizeof(tlVertStamp));
+            tlGen = 1u;
+        }
+        for (size_t p = 0; p < n; ++p) {
+            const uint64_t k = packVertexKey(verts[p]);
+            uint32_t slot = static_cast<uint32_t>((k ^ (k >> 32)) * 2654435761u) & kMask;
+            while (tlVertStamp[slot] == tlGen) {
+                if (tlVertKeys[slot] == k) {
+                    hasDupVert = true;
+                    break;
+                }
+                slot = (slot + 1u) & kMask;
+            }
+            if (hasDupVert) break;
+            tlVertStamp[slot] = tlGen;
+            tlVertKeys[slot] = k;
+        }
+    }
+
+    if (!hasDupVert) {
+        for (size_t p = 0; p < n; ++p) {
+            outEdges.push_back(verts[p]);
+            outEdges.push_back(verts[(p + 1) % n]);
+        }
+        return;
+    }
+
+    // Zero-heap-allocation flat open-addressing antiparallel edge matcher for keyhole polygons <= 16384 pts
+    if (n <= 16384) {
+        thread_local uint64_t tlEdgeU[kCap];
+        thread_local uint64_t tlEdgeV[kCap];
+        thread_local int32_t tlEdgeIdx[kCap];
+        thread_local uint32_t tlEdgeStamp[kCap] = {};
+        thread_local uint8_t tlSkip[16384];
+        thread_local uint32_t tlEdgeGen = 1u;
+        ++tlEdgeGen;
+        if (tlEdgeGen == 0u) {
+            std::memset(tlEdgeStamp, 0, sizeof(tlEdgeStamp));
+            tlEdgeGen = 1u;
+        }
+        std::memset(tlSkip, 0, n);
+        bool anyCancelled = false;
+        for (size_t p = 0; p < n; ++p) {
+            const uint64_t ku = packVertexKey(verts[p]);
+            const uint64_t kv = packVertexKey(verts[(p + 1) % n]);
+            if (ku == kv) {
+                tlSkip[p] = 1;
+                anyCancelled = true;
+                continue;
+            }
+            const uint64_t revHash = kv ^ (ku + 0x9e3779b97f4a7c15ULL + (kv << 6) + (kv >> 2));
+            uint32_t rSlot = static_cast<uint32_t>(revHash ^ (revHash >> 32)) & kMask;
+            bool matched = false;
+            while (tlEdgeStamp[rSlot] == tlEdgeGen) {
+                if (tlEdgeIdx[rSlot] >= 0 && tlEdgeU[rSlot] == kv && tlEdgeV[rSlot] == ku) {
+                    tlSkip[tlEdgeIdx[rSlot]] = 1;
+                    tlSkip[p] = 1;
+                    tlEdgeIdx[rSlot] = -1;
+                    anyCancelled = true;
+                    matched = true;
+                    break;
+                }
+                rSlot = (rSlot + 1u) & kMask;
+            }
+            if (!matched) {
+                const uint64_t fwdHash = ku ^ (kv + 0x9e3779b97f4a7c15ULL + (ku << 6) + (ku >> 2));
+                uint32_t fSlot = static_cast<uint32_t>(fwdHash ^ (fwdHash >> 32)) & kMask;
+                while (tlEdgeStamp[fSlot] == tlEdgeGen && tlEdgeIdx[fSlot] >= 0) {
+                    fSlot = (fSlot + 1u) & kMask;
+                }
+                tlEdgeStamp[fSlot] = tlEdgeGen;
+                tlEdgeU[fSlot] = ku;
+                tlEdgeV[fSlot] = kv;
+                tlEdgeIdx[fSlot] = static_cast<int32_t>(p);
+            }
+        }
+        for (size_t p = 0; p < n; ++p) {
+            if (!anyCancelled || !tlSkip[p]) {
+                outEdges.push_back(verts[p]);
+                outEdges.push_back(verts[(p + 1) % n]);
+            }
+        }
+        return;
+    }
+
+    std::vector<uint8_t> skipEdge(n, 0);
+    std::unordered_map<DirectedEdgeKey, std::vector<size_t>, DirectedEdgeKeyHash> firstIndices;
+    firstIndices.reserve(n);
+    bool anyCancelled = false;
+    for (size_t p = 0; p < n; ++p) {
+        const uint64_t ku = packVertexKey(verts[p]);
+        const uint64_t kv = packVertexKey(verts[(p + 1) % n]);
+        if (ku == kv) {
+            skipEdge[p] = 1;
+            anyCancelled = true;
+            continue;
+        }
+        auto revIt = firstIndices.find({kv, ku});
+        if (revIt != firstIndices.end() && !revIt->second.empty()) {
+            const size_t partner = revIt->second.back();
+            revIt->second.pop_back();
+            skipEdge[partner] = 1;
+            skipEdge[p] = 1;
+            anyCancelled = true;
+        } else {
+            firstIndices[{ku, kv}].push_back(p);
+        }
+    }
+    for (size_t p = 0; p < n; ++p) {
+        if (!anyCancelled || !skipEdge[p]) {
+            outEdges.push_back(verts[p]);
+            outEdges.push_back(verts[(p + 1) % n]);
+        }
+    }
+}
+
 static uint64_t NextRenderDataPublication() {
     static std::atomic<uint64_t> last{0};
     auto previous = last.load(std::memory_order_relaxed);
@@ -636,7 +806,9 @@ void GLRenderer::setRenderData(const std::vector<RenderBatch>& batches, bool lay
         const size_t n = batch.vertexCount > 0
             ? std::min(batch.vertices.size(), static_cast<size_t>(batch.vertexCount)) : 0;
         const size_t estimate = batch.type == GLPrimitiveType::RECT_FILLED ? (n / 4) * 14
-            : batch.type == GLPrimitiveType::RECT_OUTLINE ? (n / 4) * 8 : n;
+            : batch.type == GLPrimitiveType::RECT_OUTLINE ? (n / 4) * 8
+            : batch.type == GLPrimitiveType::POLYGON_FILLED ? (n > 2 ? (n - 2) * 3 : 0) + n * 2
+            : n * 2;
         if (estimate > maxVertices - estimatedVertices)
             throw std::length_error("Prepared GL geometry exceeds vertex index limit");
         estimatedVertices += estimate;
@@ -731,8 +903,8 @@ void GLRenderer::setRenderData(const std::vector<RenderBatch>& batches, bool lay
                 }
             }
             const size_t first = nextVertices.size();
-            nextVertices.insert(nextVertices.end(), batch.vertices.begin(), batch.vertices.begin() + n);
-            emit(GL_LINE_LOOP, false, first);
+            appendPolygonOutlineEdges(batch.vertices, n, nextVertices, batch.mayHaveKeyholeBridge);
+            emit(GL_LINES, false, first);
             ++primitiveCount;
         }
         if (nextCommands.size() != firstCommand) ++batchCount;
@@ -848,9 +1020,7 @@ void GLRenderer::setLayoutRenderData(const std::vector<RenderBatch>& batches,
                         }
                     }
                 }
-                for (size_t p = 0; p < n; ++p) {
-                    edges.push_back(batch.vertices[p]); edges.push_back(batch.vertices[(p + 1) % n]);
-                }
+                appendPolygonOutlineEdges(batch.vertices, n, edges, batch.mayHaveKeyholeBridge);
                 ++primitiveCount;
             }
             checkSize();

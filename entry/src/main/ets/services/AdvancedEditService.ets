@@ -13,7 +13,7 @@
  * This file is part of HongTu, licensed under GPLv3.
  */
 
-import { Shape, ShapeType, Point, getShapeBounds, ShapeBounds, normalizePropRecords } from '../models/GdsiiData';
+import { Shape, ShapeType, Point, getShapeBounds, ShapeBounds, normalizePropRecords, hasKeyholeBridgeEdges } from '../models/GdsiiData';
 import { editService } from './EditService';
 import type { EditStructureState } from './EditService';
 import { nativeHongTuService } from './NativeHongTuService';
@@ -434,6 +434,9 @@ export class AdvancedEditService {
   /** 是否可作为顶点编辑目标：多边形 / 路径 / 矩形（文本、实例不支持） */
   isVertexEditable(shape: Shape | null): boolean {
     if (shape === null) {
+      return false;
+    }
+    if (shape.type === ShapeType.POLYGON && hasKeyholeBridgeEdges(shape.points)) {
       return false;
     }
     return shape.type === ShapeType.POLYGON || shape.type === ShapeType.PATH || shape.type === ShapeType.RECT;

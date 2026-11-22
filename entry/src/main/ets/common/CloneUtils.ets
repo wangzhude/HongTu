@@ -31,6 +31,7 @@ const STANDARD_SHAPE_KEYS: Set<string> = new Set<string>([
 
 // Freshly hydrated geometry is shared by snapshots. Geometry edits replace the points array.
 const immutablePointArrays: WeakSet<Object> = new WeakSet<Object>();
+const finiteValidatedPointArrays: WeakSet<Object> = new WeakSet<Object>();
 
 export function markImmutablePointArray(points: Point[]): void {
   immutablePointArrays.add(points);
@@ -38,6 +39,14 @@ export function markImmutablePointArray(points: Point[]): void {
 
 export function isImmutablePointArray(points: Point[]): boolean {
   return immutablePointArrays.has(unwrapObserved(points));
+}
+
+export function markFiniteValidatedPointArray(points: Point[]): void {
+  finiteValidatedPointArrays.add(points);
+}
+
+export function isFiniteValidatedPointArray(points: Point[]): boolean {
+  return finiteValidatedPointArrays.has(unwrapObserved(points));
 }
 
 /** 零分配 IEEE-754 binary64 精确比特提取缓冲区 */
@@ -132,6 +141,9 @@ export function clonePointModel(point: Point): Point {
 
 export function clonePointArray(points: Point[]): Point[] {
   const rawPoints: Point[] = unwrapObserved(points);
+  if (immutablePointArrays.has(rawPoints)) {
+    return rawPoints;
+  }
   const len: number = rawPoints.length;
   const copy: Point[] = new Array<Point>(len);
   for (let i: number = 0; i < len; i++) {
@@ -424,6 +436,23 @@ export interface ShapeFingerprint64 {
   hi: number;
 }
 
+/** 不可变点集（导入解包冻结数组）的 64-bit 浮点比特摘要缓存，将 231 万顶点重复摘要从 5.5s 降至 O(1) */
+const IMMUTABLE_POINT_DIGESTS: WeakMap<Point[], ShapeFingerprint64> = new WeakMap<Point[], ShapeFingerprint64>();
+
+function hasNonStandardShapeKeys(srcRec: Record<string, Object>): boolean {
+  const keys: string[] = Object.keys(srcRec);
+  for (let i: number = 0; i < keys.length; i++) {
+    const k: string = keys[i];
+    if (!STANDARD_SHAPE_KEYS.has(k)) {
+      const extra: Object | undefined = srcRec[k];
+      if (extra !== undefined && typeof extra !== 'function') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 class Fingerprint64Accumulator {
   lo: number = 0x811c9dc5;
   hi: number = 0x9e3779b9;
@@ -512,10 +541,25 @@ export function computeShapeFingerprint64(shape: Shape): ShapeFingerprint64 {
 
   const pts: Point[] = unwrapObserved(raw.points);
   acc.mixUint32Pair(pts.length >>> 0, 0x31415926);
-  for (let i: number = 0; i < pts.length; i++) {
-    const p: Point = unwrapObserved(pts[i]);
-    acc.mixFloat64(p.x);
-    acc.mixFloat64(p.y);
+  if (immutablePointArrays.has(pts)) {
+    let ptDigest: ShapeFingerprint64 | undefined = IMMUTABLE_POINT_DIGESTS.get(pts);
+    if (ptDigest === undefined) {
+      const ptAcc: Fingerprint64Accumulator = new Fingerprint64Accumulator();
+      for (let i: number = 0; i < pts.length; i++) {
+        const p: Point = pts[i];
+        ptAcc.mixFloat64(p.x);
+        ptAcc.mixFloat64(p.y);
+      }
+      ptDigest = { lo: ptAcc.lo >>> 0, hi: ptAcc.hi >>> 0 };
+      IMMUTABLE_POINT_DIGESTS.set(pts, ptDigest);
+    }
+    acc.mixUint32Pair(ptDigest.lo, ptDigest.hi);
+  } else {
+    for (let i: number = 0; i < pts.length; i++) {
+      const p: Point = unwrapObserved(pts[i]);
+      acc.mixFloat64(p.x);
+      acc.mixFloat64(p.y);
+    }
   }
 
   const props: LayoutPropRecord[] | undefined = raw.properties;
@@ -605,6 +649,16 @@ interface CachedShapeSnapshotEntry {
   datatype: number;
   ownerCellId: number;
   cellId: number;
+  selected: boolean;
+  rotation: number;
+  mirror: number;
+  magnification: number;
+  pathWidth: number;
+  pathType: number;
+  text: string;
+  cellName: string;
+  immutablePtsRef: Point[] | null;
+  hasCustomKeys: boolean;
   vertices: KeyVertexGuard;
   immutableClone: Shape;
 }
@@ -627,8 +681,10 @@ export class IncrementalDocumentSnapshotCache {
   private hitCount: number = 0;
   private missCount: number = 0;
 
-  captureReadOnlyShapes(documentId: string, shapes: Shape[]): Shape[] {
-    const rawShapes: Shape[] = unwrapObserved(shapes);
+  captureReadOnlyShapes(docOrShapes: string | Shape[], maybeShapes?: Shape[]): Shape[] {
+    const documentId: string = typeof docOrShapes === 'string' ? docOrShapes : '__default__';
+    const inputShapes: Shape[] = typeof docOrShapes === 'string' ? (maybeShapes ?? []) : docOrShapes;
+    const rawShapes: Shape[] = unwrapObserved(inputShapes);
     const key: string = documentId.length > 0 ? documentId : '__default__';
     let prevCache: Map<number, CachedShapeSnapshotEntry> | undefined = this.docShapeCaches.get(key);
     if (prevCache === undefined) {
@@ -639,14 +695,51 @@ export class IncrementalDocumentSnapshotCache {
     const out: Shape[] = new Array<Shape>(len);
     for (let i: number = 0; i < len; i++) {
       const s: Shape = unwrapObserved(rawShapes[i]);
-      const fp: ShapeFingerprint64 = computeShapeFingerprint64(s);
       const pts: Point[] = unwrapObserved(s.points);
+      const immutablePts: boolean = immutablePointArrays.has(pts);
       const ptLen: number = pts.length;
       const propLen: number = s.properties === undefined ? -1 : unwrapObserved(s.properties).length;
       const ownerCell: number = s.ownerCellId ?? -1;
       const refCell: number = s.cellId ?? -1;
-      const kv: KeyVertexGuard = extractKeyVertices(pts);
+      const rot: number = s.rotation ?? 0;
+      const mir: number = s.mirror ?? 0;
+      const mag: number = s.magnification ?? 1;
+      const pw: number = s.pathWidth ?? 0;
+      const pt: number = s.pathType ?? 0;
+      const txt: string = s.text ?? '';
+      const cname: string = s.cellName ?? '';
       const hit: CachedShapeSnapshotEntry | undefined = prevCache.get(s.id);
+
+      // O(1) 零哈希快路径：不可变点集引用未变且标量属性未改时，完全跳过逐点混合与 Object.keys
+      if (
+        hit !== undefined &&
+        immutablePts &&
+        hit.immutablePtsRef === pts &&
+        !hit.hasCustomKeys &&
+        propLen <= 0 &&
+        hit.pointCount === ptLen &&
+        hit.propCount === propLen &&
+        hit.layerNumber === s.layerNumber &&
+        hit.datatype === s.datatype &&
+        hit.ownerCellId === ownerCell &&
+        hit.cellId === refCell &&
+        hit.selected === s.selected &&
+        sameCoord(hit.rotation, rot) &&
+        hit.mirror === mir &&
+        sameCoord(hit.magnification, mag) &&
+        sameCoord(hit.pathWidth, pw) &&
+        hit.pathType === pt &&
+        hit.text === txt &&
+        hit.cellName === cname
+      ) {
+        this.hitCount++;
+        out[i] = hit.immutableClone;
+        nextCache.set(s.id, hit);
+        continue;
+      }
+
+      const kv: KeyVertexGuard = extractKeyVertices(pts);
+      const fp: ShapeFingerprint64 = computeShapeFingerprint64(s);
       if (
         hit !== undefined &&
         hit.digestLo === fp.lo &&
@@ -669,7 +762,8 @@ export class IncrementalDocumentSnapshotCache {
         nextCache.set(s.id, hit);
       } else {
         this.missCount++;
-        const cloned: Shape = cloneShapeModel(s, true);
+        const customKeys: boolean = hasNonStandardShapeKeys(s as Object as Record<string, Object>);
+        const cloned: Shape = cloneShapeModel(s, customKeys);
         const entry: CachedShapeSnapshotEntry = {
           digestLo: fp.lo,
           digestHi: fp.hi,
@@ -679,6 +773,16 @@ export class IncrementalDocumentSnapshotCache {
           datatype: s.datatype,
           ownerCellId: ownerCell,
           cellId: refCell,
+          selected: s.selected,
+          rotation: rot,
+          mirror: mir,
+          magnification: mag,
+          pathWidth: pw,
+          pathType: pt,
+          text: txt,
+          cellName: cname,
+          immutablePtsRef: immutablePts ? pts : null,
+          hasCustomKeys: customKeys,
           vertices: kv,
           immutableClone: cloned,
         };
@@ -784,6 +888,11 @@ export class IncrementalDocumentSnapshotCache {
   /**
    * 生成完全隔离的可写 WorkspaceDocument 副本（零 JSON 往返）。
    */
+  cloneWorkspaceDocumentMetadataWithShapes(document: WorkspaceDocument, shapes: Shape[]): WorkspaceDocument {
+    const raw: WorkspaceDocument = unwrapObserved(document);
+    return this.cloneDocumentMetadataShell(raw, shapes);
+  }
+
   cloneWorkspaceDocument(document: WorkspaceDocument): WorkspaceDocument {
     const raw: WorkspaceDocument = unwrapObserved(document);
     const mutableShapes: Shape[] = cloneShapeArray(raw.shapes, true);

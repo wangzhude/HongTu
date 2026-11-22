@@ -1,6 +1,8 @@
 import { MeasureText, matrix4, PathShape } from '@kit.ArkUI';
 import { ActiveTool } from '../../workbench/WorkbenchModels';
-import { Shape, ShapeType, ShapeBounds, getShapeBounds, Point } from '../../models/GdsiiData';
+import { Shape, ShapeType, ShapeBounds, getShapeBounds,
+  hasKeyholeBridgeEdges,
+  extractKeyholeCleanLoops, Point } from '../../models/GdsiiData';
 import { getPathGeometryBounds } from '../../services/PathBoundsService';
 import type { PathBoundsTransform } from '../../services/PathBoundsService';
 import { UiLayer } from '../../common/types';
@@ -508,6 +510,8 @@ export struct LayoutCanvasView {
   private hasRulerDown: boolean = false;
   // 光标命中测试节流时戳（hitTest 最坏为线性扫描，不能每个 pointer 事件都跑）
   private lastCursorHitAt: number = 0;
+  private lastIdleCursorUpdateAt: number = 0;
+  private snapCacheViewport: WorldViewport | null = null;
 
   // Text 创建：落点坐标（textCreateController 打开前由调用方写入）
   private textInsertX: number = 0;
@@ -2162,7 +2166,15 @@ export struct LayoutCanvasView {
       this.lastPointerScreenY = event.y;
       const wx: number = this.screenToWorldX(event.x);
       const wy: number = this.screenToWorldY(event.y);
-      this.cursorStore.update(wx, wy);
+      const activeInteractiveHover: boolean = this.draftControlStore.stampActive || this.isDrawingPoly ||
+        this.hasDrawStart || this.isDragging || this.isBoxSelecting || this.vertexStore.isDragging() ||
+        this.draftControlStore.curveKind.length > 0 ||
+        (this.currentTool !== ActiveTool.Select && this.currentTool !== ActiveTool.Pan && this.currentTool !== ActiveTool.BoxZoom);
+      const nowHoverMs: number = Date.now();
+      if (activeInteractiveHover || nowHoverMs - this.lastIdleCursorUpdateAt >= 32) {
+        this.lastIdleCursorUpdateAt = nowHoverMs;
+        this.cursorStore.update(wx, wy);
+      }
 
       if (event.y >= this.activeTopBarThreshold()) {
         if (this.draftControlStore.stampActive && !this.hasPendingStampTouch) {
@@ -2401,23 +2413,90 @@ export struct LayoutCanvasView {
   private getSpatialSnapIndex(): SpatialSnapIndex {
     const moving: boolean = this.isDragging && (this.currentTool === ActiveTool.Move || this.currentTool === ActiveTool.Select);
     const excluded: number[] = moving ? this.collectMoveIds() : [];
-    const key: string = `${this.documentKey}:${this.geometryRenderRevision}:${this.styleRenderRevision}:${editService.getSessionRevision()}:` +
+    // 检测是否为超多顶点大版图（如 BJUT 231 万顶点）：超过 8 万顶点时改用视口扩边局部磁吸索引
+    let docVertEstimate: number = 0;
+    let isHeavyVertexDoc: boolean = this.shapes.length > 5000;
+    if (!isHeavyVertexDoc) {
+      for (let i = 0; i < this.shapes.length; i++) {
+        docVertEstimate += this.shapes[i].points.length;
+        if (docVertEstimate > 80000) {
+          isHeavyVertexDoc = true;
+          break;
+        }
+      }
+    }
+
+    const baseKey: string = `${this.documentKey}:${this.geometryRenderRevision}:${this.styleRenderRevision}:${editService.getSessionRevision()}:` +
       `${editService.getCurrentCellId()}:${this.hierarchyDepth}:${excluded.join(',')}`;
-    if (key !== this.snapCacheKey) {
+
+    if (isHeavyVertexDoc) {
+      const curVisVp: WorldViewport = worldViewportFromCamera(
+        this.canvasWidth, this.canvasHeight, this.zoomPercent, this.viewOffsetX, this.viewOffsetY, 96
+      );
+      const vpStillCovered: boolean = this.snapCacheKey.startsWith(baseKey + ':vp:') &&
+        this.snapCacheViewport !== null &&
+        curVisVp.minX >= this.snapCacheViewport.minX && curVisVp.maxX <= this.snapCacheViewport.maxX &&
+        curVisVp.minY >= this.snapCacheViewport.minY && curVisVp.maxY <= this.snapCacheViewport.maxY;
+      if (!vpStillCovered) {
+        const marginPx: number = Math.max(512, Math.max(this.canvasWidth, this.canvasHeight) * 1.25);
+        const snapVp: WorldViewport = worldViewportFromCamera(
+          this.canvasWidth, this.canvasHeight, this.zoomPercent, this.viewOffsetX, this.viewOffsetY, marginPx
+        );
+        const pixelSpanNm: number = 100 / Math.max(1e-6, this.zoomPercent);
+        const minSnapSpanNm: number = pixelSpanNm * 2.0; // 屏幕跨度 <2px 的亚像素微结构在鸟瞰态跳过磁吸建桶
+        const source: Shape[] = this.shapes.filter((s: Shape): boolean => excluded.indexOf(s.id) < 0 &&
+          (s.type === ShapeType.INSTANCE || (s.type !== ShapeType.NODE && this.isLayerVisible(s.layerNumber, s.datatype))));
+        const bounded: BoundedHierarchyDrawResult = expandAndCullCellShapesBounded(
+          source, editService.getCurrentCellId(), this.hierarchyDepth, snapVp, true, 4000
+        );
+        const rawCandidates: Shape[] = !bounded.overflow
+          ? bounded.shapes
+          : this.currentCellShapes().filter((s: Shape): boolean => {
+              if (excluded.indexOf(s.id) >= 0 || s.type === ShapeType.NODE || !this.isLayerVisible(s.layerNumber, s.datatype)) {
+                return false;
+              }
+              if (s.points.length === 0) return false;
+              const b: ShapeBounds = getShapeBounds(s);
+              return b.maxX >= snapVp.minX && b.minX <= snapVp.maxX && b.maxY >= snapVp.minY && b.minY <= snapVp.maxY;
+            });
+        const trimmed: Shape[] = [];
+        let accVerts: number = 0;
+        for (let i = 0; i < rawCandidates.length; i++) {
+          const cs: Shape = rawCandidates[i];
+          if (cs.type !== ShapeType.INSTANCE && cs.type !== ShapeType.TEXT && cs.points.length > 8) {
+            const cb: ShapeBounds = getShapeBounds(cs);
+            if (Math.max(cb.maxX - cb.minX, cb.maxY - cb.minY) < minSnapSpanNm) {
+              continue;
+            }
+          }
+          trimmed.push(cs);
+          accVerts += Math.min(cs.points.length, 64);
+          if (trimmed.length >= 3500 || accVerts >= 90000) {
+            break;
+          }
+        }
+        this.snapCache = trimmed;
+        this.snapCacheViewport = snapVp;
+        this.snapCacheKey = `${baseKey}:vp:${Math.round(snapVp.minX)}_${Math.round(snapVp.minY)}_${Math.round(snapVp.maxX)}_${Math.round(snapVp.maxY)}`;
+      }
+      return snapService.ensureSpatialIndex(this.snapCacheKey, this.snapCache);
+    }
+
+    if (baseKey !== this.snapCacheKey) {
       const source: Shape[] = this.shapes.filter((s: Shape): boolean => excluded.indexOf(s.id) < 0 &&
         (s.type === ShapeType.INSTANCE || (s.type !== ShapeType.NODE && this.isLayerVisible(s.layerNumber, s.datatype))));
       const hugeViewport: WorldViewport = { minX: -1e12, minY: -1e12, maxX: 1e12, maxY: 1e12 };
       const result: BoundedHierarchyDrawResult = expandAndCullCellShapesBounded(
-        source, editService.getCurrentCellId(), this.hierarchyDepth, hugeViewport, true, 20000
+        source, editService.getCurrentCellId(), this.hierarchyDepth, hugeViewport, true, 5000
       );
       if (!result.overflow) {
         this.snapCache = result.shapes;
       } else {
-        // 超大规模层级回退索引当前 Cell 本地可见几何，确保任何规模下磁吸不失效、不卡顿
         this.snapCache = this.currentCellShapes().filter((s: Shape): boolean => excluded.indexOf(s.id) < 0 &&
           s.type !== ShapeType.NODE && this.isLayerVisible(s.layerNumber, s.datatype));
       }
-      this.snapCacheKey = key;
+      this.snapCacheViewport = null;
+      this.snapCacheKey = baseKey;
     }
     return snapService.ensureSpatialIndex(this.snapCacheKey, this.snapCache);
   }
@@ -2560,6 +2639,15 @@ export struct LayoutCanvasView {
           ],
           color: col,
         });
+      } else if (s.type === ShapeType.POLYGON && hasKeyholeBridgeEdges(s.points)) {
+        const cleanLoops: Point[][] = extractKeyholeCleanLoops(s.points);
+        for (let li = 0; li < cleanLoops.length && outlines.length < 128; li++) {
+          outlines.push({
+            closed: true,
+            points: cleanLoops[li],
+            color: col,
+          });
+        }
       } else if (s.type === ShapeType.POLYGON || s.type === ShapeType.PATH) {
         outlines.push({
           closed: s.type === ShapeType.POLYGON,
@@ -4058,13 +4146,14 @@ export struct LayoutCanvasView {
 
   private hitVisibleShape(x: number, y: number, tolerance: number): HierarchyHitResult {
     return this.getHierarchyBoundsResolver().hitTestCell(editService.getCurrentCellId(), this.hierarchyDepth,
-      x, y, tolerance, (shape: Shape): boolean => this.isShapeInteractable(shape));
+      x, y, tolerance, (shape: Shape): boolean => this.isShapeInteractable(shape), true, 1000000, 8000000);
   }
 
   private hitVisibleCandidates(x: number, y: number, tolerance: number): HierarchyCandidatesResult {
     return this.getHierarchyBoundsResolver().hitCandidatesCell(editService.getCurrentCellId(), this.hierarchyDepth,
       x, y, tolerance, (shape: Shape): boolean => this.isShapeInteractable(shape), {
-        maxCandidates: 64, layerNumber: this.selectionLayerFilter, datatype: this.selectionDatatypeFilter >= 0 ? this.selectionDatatypeFilter : undefined,
+        maxCandidates: 64, maxNodes: 1000000, maxPoints: 8000000,
+        layerNumber: this.selectionLayerFilter, datatype: this.selectionDatatypeFilter >= 0 ? this.selectionDatatypeFilter : undefined,
         types: this.selectionTypeFilter, leafSelectable: (shape: Shape): boolean => editService.canSelectLayer(shape.layerNumber, shape.datatype)
       });
   }
@@ -4380,14 +4469,26 @@ struct ViewSceneNode {
             region: sceneHatchRegion(this.primitive, this.canvasWidth, this.canvasHeight,
               this.zoomPercent, this.viewOffsetX, this.viewOffsetY), densitySignal: this.densitySignal })
         }
-        Polygon({ width: this.sceneNodeWidth(), height: this.sceneNodeHeight() })
-          .points(this.localPoints()).fill(this.primitive.color)
-          .fillOpacity(this.primitive.style.strokeOnly ? 0 : this.primitive.style.fillOpacity * this.primitive.opacity)
-          .stroke(this.primitive.color)
-          .strokeOpacity(this.primitive.style.strokeOpacity * this.primitive.opacity)
-          .strokeWidth(this.primitive.style.strokeWidth)
-          .strokeDashArray(this.primitive.style.dashArray)
-          .hitTestBehavior(HitTestMode.None)
+        if (hasKeyholeBridgeEdges(this.primitive.points)) {
+          Path({ width: this.sceneNodeWidth(), height: this.sceneNodeHeight() })
+            .commands(this.keyholePathCommands())
+            .fill(this.primitive.color)
+            .fillOpacity(this.primitive.style.strokeOnly ? 0 : this.primitive.style.fillOpacity * this.primitive.opacity)
+            .stroke(this.primitive.color)
+            .strokeOpacity(this.primitive.style.strokeOpacity * this.primitive.opacity)
+            .strokeWidth(this.primitive.style.strokeWidth)
+            .strokeDashArray(this.primitive.style.dashArray)
+            .hitTestBehavior(HitTestMode.None)
+        } else {
+          Polygon({ width: this.sceneNodeWidth(), height: this.sceneNodeHeight() })
+            .points(this.localPoints()).fill(this.primitive.color)
+            .fillOpacity(this.primitive.style.strokeOnly ? 0 : this.primitive.style.fillOpacity * this.primitive.opacity)
+            .stroke(this.primitive.color)
+            .strokeOpacity(this.primitive.style.strokeOpacity * this.primitive.opacity)
+            .strokeWidth(this.primitive.style.strokeWidth)
+            .strokeDashArray(this.primitive.style.dashArray)
+            .hitTestBehavior(HitTestMode.None)
+        }
       }
     }
     .width(this.sceneNodeWidth()).height(this.sceneNodeHeight())
@@ -4412,6 +4513,23 @@ struct ViewSceneNode {
   private localPoints(): Array<Array<number>> {
     const b: ShapeBounds = this.bounds(); const z: number = this.zoomPercent / 100;
     return this.primitive.points.map((p: Point): Array<number> => [(p.x - b.minX) * z, (b.maxY - p.y) * z]);
+  }
+  private keyholePathCommands(): string {
+    const b: ShapeBounds = this.bounds();
+    const z: number = this.zoomPercent / 100;
+    const ctx = this.getUIContext();
+    const loops: Point[][] = extractKeyholeCleanLoops(this.primitive.points);
+    const cmds: string[] = [];
+    for (let li = 0; li < loops.length; li++) {
+      const loop: Point[] = loops[li];
+      for (let i = 0; i < loop.length; i++) {
+        const px: number = ctx.vp2px((loop[i].x - b.minX) * z);
+        const py: number = ctx.vp2px((b.maxY - loop[i].y) * z);
+        cmds.push(`${i === 0 ? 'M' : 'L'}${px} ${py}`);
+      }
+      cmds.push('Z');
+    }
+    return cmds.join(' ');
   }
   private glyphTransform(): matrix4.Matrix4Transit {
     const m = this.primitive.textTransform; const z: number = this.zoomPercent / 100;
@@ -4601,7 +4719,16 @@ struct ShapeNode {
 
   build() {
     Stack() {
-      if (this.shape.type === ShapeType.POLYGON) {
+      if (this.shape.type === ShapeType.POLYGON && hasKeyholeBridgeEdges(this.shape.points)) {
+        Path({ width: this.shapeWidth(), height: this.shapeHeight() })
+          .commands(this.localKeyholePathCommands())
+          .fill(this.color)
+          .fillOpacity(this.fillAlpha())
+          .stroke(this.selected ? canvasSelectionStroke() : this.color)
+          .strokeOpacity(this.strokeAlpha())
+          .strokeWidth(this.strokeWidthFor(this.selected ? 2 : 1))
+          .strokeDashArray(this.dashArrayFor())
+      } else if (this.shape.type === ShapeType.POLYGON) {
         Polygon({ width: this.shapeWidth(), height: this.shapeHeight() })
           .points(this.localPointPairs())
           .fill(this.color)
@@ -4738,6 +4865,25 @@ struct ShapeNode {
       ]);
     }
     return points;
+  }
+
+  private localKeyholePathCommands(): string {
+    const b = this.bounds();
+    const pad: number = this.pathPadding();
+    const z: number = this.zoomPercent / 100;
+    const ctx = this.getUIContext();
+    const loops: Point[][] = extractKeyholeCleanLoops(this.shape.points);
+    const cmds: string[] = [];
+    for (let li = 0; li < loops.length; li++) {
+      const loop: Point[] = loops[li];
+      for (let i = 0; i < loop.length; i++) {
+        const px: number = ctx.vp2px((loop[i].x - b.minX) * z + pad);
+        const py: number = ctx.vp2px((b.maxY - loop[i].y) * z + pad);
+        cmds.push(`${i === 0 ? 'M' : 'L'}${px} ${py}`);
+      }
+      cmds.push('Z');
+    }
+    return cmds.join(' ');
   }
 
   private pathDisplayPoints(): Point[] {

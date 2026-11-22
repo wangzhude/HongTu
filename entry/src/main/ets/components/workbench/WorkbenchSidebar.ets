@@ -72,7 +72,6 @@ enum ToolboxTab {
 @Component
 export struct WorkbenchSidebar {
   @Prop @Watch('onLayerDataChanged') layers: UiLayer[] = [];
-  @Link @Watch('onLayerDataChanged') shapes: Shape[];
   @Prop @Watch('onLayerDataChanged') selectedLayerNumber: number = -1;
   @Prop @Watch('onLayerDataChanged') selectedDatatype: number = 0;
   @Prop sidebarWidth: number = 220;

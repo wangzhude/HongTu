@@ -15,7 +15,7 @@ import type { PythonEditorDraft } from './PythonWorkspaceService';
 import { normalizeLayoutSemantics } from '../models/LayoutPort';
 import type { LayoutSemanticState } from '../models/LayoutPort';
 import type { DrcConfiguration } from './DrcService';
-import { incrementalSnapshotEngine } from '../common/CloneUtils';
+import { incrementalSnapshotEngine, isFiniteValidatedPointArray } from '../common/CloneUtils';
 import { layoutConcurrencyService } from './LayoutConcurrencyService';
 
 export interface WorkspaceLocalProcessState {
@@ -376,7 +376,7 @@ export class WorkspaceService {
     const run: Promise<void> = this.queue.catch(() => {}).then(async () => {
       if (this.directory.length === 0) throw new Error('工作区尚未初始化');
       let draftPayload: WorkspaceDocument = snapshot;
-      if (!checkpoint && !snapshot.dirty && snapshot.sourcePath.length > 0 && snapshot.selectedIds.length === 0) {
+      if (!checkpoint && !snapshot.dirty && snapshot.sourcePath.length > 0) {
         let totalPts: number = 0;
         for (let i = 0; i < snapshot.shapes.length; i++) {
           totalPts += snapshot.shapes[i].points.length;
@@ -385,9 +385,8 @@ export class WorkspaceService {
         if (totalPts > 100000) {
           try {
             if (await fs.access(snapshot.sourcePath)) {
-              draftPayload = incrementalSnapshotEngine.captureReadOnlyWorkspaceDocument(snapshot);
+              draftPayload = incrementalSnapshotEngine.cloneWorkspaceDocumentMetadataWithShapes(snapshot, []);
               draftPayload.externalBinaryPath = snapshot.sourcePath;
-              draftPayload.shapes = [];
             }
           } catch (_) {}
         }
@@ -566,7 +565,9 @@ export class WorkspaceService {
         [ShapeType.RECT, ShapeType.POLYGON, ShapeType.PATH, ShapeType.TEXT, ShapeType.INSTANCE, ShapeType.NODE].indexOf(shape.type) < 0) {
         throw new Error('工程含无效图形');
       }
-      for (const point of shape.points) if (point === null || !Number.isFinite(point.x) || !Number.isFinite(point.y)) throw new Error('工程含非有限坐标');
+      if (!isFiniteValidatedPointArray(shape.points)) {
+        for (const point of shape.points) if (point === null || !Number.isFinite(point.x) || !Number.isFinite(point.y)) throw new Error('工程含非有限坐标');
+      }
       if (shape.points.length === 0 || (shape.type === ShapeType.RECT && shape.points.length < 2) ||
         (shape.type === ShapeType.POLYGON && shape.points.length < 3) ||
         (shape.type === ShapeType.PATH && (shape.points.length < 2 || (shape.pathWidth !== undefined &&

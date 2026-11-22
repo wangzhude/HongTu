@@ -134,6 +134,7 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
     const HierarchyRenderSource* source = nullptr, HierarchyRenderBudget* budget = nullptr,
     const HierarchyRenderOrigin* origin = nullptr) {
     std::vector<RenderBatch> batches;
+    batches.reserve(std::min<size_t>(layout.shapes.size() + 16, 16384));
     std::unordered_map<uint64_t, size_t> mergeIndex;
     const HierarchyLayerStyle defaultStyle;
     const double originX = (origin && std::isfinite(origin->x)) ? origin->x : 0.0;
@@ -285,13 +286,27 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                 (shape.type == ShapeType::PATH && !shape.pathWidthAbsolute);
             CachedShapeGeometry* cachedGeom = nullptr;
 
-            // Fast pre-transform bounding-box cull & KLayout sub-pixel proxy before transforming N vertices.
-            if (cacheableShape) {
+            const bool directPolygonCache = (shape.type == ShapeType::POLYGON && shape.points.size() >= 3);
+            const BBox* preCullLocalBox = nullptr;
+            size_t localVertexCount = shape.points.size();
+
+            // Zero-allocation persistent BBox on SceneShape for POLYGONs (eliminates 2.31M-vertex BBox + hash map per pan/zoom)
+            if (directPolygonCache) {
+                if ((shape.renderCacheFlags & 1u) == 0u) {
+                    BBox lb;
+                    for (const auto& lp : shape.points) {
+                        if (std::isfinite(lp.x) && std::isfinite(lp.y)) {
+                            lb = lb.unite(BBox(lp.x, lp.y, lp.x, lp.y));
+                        }
+                    }
+                    shape.cachedRenderLocalBox = lb;
+                    shape.renderCacheFlags |= 1u;
+                }
+                preCullLocalBox = &shape.cachedRenderLocalBox;
+            } else if (cacheableShape) {
                 cachedGeom = &shapeCache[&shape];
                 if (!cachedGeom->contourReady) {
-                    cachedGeom->localPoints = (shape.type == ShapeType::PATH)
-                        ? effectivePolygon(shape)
-                        : shape.points;
+                    cachedGeom->localPoints = effectivePolygon(shape);
                     for (const auto& lp : cachedGeom->localPoints) {
                         if (std::isfinite(lp.x) && std::isfinite(lp.y)) {
                             cachedGeom->localBox = cachedGeom->localBox.unite(BBox(lp.x, lp.y, lp.x, lp.y));
@@ -300,11 +315,15 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                     cachedGeom->contourReady = true;
                 }
                 if (cachedGeom->localPoints.empty()) return;
+                preCullLocalBox = &cachedGeom->localBox;
+                localVertexCount = cachedGeom->localPoints.size();
+            }
 
-                if (viewport && cachedGeom->localBox.valid()) {
+            if (preCullLocalBox != nullptr) {
+                if (viewport && preCullLocalBox->valid()) {
                     BBox approxWorldBox;
                     bool approxFinite = true;
-                    const BBox& lb = cachedGeom->localBox;
+                    const BBox& lb = *preCullLocalBox;
                     for (const Vec2 corner : {Vec2{lb.minX, lb.minY}, Vec2{lb.maxX, lb.minY},
                                               Vec2{lb.maxX, lb.maxY}, Vec2{lb.minX, lb.maxY}}) {
                         Vec2 wp = transform.apply(corner);
@@ -319,7 +338,7 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                         if (!approxWorldBox.intersects(*viewport)) return;
 
                         const double maxDim = std::max((approxWorldBox.maxX - approxWorldBox.minX), (approxWorldBox.maxY - approxWorldBox.minY));
-                        if (pixelSpanNm > 0.0 && maxDim <= 1.6 * pixelSpanNm && cachedGeom->localPoints.size() > 4) {
+                        if (pixelSpanNm > 0.0 && maxDim <= 2.4 * pixelSpanNm && localVertexCount > 4) {
                             const double cx = 0.5 * (approxWorldBox.minX + approxWorldBox.maxX);
                             const double cy = 0.5 * (approxWorldBox.minY + approxWorldBox.maxY);
                             if (subpixelCellNm > 0.0 && maxDim <= 0.85 * pixelSpanNm) {
@@ -352,6 +371,11 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
             if ((shape.type == ShapeType::RECT || shape.type == ShapeType::BOX) && shape.points.size() == 2) {
                 const auto& a = shape.points[0]; const auto& b = shape.points[1];
                 points = transform.applyToPolygon({{a.x, a.y}, {b.x, a.y}, {b.x, b.y}, {a.x, b.y}});
+            } else if (directPolygonCache) {
+                const bool isIdentity = transform.a == 1.0 && transform.b == 0.0 &&
+                                        transform.c == 0.0 && transform.d == 1.0 &&
+                                        transform.tx == 0.0 && transform.ty == 0.0;
+                points = isIdentity ? shape.points : transform.applyToPolygon(shape.points);
             } else if (cachedGeom != nullptr) {
                 points = transform.applyToPolygon(cachedGeom->localPoints);
             } else {
@@ -383,7 +407,9 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                     }
                 }
                 simplified.push_back(points.back());
-                if (simplified.size() >= 6 && simplified.size() + 6 < points.size()) {
+                // Only adopt chord-decimated contour when it cuts vertex count by >=2x and stays <=512 pts;
+                // otherwise reusing the persistent SceneShape triangulation indices is >10x faster.
+                if (simplified.size() >= 4 && simplified.size() <= 512 && simplified.size() * 2 <= points.size()) {
                     points = std::move(simplified);
                     decimated = true;
                 }
@@ -432,6 +458,50 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
 
             if (type == GLPrimitiveType::POLYGON_FILLED && decimated) {
                 Triangulator::triangulate(points, target->triangleIndices);
+            } else if (type == GLPrimitiveType::POLYGON_FILLED && directPolygonCache) {
+                if ((shape.renderCacheFlags & 2u) == 0u) {
+                    shape.renderCacheFlags |= 2u;
+                    if (shape.points.size() == 3) {
+                        shape.cachedRenderTriangles = {0u, 1u, 2u};
+                        shape.renderCacheFlags |= 4u;
+                    } else {
+                        const uint64_t tplHash = HashRelativeContourTemplate(shape.points);
+                        auto& bucket = relativeTemplates[tplHash];
+                        bool matchedTemplate = false;
+                        for (const auto& entry : bucket) {
+                            if (entry.samplePoints != nullptr &&
+                                SameRelativeContourTemplate(*entry.samplePoints, shape.points)) {
+                                shape.cachedRenderTriangles = entry.triangleIndices;
+                                if (entry.triangulated) shape.renderCacheFlags |= 4u;
+                                matchedTemplate = true;
+                                break;
+                            }
+                        }
+                        if (!matchedTemplate) {
+                            const bool okTri =
+                                Triangulator::triangulate(shape.points, shape.cachedRenderTriangles) &&
+                                shape.cachedRenderTriangles.size() >= 3;
+                            if (okTri) shape.renderCacheFlags |= 4u;
+                            if (bucket.size() < 8) {
+                                bucket.push_back({&shape.points, shape.cachedRenderTriangles, okTri});
+                            }
+                        }
+                    }
+                }
+                if ((shape.renderCacheFlags & 4u) != 0u) {
+                    double det = transform.determinant();
+                    if (source) det *= source->transform.determinant();
+                    if (det < 0.0) {
+                        target->triangleIndices.reserve(shape.cachedRenderTriangles.size());
+                        for (size_t t = 0; t + 2 < shape.cachedRenderTriangles.size(); t += 3) {
+                            target->triangleIndices.push_back(shape.cachedRenderTriangles[t]);
+                            target->triangleIndices.push_back(shape.cachedRenderTriangles[t + 2]);
+                            target->triangleIndices.push_back(shape.cachedRenderTriangles[t + 1]);
+                        }
+                    } else {
+                        target->triangleIndices = shape.cachedRenderTriangles;
+                    }
+                }
             } else if (type == GLPrimitiveType::POLYGON_FILLED && cachedGeom != nullptr) {
                 if (!cachedGeom->triangulationAttempted) {
                     cachedGeom->triangulationAttempted = true;

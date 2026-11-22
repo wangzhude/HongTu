@@ -186,6 +186,17 @@ export class EditService {
   private selectedId: number = -1;
   /** 多选 ID 集合（与 selectedId 共存：selectedId 始终跟踪最近一次主选） */
   private selectedIds: Set<number> = new Set<number>();
+  private shapeByIdCache: Map<number, Shape> = new Map<number, Shape>();
+  private shapeByIdCacheShapesRef: Shape[] | null = null;
+  private shapeByIdCacheLength: number = -1;
+  private shapeByIdCacheRevision: number = -1;
+  private shapeByIdCacheNextId: number = -1;
+  private shapeByIdCacheFirstId: number = -1;
+  private shapeByIdCacheLastId: number = -1;
+  private layerAccessEpoch: number = 0;
+  private selectionCacheKey: string = '';
+  private cachedSelectedShapes: Shape[] = [];
+  private cachedSelectedIdsList: number[] = [];
   /** 图层可见性回调（由外部注入，hitTest 时据此跳过隐藏图层上的图形） */
   private layerVisibleProvider: ((layerNumber: number, datatype: number) => boolean) | null = null;
   /** 可选与可编辑分开：锁定层由 editable 回调拒绝，不能经直接 ID 选中绕过。 */
@@ -660,18 +671,69 @@ export class EditService {
     this.restoreSelectionState(state);
   }
 
+  private invalidateSelectionCache(): void {
+    this.selectionCacheKey = '';
+  }
+
+  private invalidateShapeIndex(): void {
+    this.shapeByIdCacheShapesRef = null;
+    this.shapeByIdCacheLength = -1;
+    this.selectionCacheKey = '';
+  }
+
+  private ensureShapeByIdMap(): Map<number, Shape> {
+    const firstId: number = this.shapes.length > 0 ? this.shapes[0].id : -1;
+    const lastId: number = this.shapes.length > 0 ? this.shapes[this.shapes.length - 1].id : -1;
+    if (
+      this.shapeByIdCacheShapesRef !== this.shapes ||
+      this.shapeByIdCacheLength !== this.shapes.length ||
+      this.shapeByIdCacheRevision !== this.sessionRevision ||
+      this.shapeByIdCacheNextId !== this.nextId ||
+      this.shapeByIdCacheFirstId !== firstId ||
+      this.shapeByIdCacheLastId !== lastId
+    ) {
+      const map: Map<number, Shape> = new Map<number, Shape>();
+      for (let i = 0; i < this.shapes.length; i++) {
+        const s: Shape = this.shapes[i];
+        map.set(s.id, s);
+      }
+      this.shapeByIdCache = map;
+      this.shapeByIdCacheShapesRef = this.shapes;
+      this.shapeByIdCacheLength = this.shapes.length;
+      this.shapeByIdCacheRevision = this.sessionRevision;
+      this.shapeByIdCacheNextId = this.nextId;
+      this.shapeByIdCacheFirstId = firstId;
+      this.shapeByIdCacheLastId = lastId;
+    }
+    return this.shapeByIdCache;
+  }
+
+  /** O(1) 按 ID 检索当前文档图元（避免 1.7 万图元下高频线性 .find 遍历） */
+  getShapeById(id: number): Shape | undefined {
+    if (id < 0) return undefined;
+    const hit: Shape | undefined = this.ensureShapeByIdMap().get(id);
+    if (hit !== undefined) return hit;
+    return undefined;
+  }
+
+  private currentSelectionPruneKey(): string {
+    return `${this.sessionRevision}:${this.shapes.length}:${this.currentCellStack.join(',')}:${this.layerAccessEpoch}`;
+  }
+
   private restoreSelectionState(state: EditSelectionState): void {
     const selected: Set<number> = new Set<number>(state.selectedShapeIds);
     for (const shape of this.shapes) shape.selected = selected.has(shape.id);
     this.selectedId = state.selectedId;
     this.selectedIds = new Set<number>(state.selectedIds);
+    this.invalidateSelectionCache();
   }
 
   /** 未编辑大版图切标签时零深拷贝只读会话快照（CoW，消除切走百万顶点版图时的主线程深拷贝） */
-  captureReadOnlySession(): EditSessionState {
+  captureReadOnlySession(documentId?: string): EditSessionState {
     this.forceCloseTransaction();
+    const docKey: string = documentId !== undefined && documentId.length > 0 ? documentId : this.activeDocumentIdentity;
     return {
-      shapes: incrementalSnapshotEngine.captureReadOnlyShapes(this.activeDocumentIdentity, this.shapes),
+      shapes: incrementalSnapshotEngine.captureReadOnlyShapes(docKey, this.shapes),
       nextId: this.nextId,
       undoStack: this.undoStack.map((a: EditAction) => this.cloneAction(a)),
       redoStack: this.redoStack.map((a: EditAction) => this.cloneAction(a)),
@@ -1033,14 +1095,13 @@ export class EditService {
   getSelectedShape(): Shape | null {
     this.pruneSelection();
     if (this.selectedId < 0) return null;
-    return this.shapes.find(s => s.id === this.selectedId) ?? null;
+    return this.getShapeById(this.selectedId) ?? null;
   }
 
-  /** 获取所有选中的图形（支持多选，返回所有选中 shape） */
+  /** 获取所有选中的图形（支持多选，返回所有选中 shape；O(|selected|) 零全表扫描） */
   getSelectedShapes(): Shape[] {
     this.pruneSelection();
-    // 以 shape.selected 视觉状态为唯一真源，兼容单选/多选
-    return this.shapes.filter(s => s.selected);
+    return this.cachedSelectedShapes.slice();
   }
 
   /** 获取选中图形 ID */
@@ -1049,46 +1110,34 @@ export class EditService {
     return this.selectedId;
   }
 
-  /** 获取所有选中图形 ID（多选） */
+  /** 获取所有选中图形 ID（多选；O(|selected|) 零全表扫描） */
   getSelectedIds(): number[] {
     this.pruneSelection();
-    const ids: number[] = [];
-    this.selectedIds.forEach((id: number) => {
-      const shape = this.shapes.find(s => s.id === id);
-      if (shape !== undefined && shape.selected) {
-        ids.push(id);
-      }
-    });
-    // 兼容单选：若 selectedIds 为空但 selectedId 有效且仍处于选中态，则纳入
-    if (ids.length === 0 && this.selectedId >= 0) {
-      const shape = this.shapes.find(s => s.id === this.selectedId);
-      if (shape !== undefined && shape.selected) {
-        ids.push(this.selectedId);
-      }
-    }
-    return ids;
+    return this.cachedSelectedIdsList.slice();
   }
 
   /** 追加一个图形到多选（不清除已有选择） */
   addToSelection(id: number): void {
     if (id < 0) return;
     this.pruneSelection();
-    const shape = this.shapes.find(s => s.id === id);
+    const shape = this.getShapeById(id);
     if (!shape || !this.canSelectShape(shape)) return;
     this.selectedIds.add(id);
     shape.selected = true;
     this.selectedId = id; // 跟踪最近一次主选
+    this.invalidateSelectionCache();
   }
 
   /** 切换某个图形的选中状态（选中则取消，未选中则加入） */
   toggleSelection(id: number): void {
     if (id < 0) return;
     this.pruneSelection();
-    const shape = this.shapes.find(s => s.id === id);
+    const shape = this.getShapeById(id);
     if (!shape || !this.canSelectShape(shape)) return;
     if (this.selectedIds.has(id)) {
       this.selectedIds.delete(id);
       shape.selected = false;
+      this.invalidateSelectionCache();
       if (this.selectedId === id) {
         const remaining: number[] = this.getSelectedIds();
         this.selectedId = remaining.length > 0 ? remaining[remaining.length - 1] : -1;
@@ -1097,36 +1146,57 @@ export class EditService {
       this.selectedIds.add(id);
       shape.selected = true;
       this.selectedId = id;
+      this.invalidateSelectionCache();
     }
   }
 
-  /** 清除所有选中（单选 + 多选） */
+  /** 清除所有选中（单选 + 多选；仅复位已选中项，消除 1.7 万图元全量写触发） */
   clearSelection(): void {
-    for (const s of this.shapes) {
-      s.selected = false;
+    if (this.selectionCacheKey === this.currentSelectionPruneKey()) {
+      for (let i = 0; i < this.cachedSelectedShapes.length; i++) {
+        this.cachedSelectedShapes[i].selected = false;
+      }
+    } else {
+      for (let i = 0; i < this.shapes.length; i++) {
+        if (this.shapes[i].selected) this.shapes[i].selected = false;
+      }
     }
     this.selectedIds = new Set<number>();
     this.selectedId = -1;
+    this.cachedSelectedShapes = [];
+    this.cachedSelectedIdsList = [];
+    this.selectionCacheKey = this.currentSelectionPruneKey();
   }
 
-  /** 设置多选（替换为给定 id 列表） */
+  /** 设置多选（替换为给定 id 列表；O(|ids|) 哈希直查替代 O(N^2) 线性扫描） */
   selectMultiple(ids: number[]): void {
-    // 先清除全部选中态
-    for (const s of this.shapes) {
-      s.selected = false;
-    }
-    this.selectedIds = new Set<number>();
+    this.clearSelection();
+    const byId: Map<number, Shape> = this.ensureShapeByIdMap();
+    const nextSelectedShapes: Shape[] = [];
+    const nextIds: number[] = [];
     let lastId: number = -1;
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
-      const shape = this.shapes.find(s => s.id === id);
+      const shape = byId.get(id);
       if (shape && this.canSelectShape(shape)) {
-        this.selectedIds.add(id);
+        if (!this.selectedIds.has(id)) {
+          this.selectedIds.add(id);
+          nextSelectedShapes.push(shape);
+          nextIds.push(id);
+        }
         shape.selected = true;
         lastId = id;
       }
     }
     this.selectedId = lastId;
+    if (nextSelectedShapes.length > 1) {
+      // 保持与 this.shapes 绘制顺序一致的 cachedSelectedShapes
+      this.invalidateSelectionCache();
+    } else {
+      this.cachedSelectedShapes = nextSelectedShapes;
+      this.cachedSelectedIdsList = nextIds;
+      this.selectionCacheKey = this.currentSelectionPruneKey();
+    }
   }
 
   /** Direct drawing must validate every shared ancestor before allocating an ID or recording history. */
@@ -1822,19 +1892,15 @@ export class EditService {
 
   /** Select a shape and clear previous multi-selection. */
   selectShape(id: number): void {
-    // 先清除所有选中
-    for (const s of this.shapes) {
-      s.selected = false;
-    }
-    // 清空多选集合，保持单选语义
-    this.selectedIds = new Set<number>();
-    // MACRO-1: 无论是否找到 shape，都先重置 selectedId，避免找不到时残留旧值导致后续操作误作用于旧图形
-    this.selectedId = -1;
+    this.clearSelection();
     if (id >= 0) {
-      const shape = this.shapes.find(s => s.id === id);
+      const shape = this.getShapeById(id);
       if (shape && this.canSelectShape(shape)) {
         shape.selected = true;
         this.selectedId = id;
+        this.cachedSelectedShapes = [shape];
+        this.cachedSelectedIdsList = [id];
+        this.selectionCacheKey = this.currentSelectionPruneKey();
       }
     }
   }
@@ -2352,6 +2418,8 @@ export class EditService {
 
   /** 图层状态对象原地变化后由界面调用，立即清理此前选中的锁定/不可选图形。 */
   refreshLayerAccess(): void {
+    this.layerAccessEpoch++;
+    this.invalidateSelectionCache();
     this.pruneSelection();
   }
 
@@ -2476,6 +2544,7 @@ export class EditService {
       this.editDepth -= n;
       this.syncDirtyFromEditDepth();
     }
+    this.invalidateShapeIndex();
     if (recordedSelection) this.pruneRecordedSelection();
     else this.pruneSelection();
     this.nativeSnapshotCurrent = false;
@@ -2597,6 +2666,7 @@ export class EditService {
     // 重做是回放既有记录，必须直接上栈（走 pushUndo 会在事务开启时被吞进缓冲）
     this.appendUndo(action, true);
     this.nativeSnapshotCurrent = false;
+    this.invalidateShapeIndex();
     if (recordedSelection) this.pruneRecordedSelection();
     else this.pruneSelection();
     return true;
@@ -2760,11 +2830,17 @@ export class EditService {
       for (const id of retained) this.selectedId = id;
       if (this.selectedId < 0) for (const id of valid) this.selectedId = id;
     }
+    this.invalidateSelectionCache();
   }
 
   /** 清理失效、不可见、不可选或锁定图形的旧选择状态。 */
   private pruneSelection(): void {
+    const key: string = this.currentSelectionPruneKey();
+    if (this.selectionCacheKey === key) {
+      return;
+    }
     const valid: Set<number> = new Set<number>();
+    const selectedList: Shape[] = [];
     for (let i = 0; i < this.shapes.length; i++) {
       const shape: Shape = this.shapes[i];
       if (!shape.selected) continue;
@@ -2772,6 +2848,7 @@ export class EditService {
         shape.selected = false;
       } else {
         valid.add(shape.id);
+        selectedList.push(shape);
       }
     }
     // Pruning must not reorder a sealed multi-selection or replace its valid primary.
@@ -2783,6 +2860,16 @@ export class EditService {
       this.selectedId = -1;
       for (const id of ordered) this.selectedId = id;
     }
+    const idsOut: number[] = [];
+    ordered.forEach((id: number) => {
+      idsOut.push(id);
+    });
+    if (idsOut.length === 0 && this.selectedId >= 0 && valid.has(this.selectedId)) {
+      idsOut.push(this.selectedId);
+    }
+    this.cachedSelectedShapes = selectedList;
+    this.cachedSelectedIdsList = idsOut;
+    this.selectionCacheKey = key;
   }
 
   /** 是否可撤销 */

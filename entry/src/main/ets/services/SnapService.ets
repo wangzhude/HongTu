@@ -554,12 +554,28 @@ export class SnapService {
       if (s.type === ShapeType.TEXT || s.type === ShapeType.INSTANCE) continue;
       const pts: Point[] = this.edgePoints(s);
       const count: number = s.type === ShapeType.PATH ? pts.length - 1 : pts.length;
+      const checkMid: boolean = kinds.indexOf('中点') >= 0;
+      const checkCrossOrEdge: boolean = kinds.indexOf('交点') >= 0 || kinds.indexOf('边') >= 0;
       for (let j = 0; j < count; j++) {
         const a: Point = pts[j]; const b: Point = pts[(j + 1) % pts.length];
-        midpoints.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-        const p: Point | null = this.projectOnSegment(x, y, a, b);
-        if (p !== null && (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y) <= threshold * threshold && segments.length < 96) {
-          segments.push({ a: a, b: b, shapeId: s.id });
+        if (checkMid) {
+          const mx: number = (a.x + b.x) * 0.5;
+          const my: number = (a.y + b.y) * 0.5;
+          if (Math.abs(mx - x) <= threshold && Math.abs(my - y) <= threshold) {
+            midpoints.push({ x: mx, y: my });
+          }
+        }
+        if (checkCrossOrEdge && segments.length < 96) {
+          const segMinX: number = a.x < b.x ? a.x : b.x;
+          const segMaxX: number = a.x > b.x ? a.x : b.x;
+          if (x < segMinX - threshold || x > segMaxX + threshold) continue;
+          const segMinY: number = a.y < b.y ? a.y : b.y;
+          const segMaxY: number = a.y > b.y ? a.y : b.y;
+          if (y < segMinY - threshold || y > segMaxY + threshold) continue;
+          const p: Point | null = this.projectOnSegment(x, y, a, b);
+          if (p !== null && (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y) <= threshold * threshold) {
+            segments.push({ a: a, b: b, shapeId: s.id });
+          }
         }
       }
       if (s.type === ShapeType.RECT || s.type === ShapeType.POLYGON) {
@@ -659,6 +675,12 @@ export class SnapService {
       for (let j = 0; j < segCount; j++) {
         const a: Point = pts[j];
         const b: Point = pts[(j + 1) % pts.length];
+        const segMinX: number = a.x < b.x ? a.x : b.x;
+        const segMaxX: number = a.x > b.x ? a.x : b.x;
+        if (x < segMinX - threshold || x > segMaxX + threshold) continue;
+        const segMinY: number = a.y < b.y ? a.y : b.y;
+        const segMaxY: number = a.y > b.y ? a.y : b.y;
+        if (y < segMinY - threshold || y > segMaxY + threshold) continue;
         const proj: Point | null = this.projectOnSegment(x, y, a, b);
         if (proj === null) {
           continue;

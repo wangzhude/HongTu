@@ -614,15 +614,16 @@ export class HierarchyBoundsResolver {
     if (shape.type === ShapeType.NODE || (shape.type !== ShapeType.INSTANCE && !this.visible(shape.layerNumber, shape.datatype))) return this.noHit();
     if (shape.type === ShapeType.INSTANCE) return this.hitInstance(shape, linear, depth, ancestors, x, y, tolerance);
     if (shape.points.length === 0 || (shape.type === ShapeType.RECT && shape.points.length < 2)) return this.noHit();
-    this.hitPoints += shape.points.length;
-    if (this.hitPoints > this.hitPointLimit) return this.hitFailure('实例命中超过顶点预算，请降低显示层级');
+    const isIdentity: boolean = linear.a === 1 && linear.b === 0 && linear.c === 0 && linear.d === 1 &&
+      linear.tx === 0 && linear.ty === 0;
     if (shape.type === ShapeType.TEXT) {
+      this.hitPoints += shape.points.length;
+      if (this.hitPoints > this.hitPointLimit) return this.hitFailure('实例命中超过顶点预算，请降低显示层级');
       const glyph: HierarchyBoundsResult = this.textBounds(shape, linear);
       if (!glyph.ok || glyph.bounds === undefined) return this.hitFailure(glyph.message);
-      const anchor: ShapeBounds = transformedBounds(getShapeBounds(shape), linear);
+      const rawAnchor: ShapeBounds = getShapeBounds(shape);
+      const anchor: ShapeBounds = isIdentity ? rawAnchor : transformedBounds(rawAnchor, linear);
       if (!this.checked(anchor, 1).ok) return this.hitFailure('文字锚点坐标越界，未更改选择');
-      // Same top-left measured glyph box as painting, conservatively enclosed
-      // after complete ancestor/intrinsic affine. Keep the prior anchor target.
       if (!this.pointNearBounds(glyph.bounds, x, y, tolerance) &&
           !this.pointNearBounds(anchor, x, y, tolerance + 16)) return this.noHit();
       return { ok: true, shapeId: shape.id, layerNumber: shape.layerNumber, datatype: shape.datatype, message: '' };
@@ -634,15 +635,21 @@ export class HierarchyBoundsResolver {
       if (pathBounds === undefined) return this.noHit();
       bounds = pathBounds;
     } else {
-      bounds = transformedBounds(getShapeBounds(shape), linear);
+      const rawBounds: ShapeBounds = getShapeBounds(shape);
+      bounds = isIdentity ? rawBounds : transformedBounds(rawBounds, linear);
     }
     if (!this.checked(bounds, 1).ok) return this.hitFailure('实例轮廓坐标越界，未更改选择');
     const pad: number = tolerance;
     if (!this.pointNearBounds(bounds, x, y, pad)) return this.noHit();
+    // 仅对包围盒命中的候选图形计入精确轮廓测试顶点预算，避免百万顶点版图空点/选图时被远处多边形耗尽预算
+    this.hitPoints += shape.points.length;
+    if (this.hitPoints > this.hitPointLimit) return this.hitFailure('实例命中超过顶点预算，请降低显示层级');
     let hit: boolean = false;
     if (shape.type === ShapeType.PATH) {
       hit = pathGeometryContains(shape, x, y, tolerance,
         { a: linear.a, b: linear.b, c: linear.c, d: linear.d, tx: 0, ty: 0 });
+    } else if (shape.type === ShapeType.RECT && isIdentity) {
+      hit = true; // pointNearBounds 已精确覆盖轴对齐矩形本体与容差带
     } else {
       let points: Point[] = shape.points;
       if (shape.type === ShapeType.RECT) {
@@ -650,7 +657,8 @@ export class HierarchyBoundsResolver {
         points = [{ x: b.minX, y: b.minY }, { x: b.maxX, y: b.minY },
           { x: b.maxX, y: b.maxY }, { x: b.minX, y: b.maxY }];
       }
-      hit = polygonContains(clonePointsTransformed(points, linear), x, y, tolerance);
+      const testPoints: Point[] = isIdentity ? points : clonePointsTransformed(points, linear);
+      hit = polygonContains(testPoints, x, y, tolerance);
     }
     return hit ? { ok: true, shapeId: shape.id, layerNumber: shape.layerNumber, datatype: shape.datatype, message: '' } : this.noHit();
   }

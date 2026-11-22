@@ -3,7 +3,7 @@ import { WorkbenchIcon } from './WorkbenchIcon';
 import { FONT_MONO } from '../../common/Fonts';
 import { UI } from '../../common/UiTokens';
 import { canvasKeyName } from '../../common/CanvasKeyboard';
-import { resetModifierKeys } from '../../common/ModifierKeys';
+import { resetModifierKeys, isCtrlHeld, isShiftHeld } from '../../common/ModifierKeys';
 import { UiLayer } from '../../common/types';
 import { Shape, ShapeType } from '../../models/GdsiiData';
 import { PropertyCellOption, ShapePropertyField, shapePropertyFields, shapePropertyValue } from '../../services/ShapePropertyService';
@@ -261,6 +261,8 @@ export struct ShapePropertiesPopover {
           selectionKey: this.selectionKey(),
           editable: this.editable,
           focusGuardId: this.focusGuardId(),
+          returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
+          saveShortcutAction: this.saveShortcutAction,
           submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
         })
         .width(66)
@@ -302,6 +304,8 @@ export struct ShapePropertiesPopover {
             selectionKey: this.selectionKey(),
             editable: this.editable,
             focusGuardId: this.focusGuardId(),
+            returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
+            saveShortcutAction: this.saveShortcutAction,
             submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
           }).layoutWeight(1)
           SelectionPropertyField({
@@ -315,6 +319,8 @@ export struct ShapePropertiesPopover {
             selectionKey: this.selectionKey(),
             editable: this.editable,
             focusGuardId: this.focusGuardId(),
+            returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
+            saveShortcutAction: this.saveShortcutAction,
             submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
           }).layoutWeight(1)
         }.width('100%')
@@ -332,6 +338,8 @@ export struct ShapePropertiesPopover {
             selectionKey: this.selectionKey(),
             editable: this.editable,
             focusGuardId: this.focusGuardId(),
+            returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
+            saveShortcutAction: this.saveShortcutAction,
             submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
           }).layoutWeight(1)
           SelectionPropertyField({
@@ -345,6 +353,8 @@ export struct ShapePropertiesPopover {
             selectionKey: this.selectionKey(),
             editable: this.editable,
             focusGuardId: this.focusGuardId(),
+            returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
+            saveShortcutAction: this.saveShortcutAction,
             submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
           }).layoutWeight(1)
         }.width('100%')
@@ -542,7 +552,22 @@ export struct ShapePropertiesPopover {
                 })
                 .onKeyEvent((event: KeyEvent) => {
                   event.stopPropagation();
-                  if (event.type === KeyType.Down && canvasKeyName(event.keyCode, event.keyText) === 'ESCAPE') {
+                  const key: string = canvasKeyName(event.keyCode, event.keyText);
+                  let ctrl: boolean = isCtrlHeld();
+                  let shift: boolean = isShiftHeld();
+                  if (event.getModifierKeyState !== undefined) {
+                    try {
+                      ctrl = event.getModifierKeyState(['Ctrl']) || ctrl;
+                      shift = event.getModifierKeyState(['Shift']) || shift;
+                    } catch (_err) {}
+                  }
+                  if ((ctrl && key === 'S') || event.keyText === '\x13') {
+                    if (event.type === KeyType.Down && this.saveShortcutAction !== null) {
+                      this.saveShortcutAction(shift);
+                    }
+                    return;
+                  }
+                  if (event.type === KeyType.Down && key === 'ESCAPE') {
                     this.propertiesDraft = this.propertiesSourceValue;
                     this.parkFocusInsidePopover();
                   }
@@ -720,23 +745,23 @@ struct SelectionPropertyField {
 
   private handleInputKey(event: KeyEvent): void {
     const key: string = canvasKeyName(event.keyCode, event.keyText);
-    let ctrl: boolean = false;
-    let shift: boolean = false;
+    let ctrl: boolean = isCtrlHeld();
+    let shift: boolean = isShiftHeld();
     if (event.getModifierKeyState !== undefined) {
       try {
-        ctrl = event.getModifierKeyState(['Ctrl']);
-        shift = event.getModifierKeyState(['Shift']);
+        ctrl = event.getModifierKeyState(['Ctrl']) || ctrl;
+        shift = event.getModifierKeyState(['Shift']) || shift;
       } catch (_err) {}
     }
-    if (ctrl && key === 'S') {
+    if ((ctrl && key === 'S') || event.keyText === '\x13') {
       event.stopPropagation();
       if (event.type === KeyType.Down) {
         this.commit();
         this.clearFocusedSelection();
-        this.releaseToCanvasFocus();
         if (this.saveShortcutAction !== null) {
           this.saveShortcutAction(shift);
         }
+        this.releaseToCanvasFocus();
       }
       return;
     }

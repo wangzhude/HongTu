@@ -5,7 +5,7 @@ import { COLORS } from '../../common/constants';
 import { UI } from '../../common/UiTokens';
 import { UiLayer } from '../../common/types';
 import { dialogTransition } from '../../common/Motion';
-import { Shape, ShapeType, Point, getShapeBounds } from '../../models/GdsiiData';
+import { Shape, ShapeType, Point, getShapeBounds, extractKeyholeCleanLoops } from '../../models/GdsiiData';
 import { BooleanPreview, BooleanPreviewOptions, BooleanPreviewResult, PreviewBooleanOp } from '../../services/BooleanPreviewService';
 import { acquireModalKeyboardGate, releaseModalKeyboardGate, resetModifierKeys } from '../../common/ModifierKeys';
 
@@ -57,15 +57,19 @@ export struct BooleanGeometryView {
         { x: b.maxX, y: b.maxY }, { x: b.minX, y: b.maxY }] as Point[] : shape.points;
       if (points.length < 3) continue;
       const step: number = (denseMode && points.length > 24 && Math.max(screenW, screenH) < 18) ? Math.max(1, Math.floor(points.length / 12)) : 1;
+      const loops: Point[][] = step === 1 ? extractKeyholeCleanLoops(points) : [points];
       ctx.beginPath();
-      for (let i: number = 0; i < points.length; i += step) {
-        const x: number = ox + (points[i].x - minX) * scale; const y: number = height - oy - (points[i].y - minY) * scale;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      for (let li: number = 0; li < loops.length; li++) {
+        const loop: Point[] = loops[li];
+        for (let i: number = 0; i < loop.length; i += step) {
+          const x: number = ox + (loop[i].x - minX) * scale; const y: number = height - oy - (loop[i].y - minY) * scale;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
       }
-      ctx.closePath();
       ctx.fillStyle = fillColor;
       ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = denseMode ? 1.0 : 1.5; ctx.fill(); ctx.stroke();
+      ctx.lineWidth = denseMode ? 1.0 : 1.5; ctx.fill('evenodd'); ctx.stroke();
     }
   }
   build() {
