@@ -59,6 +59,7 @@ import { AppearanceSettingsSheet } from '../components/AppearanceSettingsSheet';
 import { AppToastDuration, showAppSnackBar, showAppToast } from '../components/AppSnackBar';
 import { ACTIVE_LAYOUT_STAGE_GEOMETRY_ID, DataWorkspace } from '../components/workbench/DataWorkspace';
 import { AiCommandPreview, buildAiCommandPreview, AiPreviewBox } from '../components/workbench/AiCommandPreview';
+import { AgentCanvasAuraOverlay, AgentLiveStatusHud } from '../components/workbench/AgentCanvasStageOverlay';
 import { PythonLayoutPanel } from '../components/workbench/PythonLayoutPanel';
 import { LayoutComparePanel } from '../components/workbench/LayoutComparePanel';
 import { ViewWorkspacePanel } from '../components/workbench/ViewWorkspacePanel';
@@ -2945,6 +2946,10 @@ struct Index {
                 viewOffsetY: this.viewportStore.viewOffsetY
               })
             }
+            AgentCanvasAuraOverlay({
+              isLoading: this.aiStore.aiLoading,
+              pendingActive: this.aiStore.aiPendingSummary.length > 0
+            })
             if (this.isDesktopWorkspace()) {
               DrawingToolbar({
                 curveAction: (name: string) => this.openCurveDialog(name),
@@ -3331,6 +3336,59 @@ struct Index {
     .transition(this.floatingTransition(TransitionEdge.BOTTOM))
   }
 
+  private agentHudWidthVp(): number {
+    if (this.isDesktopWorkspace()) {
+      const rightReserved: number = this.panelStore.showAiPanel ? 484 : 32;
+      const available: number = Math.max(280, this.panelStore.windowWidthVp - rightReserved - 24);
+      return Math.min(500, available);
+    }
+    return Math.min(440, Math.max(256, this.panelStore.windowWidthVp - 24));
+  }
+
+  private agentHudLeftVp(): number {
+    const w: number = this.agentHudWidthVp();
+    if (this.isDesktopWorkspace() && this.panelStore.showAiPanel) {
+      const canvasRegionWidth: number = Math.max(w + 24, this.panelStore.windowWidthVp - 476);
+      return Math.max(16, Math.round((canvasRegionWidth - w) / 2));
+    }
+    return Math.max(12, Math.round((this.panelStore.windowWidthVp - w) / 2));
+  }
+
+  private agentHudTopVp(): number {
+    const baseTop: number = (this.isDesktopWorkspace() ? 70 : 62) + Math.max(0, this.safeAreaTopVp);
+    return this.docStore.activeNativeJobId.length > 0 ? baseTop + 58 : baseTop;
+  }
+
+  @Builder
+  private buildAgentLiveHud() {
+    if (this.aiStore.aiLoading || this.aiStore.aiPendingSummary.length > 0 ||
+      (!this.panelStore.showAiPanel && this.aiStore.aiMinimizedNotice.length > 0)) {
+      Column() {
+        AgentLiveStatusHud({
+          isLoading: this.aiStore.aiLoading,
+          canCancel: this.aiStore.aiCanCancel,
+          pendingSummary: this.aiStore.aiPendingSummary,
+          minimizedNotice: this.aiStore.aiMinimizedNotice,
+          showAiPanel: this.panelStore.showAiPanel,
+          toolCalls: unwrapObserved(this.aiStore.aiToolCalls),
+          generationStatus: this.aiStore.aiLoading ? this.panelStore.statusText : '',
+          streamingText: this.aiStore.aiStreamingText,
+          runStartedAt: this.aiStore.aiRunStartedAt,
+          hudWidth: this.agentHudWidthVp(),
+          togglePanelAction: () => this.toggleAiPanel(),
+          stopAction: () => this.cancelAiGeneration(),
+          focusPreviewAction: () => this.focusAiReview(),
+          applyPreviewAction: () => this.applyPendingAiCommands(),
+          cancelPreviewAction: () => this.cancelPendingAiCommands(),
+          dismissNoticeAction: () => { this.aiStore.aiMinimizedNotice = ''; }
+        })
+      }
+      .zIndex(ZIndexTokens.liveJobCapsule + 2)
+      .position({ x: this.agentHudLeftVp(), y: this.agentHudTopVp() })
+      .transition(this.floatingTransition(TransitionEdge.TOP))
+    }
+  }
+
   @Builder
   private buildAppearanceSheet() {
     AppearanceSettingsSheet({
@@ -3402,6 +3460,8 @@ struct Index {
           redoAction: () => this.redoEdit(),
           zoomAction: (delta: number) => this.setZoom(delta * 20),
           showAiPanel: this.panelStore.showAiPanel,
+          aiRunning: this.aiStore.aiLoading,
+          aiPending: this.aiStore.aiPendingSummary.length > 0,
           showMacroPanel: this.panelStore.showMacroPanel,
           currentModule: this.viewportStore.currentModule,
           drcIssueCount: this.verifyStore.drcIssues.length,
@@ -3559,8 +3619,16 @@ struct Index {
       if (this.panelStore.showAiPanel) {
         AiAssistantPanel({
               desktopMode: this.isDesktopWorkspace(),
-              panelWidth: Math.min(420, this.panelStore.windowWidthVp - 32),
-              panelHeight: Math.max(320, this.panelStore.windowHeightVp - 122),
+              panelWidth: Math.min(460, this.panelStore.windowWidthVp - 24),
+              panelHeight: Math.max(320, this.panelStore.windowHeightVp - 144),
+              sessionMode: this.aiStore.aiSessionMode,
+              toggleSessionModeAction: () => {
+                this.aiStore.aiSessionMode = this.aiStore.aiSessionMode === 'agent' ? 'readonly' : 'agent';
+              },
+              minimizeAction: () => {
+                this.panelStore.showAiPanel = false;
+                this.restoreCanvasFocusAfterPanelClose();
+              },
               fileName: this.currentFileDisplayName() || '未命名版图',
               cellName: this.docStore.currentEditingCellName || this.cellName(editService.getCurrentCellId()),
               topCellName: this.docStore.docTopCellName,
@@ -3617,10 +3685,13 @@ struct Index {
               closeAction: () => this.closeAssistantPanel('ai'),
               openPythonAction: () => this.openPythonPanel(false),
               openAgentConnectionAction: () => this.openPythonPanel(true),
-              promptAction: (prompt: string, resumeTask?: boolean) => { this.handleAiPromptFull(prompt, resumeTask); },
+              promptAction: (prompt: string, resumeTask?: boolean, forceReadOnly?: boolean) => {
+                this.handleAiPromptFull(prompt, resumeTask, forceReadOnly);
+              },
               contextSummary: this.aiContextDetail()
             })
-            .position({ x: this.isDesktopWorkspace() ? Math.max(16, this.panelStore.windowWidthVp - 438) : (this.isCompact() ? 12 : 216), y: this.isDesktopWorkspace() ? 68 : (this.isCompact() ? 60 : 84) })
+            .zIndex(ZIndexTokens.aiAssistantPanel)
+            .position({ x: this.isDesktopWorkspace() ? Math.max(16, this.panelStore.windowWidthVp - 476) : (this.isCompact() ? 12 : Math.max(16, this.panelStore.windowWidthVp - 396)), y: this.isDesktopWorkspace() ? 68 : (this.isCompact() ? 60 : 76) })
             .transition(this.floatingTransition(TransitionEdge.END))
       }
 
@@ -3868,6 +3939,7 @@ struct Index {
       if (this.docStore.activeNativeJobId.length > 0) {
         this.buildLiveJobCapsule()
       }
+      this.buildAgentLiveHud()
 
       // LVS 连通性预检查半模态宿主（全尺寸无触摸穿透锚点，避免 SheetType.POPUP 在大屏锚定到 0x0 左上角）
       Stack()
@@ -3961,8 +4033,12 @@ struct Index {
     this.panelStore.showPythonPanel = false;
     this.panelStore.showAiPanel = !this.panelStore.showAiPanel;
     if (this.panelStore.showAiPanel) {
+      this.aiStore.aiMinimizedNotice = '';
       this.verifyStore.showDrcRules = false;
       this.panelStore.showMacroPanel = false;
+      this.panelStore.showRdbReviewPanel = false;
+      this.panelStore.showComparePanel = false;
+      this.panelStore.showViewWorkspacePanel = false;
     } else this.restoreCanvasFocusAfterPanelClose();
   }
 
@@ -3975,7 +4051,11 @@ struct Index {
 
   private returnToAiPanel(): void {
     this.canvasFocusReturnTicket++;
+    this.aiStore.aiMinimizedNotice = '';
     this.panelStore.showPythonPanel = false;
+    this.panelStore.showRdbReviewPanel = false;
+    this.panelStore.showComparePanel = false;
+    this.panelStore.showViewWorkspacePanel = false;
     this.panelStore.showAiPanel = true;
   }
 
@@ -8671,6 +8751,7 @@ struct Index {
     const ticket: number = ++this.aiRequestGeneration;
     this.aiOperationTicket = ticket;
     const conversationId: string = aiService.getActiveConversationId();
+    this.aiStore.aiRunStartedAt = Date.now(); this.aiStore.aiMinimizedNotice = '';
     this.aiStore.aiLoading = true; this.aiStore.aiError = ''; this.aiStore.aiStreamingText = ''; this.aiStore.aiReasoningText = ''; this.aiStore.aiToolCalls = [];
     try { await this.compressAiHistory(ticket, conversationId); }
     catch (error) {
@@ -8688,7 +8769,7 @@ struct Index {
     }
   }
 
-  private async handleAiPromptFull(prompt: string, resumeTask: boolean = false): Promise<void> {
+  private async handleAiPromptFull(prompt: string, resumeTask: boolean = false, forceReadOnly: boolean = false): Promise<void> {
     if (!this.pageAlive || this.aiStore.aiLoading || this.aiOperationTicket > 0 || prompt.trim().length === 0) return;
     prompt = aiService.redactConversationText(prompt);
     const generation: number = this.pageGeneration;
@@ -8709,6 +8790,8 @@ struct Index {
     try {
       let context: AiContext = this.buildAiContext();
       this.panelStore.statusText = 'AI: 正在处理版图需求…';
+      this.aiStore.aiRunStartedAt = Date.now();
+      this.aiStore.aiMinimizedNotice = '';
       this.aiStore.aiLoading = true;
       this.aiStore.aiCanCancel = true;
       this.aiStore.aiError = '';
@@ -8727,7 +8810,7 @@ struct Index {
         const resumeCheckpoint: AiTaskCheckpoint | undefined = aiService.getTaskCheckpoint();
         if (resumeTask && resumeCheckpoint !== undefined && resumeCheckpoint.documentIdentity !== this.docStore.activeWorkspaceId &&
           !['applied', 'completed'].includes(resumeCheckpoint.phase)) throw new Error('恢复任务属于另一份文档，请切回原文档后继续，或输入当前文档的新任务');
-        task = aiService.createAgentTask(prompt, resumeTask);
+        task = aiService.createAgentTask(prompt, resumeTask, forceReadOnly || this.aiStore.aiSessionMode === 'readonly');
         const config: AiModelConfig = aiService.getConfig();
         let compressionNotice: string = '';
         const budget = buildAiContextBudget(aiService.getContextHistory(), context, prompt, config, '', false, task.originalRequest);
@@ -8784,8 +8867,11 @@ struct Index {
             this.panelStore.statusText = this.aiStore.aiLastResult;
             return;
           }
-          if (commands.length === 0) {
+          if (commands.length === 0 || forceReadOnly || this.aiStore.aiSessionMode === 'readonly') {
             this.panelStore.statusText = 'AI 回复已就绪';
+            if (!this.panelStore.showAiPanel) {
+              this.aiStore.aiMinimizedNotice = 'AI 回复已就绪，点击展开查看';
+            }
             return;
           }
           this.aiStore.pendingAiCommands = commands;
@@ -9184,7 +9270,13 @@ struct Index {
         if (note.length > 0) message += ` ${note}`;
         try { previousDraft = JSON.stringify(pythonWorkspaceService.draft() ?? null); } catch (_) {}
       }
-      if (isCurrentPage()) { this.aiStore.aiLastResult = message; this.panelStore.statusText = businessSummary; }
+      if (isCurrentPage()) {
+        this.aiStore.aiLastResult = message;
+        this.panelStore.statusText = businessSummary;
+        if (!this.panelStore.showAiPanel && commandStatus !== 'pending' && businessSummary.length > 0) {
+          this.aiStore.aiMinimizedNotice = businessSummary;
+        }
+      }
       try {
         if (checkpoint !== undefined) {
           checkpoint.phase = published > 0 ? 'applied' : checkpoint.phase === 'applying' ? 'applying' :
@@ -9339,9 +9431,12 @@ struct Index {
   }
 
   private cancelPendingAiCommands(report: boolean = true): void {
-    if (this.aiStore.pendingAiCommands.length > 0) {
+    if (this.aiStore.pendingAiCommands.length > 0 || this.pendingAiWorkflow.length > 0) {
       this.setLastAiCommandStatus(undefined);
-      if (report) this.aiStore.aiLastResult = '已取消待应用方案，版图未修改';
+      if (report) {
+        this.aiStore.aiLastResult = '已取消待应用方案，版图未修改';
+        this.panelStore.statusText = '已取消待应用方案，版图未修改';
+      }
     }
     this.aiStore.pendingAiCommands = [];
     this.pendingAiWorkflow = '';
@@ -9705,7 +9800,7 @@ struct Index {
         if (original === undefined) throw new Error('图层不存在');
         if (!/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(args['color'] as string)) throw new Error('颜色须为十六进制 RGB 或 ARGB');
         const next: UiLayer = cloneLayerWithVisible(original,original.visible);
-        next.color = args['color'] as string; next.lineStyle = args['lineStyle'] as string; next.fillStyle = args['fillStyle'] as string;
+        next.color = args['color'] as string; next.fillColor = undefined; next.lineStyle = args['lineStyle'] as string; next.fillStyle = args['fillStyle'] as string;
         next.transparency = args['transparency'] as number; next.lineWidth = args['lineWidth'] as number;
         next.highlighted = args['highlighted'] as boolean; next.animated = args['animated'] as boolean;
         this.docStore.layers = this.docStore.layers.map((row: UiLayer): UiLayer => row === original ? next : row);

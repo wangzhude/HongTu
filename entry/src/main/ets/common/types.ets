@@ -72,8 +72,10 @@ export interface UiLayer {
   sourceName?: string;
   /** 英文缩写 */
   englishName: string;
-  /** 显示颜色 */
+  /** 显示颜色（边框主色） */
   color: string;
+  /** 独立填充色（KLayout .lyp fill-color 往返保真；未设置时回退到 color） */
+  fillColor?: string;
   /** 是否可见 */
   visible: boolean;
   /** 是否锁定（锁定后不可编辑该层图形） */

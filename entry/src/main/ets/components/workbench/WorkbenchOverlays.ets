@@ -30,11 +30,23 @@ import { Macro, macroService } from '../../services/MacroService';
 import { MacroManagerDialog } from '../dialogs/MacroManagerDialog';
 import { shortcutService, ShortcutEntry } from '../../services/ShortcutService';
 import { COLORS, LAYER_NAME_MAP } from '../../common/constants';
+import { canvasKeyName } from '../../common/CanvasKeyboard';
 import { Shape, ShapeType, getShapeBounds } from '../../models/GdsiiData';
 import { editService } from '../../services/EditService';
 import { WorkbenchIcon } from './WorkbenchIcon';
 import { PanelHeading } from './PanelHeading';
 import { AiMarkdownBody } from './AiMarkdownBody';
+import {
+  AiSlashCommandSpec,
+  AiTokenMeterState,
+  AiToolField,
+  AiToolPresentation,
+  describeAiToolCall,
+  exportConversationAsMarkdown,
+  formatRelativeConversationTime,
+  matchAiSlashCommands,
+  parseAiTokenMeter
+} from '../../services/AiAgentPresentation';
 import { pythonBridgeService } from '../../services/PythonBridgeService';
 import { aiHarnessService } from '../../services/AiHarnessService';
 import type { AiReviewGroup } from '../../services/AiReviewGroups';
@@ -64,9 +76,12 @@ interface AiReviewGroupRowSpec {
 @Component
 export struct AiAssistantPanel {
   closeAction: () => void = () => {};
+  minimizeAction: () => void = () => {};
   openPythonAction: () => void = () => {};
   openAgentConnectionAction: () => void = () => {};
-  promptAction: (prompt: string, resumeTask?: boolean) => void = () => {};
+  promptAction: (prompt: string, resumeTask?: boolean, forceReadOnly?: boolean) => void = () => {};
+  @Prop sessionMode: 'agent' | 'readonly' = 'agent';
+  toggleSessionModeAction: () => void = () => {};
   /** 当前上下文摘要（由 Index 构造传入，替代硬编码） */
   @Prop contextSummary: string = '';
   @Prop conversations: AiConversationSummary[] = [];
@@ -130,6 +145,9 @@ export struct AiAssistantPanel {
   @Prop @Watch('onConversationChange') toolCalls: AiChatToolState[] = [];
   @State expandedReasoning: string[] = [];
   @State expandedTools: string[] = [];
+  @State expandedTraces: string[] = [];
+  @State expandedRawTools: string[] = [];
+  @State slashMenuForced: boolean = false;
   /** 自由输入文本 */
   @State inputText: string = '';
   @State showQuickActions: boolean = true;
@@ -171,7 +189,7 @@ export struct AiAssistantPanel {
   private credentialReloadTicket: number = 0;
   private diagnosticRunning: boolean = false;
   private conversationScroller: Scroller = new Scroller();
-  private followsLatest: boolean = true;
+  @State followsLatest: boolean = true;
   private userScrollPending: boolean = false;
   private scrollRequestTimer: number = -1;
 
@@ -754,16 +772,72 @@ export struct AiAssistantPanel {
     else this.compressConversationAction();
   }
 
+  private executeSlashSpec(spec: AiSlashCommandSpec): void {
+    this.slashMenuForced = false;
+    this.inputText = '';
+    if (spec.kind === 'template') {
+      this.showTaskTemplate = !this.showTaskTemplate;
+      return;
+    }
+    if (spec.kind === 'python') {
+      this.openPythonAction();
+      return;
+    }
+    if (spec.kind === 'compact') {
+      this.compressCurrentConversation(false);
+      return;
+    }
+    if (spec.kind === 'new') {
+      this.createConversation();
+      return;
+    }
+    if (spec.kind === 'mode_readonly') {
+      if (this.sessionMode !== 'readonly') this.toggleSessionModeAction();
+      return;
+    }
+    if (spec.kind === 'mode_agent') {
+      if (this.sessionMode !== 'agent') this.toggleSessionModeAction();
+      return;
+    }
+    if (spec.prompt.length > 0 && !this.isLoading && !this.configBusy) {
+      this.followsLatest = true;
+      this.showConversations = false;
+      this.showContext = false;
+      this.showSettings = false;
+      this.promptAction(spec.prompt, false, this.sessionMode === 'readonly');
+    }
+  }
+
+  private visibleSlashCommands(): AiSlashCommandSpec[] {
+    if (this.isLoading || this.configBusy) {
+      return [];
+    }
+    if (this.slashMenuForced && !this.inputText.trimStart().startsWith('/')) {
+      return matchAiSlashCommands('/');
+    }
+    return matchAiSlashCommands(this.inputText);
+  }
+
   private sendInput(resumeTask: boolean = false): void {
     const prompt: string = this.inputText.trim();
     if (prompt.length === 0 || this.isLoading || this.configBusy) {
       return;
     }
+    if (!resumeTask && prompt.startsWith('/')) {
+      const matched: AiSlashCommandSpec[] = matchAiSlashCommands(prompt);
+      if (matched.length === 1 && matched[0].command === prompt.toLowerCase()) {
+        this.executeSlashSpec(matched[0]);
+        return;
+      }
+    }
+    this.slashMenuForced = false;
     this.followsLatest = true;
     this.showConversations = false;
     this.showContext = false;
     this.showSettings = false;
-    if (resumeTask) this.promptAction(prompt, true); else this.promptAction(prompt);
+    const lockReadOnly: boolean = this.sessionMode === 'readonly';
+    if (resumeTask) this.promptAction(prompt, true, lockReadOnly);
+    else this.promptAction(prompt, false, lockReadOnly);
     this.inputText = '';
   }
 
@@ -781,6 +855,112 @@ export struct AiAssistantPanel {
   private toggleTool(key: string): void {
     this.expandedTools = this.expandedTools.includes(key)
       ? this.expandedTools.filter((item: string): boolean => item !== key) : this.expandedTools.concat([key]);
+  }
+
+  private toggleTrace(key: string): void {
+    this.expandedTraces = this.expandedTraces.includes(key)
+      ? this.expandedTraces.filter((item: string): boolean => item !== key) : this.expandedTraces.concat([key]);
+  }
+
+  private toggleRawTool(key: string): void {
+    this.expandedRawTools = this.expandedRawTools.includes(key)
+      ? this.expandedRawTools.filter((item: string): boolean => item !== key) : this.expandedRawTools.concat([key]);
+  }
+
+  private async copyPlainText(text: string, toastMessage: string): Promise<void> {
+    if (text.trim().length === 0) return;
+    try {
+      await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text));
+      showAppSnackBar(this.getUIContext(), toastMessage);
+    } catch (_) {}
+  }
+
+  private isLatestAssistantMessage(msg: ChatMessage): boolean {
+    for (let i: number = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role === ChatRole.ASSISTANT) {
+        return this.messages[i].timestamp === msg.timestamp && this.messages[i].content === msg.content;
+      }
+    }
+    return false;
+  }
+
+  private retryLatestTurn(): void {
+    if (this.isLoading || this.configBusy) return;
+    const lastPrompt: string = this.latestUserPrompt().trim();
+    if (lastPrompt.length === 0) return;
+    this.followsLatest = true;
+    this.promptAction(lastPrompt, false, this.sessionMode === 'readonly');
+  }
+
+  private quoteForFollowUp(msg: ChatMessage): void {
+    const raw: string = this.messageText(msg).replace(/\s+/g, ' ').trim();
+    if (raw.length === 0) return;
+    const excerpt: string = raw.length > 48 ? `${raw.substring(0, 48)}…` : raw;
+    this.inputText = `针对「${excerpt}」，请进一步`;
+  }
+
+  private tokenMeterState(): AiTokenMeterState {
+    const cfg: AiModelConfig = aiService.getConfig();
+    return parseAiTokenMeter(
+      this.contextUsageSummary,
+      cfg.contextWindowTokens ?? 32768,
+      cfg.compressionThreshold ?? 0.8
+    );
+  }
+
+  private shortModelPillLabel(): string {
+    const cfg: AiModelConfig = aiService.getConfig();
+    if (cfg.provider === AiProvider.DEMO_MODE) return '演示模式';
+    const raw: string = cfg.modelName.trim() || '未选模型';
+    const slashOrColon: number = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf(':'));
+    const tail: string = slashOrColon >= 0 ? raw.substring(slashOrColon + 1) : raw;
+    return tail.length > 18 ? `${tail.substring(0, 17)}…` : tail;
+  }
+
+  private hasInterruptedTurn(): boolean {
+    if (this.errorMessage.length > 0 || this.checkpointSummary.length > 0) return true;
+    for (let i: number = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role === ChatRole.ASSISTANT) {
+        const st = this.messages[i].runStatus;
+        return st !== undefined && st !== 'completed';
+      }
+    }
+    return false;
+  }
+
+  private isExplicitActionReceipt(): boolean {
+    const raw: string = this.lastResult.trim();
+    if (raw.length === 0) return false;
+    return raw.startsWith('已取消') || raw.startsWith('已应用') || raw.startsWith('已撤销') ||
+      raw.startsWith('修改已') || raw.startsWith('操作已') || this.canUndo;
+  }
+
+  private traceSummaryText(tools: AiChatToolState[], reasoning: string, isLive: boolean): string {
+    const total: number = tools.length;
+    if (isLive) {
+      for (let i: number = total - 1; i >= 0; i--) {
+        if (tools[i].status === 'running') {
+          const desc: AiToolPresentation = describeAiToolCall(tools[i], true);
+          return desc.inlineTarget.length > 0
+            ? `正在执行：${desc.title} · ${desc.inlineTarget}`
+            : `正在执行：${desc.title}`;
+        }
+      }
+      return total > 0 ? `正在处理 · 已执行 ${total} 步` : '正在思考…';
+    }
+    let failedCount: number = 0;
+    for (let i: number = 0; i < total; i++) {
+      if (this.toolFailed(tools[i])) failedCount++;
+    }
+    if (total > 0 && failedCount > 0) {
+      return `工作过程 · ${total} 步工具（${failedCount} 步未通过）`;
+    }
+    if (total > 0) {
+      const lastDesc: AiToolPresentation = describeAiToolCall(tools[total - 1], false);
+      const tailHint: string = lastDesc.inlineTarget.length > 0 ? ` · ${lastDesc.inlineTarget}` : '';
+      return `工作过程 · ${total} 步工具调用${tailHint}`;
+    }
+    return reasoning.length > 0 ? '思考过程' : '工作过程';
   }
 
   private liveAssistantVisible(): boolean {
@@ -935,6 +1115,21 @@ export struct AiAssistantPanel {
         rows.push({ label: '参数', value: `${prop} → ${nextVal}`, accent: true });
       }
     } else {
+      const dxMatch: RegExpMatchArray | null = detail.match(/"dx"\s*:\s*(-?\d+(?:\.\d+)?)/);
+      const dyMatch: RegExpMatchArray | null = detail.match(/"dy"\s*:\s*(-?\d+(?:\.\d+)?)/);
+      const firstLine: string = detail.split('\n')[0].trim();
+      if (dxMatch !== null || dyMatch !== null) {
+        const dxVal: number = dxMatch !== null ? Number(dxMatch[1]) : 0;
+        const dyVal: number = dyMatch !== null ? Number(dyMatch[1]) : 0;
+        const parts: string[] = [];
+        if (dxVal !== 0) parts.push(`ΔX ${dxVal > 0 ? '+' : ''}${dxVal} nm`);
+        if (dyVal !== 0) parts.push(`ΔY ${dyVal > 0 ? '+' : ''}${dyVal} nm`);
+        if (parts.length > 0) {
+          rows.push({ label: '坐标位移', value: parts.join('，'), accent: true });
+        }
+      } else if (firstLine.length > 0 && /移动|平移|旋转|镜像|偏移|圆角|阵列/.test(firstLine)) {
+        rows.push({ label: '变更内容', value: firstLine.replace(/\s*\([a-zA-Z0-9_.]+\)$/, ''), accent: true });
+      }
       const markerIdx: number = detail.indexOf('预计几何范围（nm）：');
       if (markerIdx >= 0) {
         const rawLines: string[] = detail.substring(markerIdx + '预计几何范围（nm）：'.length).split('\n');
@@ -945,7 +1140,12 @@ export struct AiAssistantPanel {
           const colonPos: number = line.indexOf('：');
           const body: string = colonPos >= 0 ? line.substring(colonPos + 1).trim() : line;
           if (body.includes('→')) {
-            transitions.push(this.trimNmNumbers(body));
+            const trimmedBody: string = this.trimNmNumbers(body);
+            const halves: string[] = trimmedBody.split('→');
+            if (halves.length === 2 && halves[0].trim() === halves[1].trim()) {
+              continue;
+            }
+            transitions.push(trimmedBody);
           }
           if (transitions.length >= 2) break;
         }
@@ -1134,55 +1334,128 @@ export struct AiAssistantPanel {
   }
 
   @Builder
+  ToolStructuredFieldRow(field: AiToolField) {
+    Row({ space: 8 }) {
+      Text(field.label)
+        .fontSize(11)
+        .fontColor(COLORS.muted)
+        .width(66)
+      Text(field.value)
+        .fontSize(11)
+        .fontWeight(field.accent ? FontWeight.Medium : FontWeight.Regular)
+        .fontColor(field.accent ? COLORS.primary : COLORS.ink)
+        .layoutWeight(1)
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }.width('100%').alignItems(VerticalAlign.Top)
+  }
+
+  @Builder
   ToolCard(tool: AiChatToolState, key: string) {
     Row({ space: 8 }) {
       Column({ space: 4 }) {
         if (this.toolForDisplay(tool, key).status === 'running' && key.startsWith('0:') && this.isLoading) {
-          LoadingProgress().width(20).height(20).color(COLORS.primary)
+          LoadingProgress().width(18).height(18).color(COLORS.primary)
         } else {
           DrawnStatusIcon({
             kind: this.toolFailed(this.toolForDisplay(tool, key))
               ? 'error'
               : (this.toolForDisplay(tool, key).status === 'completed' ? 'success' : 'active'),
-            iconSize: 18,
+            iconSize: 16,
             strokeColor: this.toolFailed(this.toolForDisplay(tool, key))
               ? COLORS.danger
               : (this.toolForDisplay(tool, key).status === 'completed' ? COLORS.success : COLORS.muted),
             showSoftPlate: true
           })
         }
-        Divider().vertical(true).height(18).color(COLORS.border)
-      }.width(20).padding({ top: 6 })
-      Column({ space: 6 }) {
-      Button({ type: ButtonType.Normal }) {
-        Row({ space: 8 }) {
-          Text(this.toolTitle(this.toolForDisplay(tool, key))).fontSize(12).fontColor(COLORS.ink).layoutWeight(1).maxLines(1)
-          Text(this.toolStatusLabel(this.toolForDisplay(tool, key), key)).fontSize(11)
-            .fontColor(this.toolFailed(this.toolForDisplay(tool, key)) ? COLORS.danger :
-              (this.toolForDisplay(tool, key).status === 'completed' ? COLORS.success : COLORS.primary))
-          WorkbenchIcon({ name: this.expandedTools.includes(key) ? 'chevronUp' : 'chevronDown', iconSize: 13, color: COLORS.muted })
-        }.width('100%')
-      }.height(UI.compactControlHeight).width('100%').padding({ left: 10, right: 10 })
-        .backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
-        .accessibilityText(`${this.toolTitle(this.toolForDisplay(tool, key))} · ${this.toolStatusLabel(this.toolForDisplay(tool, key), key)} · 展开参数与结果`)
+        Divider().vertical(true).height(16).color(COLORS.border)
+      }.width(18).padding({ top: 6 })
+
+      Column({ space: 5 }) {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 5 }) {
+            Text(this.toolTitle(this.toolForDisplay(tool, key)))
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.ink)
+              .maxLines(1)
+            if (describeAiToolCall(this.toolForDisplay(tool, key), key.startsWith('0:') && this.isLoading).inlineTarget.length > 0) {
+              Text('·')
+                .fontSize(11)
+                .fontColor(COLORS.muted)
+              Text(describeAiToolCall(this.toolForDisplay(tool, key), key.startsWith('0:') && this.isLoading).inlineTarget)
+                .fontSize(11)
+                .fontColor(COLORS.muted)
+                .layoutWeight(1)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            } else {
+              Blank().layoutWeight(1)
+            }
+            Text(this.toolStatusLabel(this.toolForDisplay(tool, key), key))
+              .fontSize(10)
+              .fontColor(this.toolFailed(this.toolForDisplay(tool, key)) ? COLORS.danger :
+                (this.toolForDisplay(tool, key).status === 'completed' ? COLORS.success : COLORS.primary))
+            WorkbenchIcon({ name: this.expandedTools.includes(key) ? 'chevronUp' : 'chevronDown', iconSize: 12, color: COLORS.muted })
+          }.width('100%').alignItems(VerticalAlign.Center)
+        }
+        .height(30)
+        .width('100%')
+        .padding({ left: 8, right: 8 })
+        .backgroundColor(Color.Transparent)
+        .borderRadius(UI.controlRadius)
+        .accessibilityText(`${this.toolTitle(this.toolForDisplay(tool, key))} · 展开详情`)
         .onClick(() => { this.toggleTool(key); })
-      if (this.expandedTools.includes(key)) {
-      Text(this.toolActionText(this.toolForDisplay(tool, key), key)).fontSize(UI.fontCaption)
-        .fontColor(this.toolFailed(this.toolForDisplay(tool, key)) ? COLORS.danger : COLORS.muted)
-        .width('100%').padding({ left: 4 })
-        if (this.toolForDisplay(tool, key).arguments.length > 0) {
-          Text('参数').fontSize(11).fontColor(COLORS.muted).width('100%')
-          AiMarkdownBody({ content: this.toolForDisplay(tool, key).arguments, code: true, fontSize: 11,
-            streaming: key.startsWith('0:') && this.isLoading }).width('100%')
+
+        if (this.expandedTools.includes(key)) {
+          Column({ space: 6 }) {
+            Text(this.toolActionText(this.toolForDisplay(tool, key), key))
+              .fontSize(11)
+              .fontColor(this.toolFailed(this.toolForDisplay(tool, key)) ? COLORS.danger : COLORS.muted)
+              .width('100%')
+
+            if (describeAiToolCall(this.toolForDisplay(tool, key), false).fields.length > 0) {
+              Column({ space: 4 }) {
+                ForEach(describeAiToolCall(this.toolForDisplay(tool, key), false).fields, (f: AiToolField, idx: number) => {
+                  this.ToolStructuredFieldRow(f)
+                }, (f: AiToolField, idx: number): string => `${idx}:${f.label}:${f.value}`)
+              }
+              .width('100%')
+              .padding(8)
+              .backgroundColor(COLORS.surface)
+              .border({ width: 0.6, color: COLORS.border })
+              .borderRadius(8)
+            }
+
+            if (this.toolForDisplay(tool, key).arguments.length > 0 || this.toolForDisplay(tool, key).result.length > 0) {
+              Button(this.expandedRawTools.includes(key) ? '收起原始 JSON' : '查看原始参数与返回 JSON', { type: ButtonType.Normal })
+                .height(22)
+                .padding(0)
+                .fontSize(10)
+                .fontColor(COLORS.primary)
+                .backgroundColor(Color.Transparent)
+                .onClick(() => { this.toggleRawTool(key); })
+
+              if (this.expandedRawTools.includes(key)) {
+                if (this.toolForDisplay(tool, key).arguments.length > 0) {
+                  Text('调用参数').fontSize(10).fontColor(COLORS.muted).width('100%')
+                  AiMarkdownBody({ content: this.toolForDisplay(tool, key).arguments, code: true, fontSize: 11,
+                    streaming: key.startsWith('0:') && this.isLoading }).width('100%')
+                }
+                if (this.toolForDisplay(tool, key).result.length > 0) {
+                  Text('返回数据').fontSize(10).fontColor(COLORS.muted).width('100%')
+                  AiMarkdownBody({ content: this.toolForDisplay(tool, key).result, code: true, fontSize: 11,
+                    streaming: key.startsWith('0:') && this.isLoading }).width('100%')
+                }
+              }
+            }
+          }
+          .width('100%')
+          .padding({ left: 6, right: 4, bottom: 4 })
+          .alignItems(HorizontalAlign.Start)
         }
-        if (this.toolForDisplay(tool, key).result.length > 0) {
-          Text('结果').fontSize(11).fontColor(COLORS.muted).width('100%')
-          AiMarkdownBody({ content: this.toolForDisplay(tool, key).result, code: true, fontSize: 11,
-            streaming: key.startsWith('0:') && this.isLoading }).width('100%')
-        }
-      }
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-    }.width('100%').alignItems(VerticalAlign.Top).margin({ top: 6, bottom: 4 })
+    }.width('100%').alignItems(VerticalAlign.Top).margin({ top: 4, bottom: 2 })
   }
 
   @Builder
@@ -1213,104 +1486,198 @@ export struct AiAssistantPanel {
     }
   }
 
+  /** DSH-style collapsible Agent Trace Accordion: Thinking + Plan + Tool Calls unified above the answer. */
+  @Builder
+  AgentTraceAccordion(tools: AiChatToolState[], reasoning: string, traceKey: string, isLive: boolean) {
+    if (tools.length > 0 || reasoning.length > 0) {
+      Column({ space: 6 }) {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 8 }) {
+            if (isLive) {
+              LoadingProgress().width(14).height(14).color(COLORS.primary)
+            } else {
+              Circle({ width: 7, height: 7 })
+                .fill(tools.some((t: AiChatToolState): boolean => this.toolFailed(t)) ? COLORS.danger : COLORS.success)
+            }
+            Text(this.traceSummaryText(tools, reasoning, isLive))
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.ink)
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            WorkbenchIcon({
+              name: (isLive || this.expandedTraces.includes(traceKey)) ? 'chevronUp' : 'chevronDown',
+              iconSize: 13,
+              color: COLORS.muted
+            })
+          }.width('100%').alignItems(VerticalAlign.Center)
+        }
+        .width('100%')
+        .height(32)
+        .padding({ left: 10, right: 10 })
+        .backgroundColor(COLORS.surfaceMuted)
+        .border({ width: 0.8, color: isLive ? withAlpha(COLORS.primary, 0.35) : COLORS.border })
+        .borderRadius(10)
+        .onClick(() => {
+          if (!isLive) this.toggleTrace(traceKey);
+        })
+
+        if (isLive || this.expandedTraces.includes(traceKey)) {
+          Column({ space: 4 }) {
+            if (reasoning.length > 0) {
+              this.ReasoningSection(reasoning, `${traceKey}:reasoning`)
+            }
+            this.PlanChecklist(tools, traceKey)
+            ForEach(tools, (tool: AiChatToolState) => {
+              this.ToolCard(tool, `${traceKey}:${tool.id}`)
+            }, (tool: AiChatToolState): string => tool.id)
+          }
+          .width('100%')
+          .padding({ left: 8, right: 8, top: 4, bottom: 6 })
+          .backgroundColor(withAlpha(COLORS.surfaceMuted, 0.65))
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(10)
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .margin({ bottom: 6 })
+    }
+  }
+
   /** Live Builder expressions must read observed props, not capture a one-time ChatMessage. */
   @Builder
   LiveAssistantRow() {
     Row() {
-      Column() {
-        Text('鸿图 AI').fontSize(UI.fontCaption).fontColor(COLORS.muted).margin({ bottom: 2 })
-        this.PlanChecklist(this.toolCalls, '0')
-        if (this.toolCalls.length > 0) {
-          Text('运行步骤').fontSize(UI.fontCaption).fontColor(COLORS.muted).margin({ top: 6 })
-        }
-        ForEach(this.toolCalls, (tool: AiChatToolState) => {
-          this.ToolCard(tool, `0:${tool.id}`)
-        }, (tool: AiChatToolState): string => tool.id)
+      Column({ space: 4 }) {
+        Row({ space: 6 }) {
+          WorkbenchIcon({ name: 'sparkles', iconSize: 13, color: COLORS.primary })
+          Text('鸿图 Agent').fontSize(12).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
+          Text(this.generationStatus || '思考与绘图中…')
+            .fontSize(11)
+            .fontColor(COLORS.primary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+        }.width('100%').alignItems(VerticalAlign.Center).margin({ bottom: 2 })
+
+        this.AgentTraceAccordion(this.toolCalls, this.reasoningText, '0', true)
+
         if (this.streamingText.length > 0) {
           AiMarkdownBody({ content: this.streamingText, streaming: this.isLoading,
             fontSize: this.desktopMode ? UI.fontBody : 12 })
-            .width('100%').padding({ left: 0, right: 0, top: 8, bottom: 8 })
+            .width('100%').padding({ left: 2, right: 2, top: 4, bottom: 4 })
             .backgroundColor(Color.Transparent).borderRadius(RADIUS.md)
         }
-        if (this.reasoningText.length > 0) {
-          Column({ space: 6 }) {
-            Button(this.expandedReasoning.includes('0:reasoning') ? '收起思考' : '查看思考', { type: ButtonType.Normal })
-              .height(UI.compactControlHeight).fontSize(UI.fontBody).fontColor(COLORS.muted)
-              .backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
-              .onClick(() => { this.toggleReasoning('0:reasoning'); })
-            if (this.expandedReasoning.includes('0:reasoning')) {
-              AiMarkdownBody({ content: this.reasoningText, streaming: this.isLoading,
-                fontSize: 12, muted: true }).width('100%')
-            }
-          }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 6, bottom: 6 })
-        }
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        .padding({ left: 0, right: 0 })
-    }.width('100%').justifyContent(FlexAlign.Start).padding({ top: 4, bottom: 4 })
+    }.width('100%').justifyContent(FlexAlign.Start).padding({ top: 6, bottom: 6 })
   }
 
-  /** AI-10: 聊天消息行（按 role 显示不同样式气泡） */
+  /** DSH-style Agent message row: right-aligned user pill vs left-aligned Agent turn with trace above body & action bar. */
   @Builder
   ChatMessageRow(msg: ChatMessage) {
-    Row() {
-      Column() {
-        if (msg.role !== ChatRole.USER || !this.desktopMode) {
-        Text(msg.role === ChatRole.USER ? '我' : (msg.role === ChatRole.SYSTEM ? '系统' : '鸿图 AI'))
-          .fontSize(UI.fontCaption)
-          .fontColor(COLORS.muted)
-          .margin({ bottom: 8 })
-        }
-        if (this.messageText(msg).length > 0) {
-          if (msg.role === ChatRole.ASSISTANT) {
-            AiMarkdownBody({ content: this.messageText(msg), streaming: msg.timestamp === 0 && this.isLoading,
-              fontSize: this.desktopMode ? UI.fontBody : 12 })
-              .width('100%').padding({ left: 0, right: 0, top: 8, bottom: 8 })
-              .backgroundColor(msg.commandStatus === 'failed' ? withAlpha(COLORS.danger, ALPHA.SELECTED) : Color.Transparent)
-              .borderRadius(RADIUS.md)
-          } else {
-            Text(this.messageText(msg))
+    if (msg.role === ChatRole.USER) {
+      Row() {
+        Text(this.messageText(msg))
           .fontSize(this.desktopMode ? 13 : 12)
-          .fontColor(msg.role === ChatRole.USER && !this.desktopMode ? Color.White : COLORS.ink)
-          .backgroundColor(msg.role === ChatRole.USER ?
-            (this.desktopMode ? COLORS.surfaceMuted : COLORS.primary) :
-            (msg.commandStatus === 'failed' ? withAlpha(COLORS.danger, ALPHA.SELECTED) : COLORS.surfaceMuted))
-          .borderRadius(RADIUS.md)
-          .padding({ left: 12, right: 12, top: this.desktopMode ? 10 : 6, bottom: this.desktopMode ? 10 : 6 })
-          .width('100%')
+          .lineHeight(20)
+          .fontColor(COLORS.ink)
+          .backgroundColor(COLORS.primarySoft)
+          .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.24) })
+          .borderRadius({ topLeft: 16, topRight: 4, bottomLeft: 16, bottomRight: 16 })
+          .padding({ left: 13, right: 13, top: 9, bottom: 9 })
+          .constraintSize({ maxWidth: '86%' })
+          .copyOption(CopyOptions.LocalDevice)
           .textAlign(TextAlign.Start)
-          }
-        }
-        if (msg.role === ChatRole.ASSISTANT) {
-          if (msg.runStatus !== undefined) {
-            Text(msg.runStatus === 'completed' ? '任务已结束' : (msg.runStatus === 'cancelled' ? '已取消等待' : '任务未完成'))
-              .fontSize(UI.fontCaption).fontColor(msg.runStatus === 'completed' ? COLORS.success : COLORS.warning)
-              .margin({ bottom: 4 })
-          }
-          this.ReasoningSection(msg.reasoning ?? '', `${msg.timestamp}:reasoning`)
-          this.PlanChecklist(msg.tools ?? [], `${msg.timestamp}`)
-          if ((msg.tools ?? []).length > 0) {
-            Text('运行步骤').fontSize(UI.fontCaption).fontColor(COLORS.muted).margin({ top: 6 })
-          }
-          ForEach(msg.tools ?? [], (tool: AiChatToolState) => {
-            this.ToolCard(tool, `${msg.timestamp}:${tool.id}`)
-          }, (tool: AiChatToolState): string => tool.id)
-        }
-        if (msg.isCommand && msg.commandStatus !== undefined) {
-          Text(this.commandStatusLabel(msg))
-            .fontSize(10)
-            .fontColor(msg.commandStatus === 'executed' ? COLORS.success :
-              (msg.commandStatus === 'failed' ? COLORS.danger : COLORS.muted))
-            .margin({ top: 2 })
-        }
       }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .padding({ left: this.desktopMode && msg.role === ChatRole.USER ? 72 : 0,
-        right: 0 })
+      .width('100%')
+      .justifyContent(FlexAlign.End)
+      .padding({ top: 6, bottom: 6 })
+    } else {
+      Row() {
+        Column({ space: 4 }) {
+          Row({ space: 6 }) {
+            WorkbenchIcon({ name: msg.role === ChatRole.SYSTEM ? 'info' : 'sparkles', iconSize: 13,
+              color: msg.role === ChatRole.SYSTEM ? COLORS.muted : COLORS.primary })
+            Text(msg.role === ChatRole.SYSTEM ? '系统' : '鸿图 Agent')
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.ink)
+            if (msg.role === ChatRole.ASSISTANT && msg.runStatus !== undefined) {
+              Text(msg.runStatus === 'completed' ? '已完成' : (msg.runStatus === 'cancelled' ? '已取消' : '未完成'))
+                .fontSize(10)
+                .fontColor(msg.runStatus === 'completed' ? COLORS.success : COLORS.warning)
+                .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                .backgroundColor(msg.runStatus === 'completed' ? withAlpha(COLORS.success, 0.12) : withAlpha(COLORS.warning, 0.14))
+                .borderRadius(RADIUS.capsule)
+            }
+            if (msg.isCommand && msg.commandStatus !== undefined) {
+              Text(this.commandStatusLabel(msg))
+                .fontSize(10)
+                .fontColor(msg.commandStatus === 'executed' ? COLORS.success :
+                  (msg.commandStatus === 'failed' ? COLORS.danger : COLORS.muted))
+            }
+          }.width('100%').alignItems(VerticalAlign.Center).margin({ bottom: 2 })
+
+          if (msg.role === ChatRole.ASSISTANT) {
+            this.AgentTraceAccordion(msg.tools ?? [], msg.reasoning ?? '', `${msg.timestamp}`, false)
+          }
+
+          if (this.messageText(msg).length > 0) {
+            if (msg.role === ChatRole.ASSISTANT) {
+              AiMarkdownBody({ content: this.messageText(msg), streaming: msg.timestamp === 0 && this.isLoading,
+                fontSize: this.desktopMode ? UI.fontBody : 12 })
+                .width('100%').padding({ left: 2, right: 2, top: 4, bottom: 4 })
+                .backgroundColor(msg.commandStatus === 'failed' ? withAlpha(COLORS.danger, ALPHA.SELECTED) : Color.Transparent)
+                .borderRadius(RADIUS.md)
+            } else {
+              Text(this.messageText(msg))
+                .fontSize(this.desktopMode ? 13 : 12)
+                .fontColor(COLORS.ink)
+                .backgroundColor(msg.commandStatus === 'failed' ? withAlpha(COLORS.danger, ALPHA.SELECTED) : COLORS.surfaceMuted)
+                .borderRadius(RADIUS.md)
+                .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+                .width('100%')
+            }
+          }
+
+          if (msg.role === ChatRole.ASSISTANT && !this.isLoading && this.messageText(msg).length > 0) {
+            Row({ space: 6 }) {
+              Button({ type: ButtonType.Normal }) {
+                Row({ space: 4 }) {
+                  WorkbenchIcon({ name: 'copy', iconSize: 12, color: COLORS.muted })
+                  Text('复制').fontSize(11).fontColor(COLORS.muted)
+                }.alignItems(VerticalAlign.Center)
+              }
+              .height(24).padding({ left: 7, right: 7 }).backgroundColor(Color.Transparent).borderRadius(6)
+              .onClick(() => { this.copyPlainText(this.messageText(msg), '已复制回复内容'); })
+
+              Button('追问', { type: ButtonType.Normal })
+                .height(24).padding({ left: 7, right: 7 }).fontSize(11).fontColor(COLORS.muted)
+                .backgroundColor(Color.Transparent).borderRadius(6)
+                .onClick(() => { this.quoteForFollowUp(msg); })
+
+              if (this.isLatestAssistantMessage(msg) && this.latestUserPrompt().trim().length > 0) {
+                Button({ type: ButtonType.Normal }) {
+                  Row({ space: 4 }) {
+                    WorkbenchIcon({ name: 'reset', iconSize: 12, color: COLORS.muted })
+                    Text('重试').fontSize(11).fontColor(COLORS.muted)
+                  }.alignItems(VerticalAlign.Center)
+                }
+                .height(24).padding({ left: 7, right: 7 }).backgroundColor(Color.Transparent).borderRadius(6)
+                .onClick(() => { this.retryLatestTurn(); })
+              }
+            }.width('100%').alignItems(VerticalAlign.Center)
+          }
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .justifyContent(FlexAlign.Start)
+      .padding({ top: 6, bottom: 8 })
     }
-    .width('100%')
-    .justifyContent(msg.role === ChatRole.USER ? FlexAlign.End : FlexAlign.Start)
-    .padding({ top: 4, bottom: 4 })
   }
 
   @Builder
@@ -1511,6 +1878,13 @@ export struct AiAssistantPanel {
           .borderRadius(UI.controlRadius)
           .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
           .onChange((value: string) => { this.conversationSearch = value; })
+        Button('导出当前', { type: ButtonType.Normal }).height(UI.controlHeight).padding({ left: 10, right: 10 })
+          .fontSize(UI.fontCaption).fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
+          .borderRadius(UI.controlRadius).enabled(this.messages.length > 0)
+          .onClick(() => {
+            const md: string = exportConversationAsMarkdown(this.activeConversationTitle(), this.messages);
+            this.copyPlainText(md, '当前会话已导出为 Markdown 并复制');
+          })
         Button('新建会话').type(ButtonType.Normal).height(UI.controlHeight)
           .fontSize(UI.fontBody).fontColor(Color.White).backgroundColor(COLORS.primary)
           .borderRadius(UI.controlRadius).enabled(!this.isLoading && !this.configBusy)
@@ -1526,8 +1900,9 @@ export struct AiAssistantPanel {
             Column({ space: 4 }) {
               Text(item.title).fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
                 .width('100%').textAlign(TextAlign.Start).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-              Text(`${item.messageCount} 条消息${item.id === this.activeConversationId ? ' · 当前' : ''}`)
-                .fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%').textAlign(TextAlign.Start)
+              Text(`${item.messageCount} 条消息 · ${formatRelativeConversationTime(item.updatedAt)}${item.id === this.activeConversationId ? ' · 当前会话' : ''}`)
+                .fontSize(UI.fontCaption).fontColor(item.id === this.activeConversationId ? COLORS.primary : COLORS.muted)
+                .width('100%').textAlign(TextAlign.Start)
             }.width('100%').alignItems(HorizontalAlign.Start)
           }.type(ButtonType.Normal).layoutWeight(1).height(56).padding(0)
             .backgroundColor(Color.Transparent).borderRadius(UI.controlRadius).enabled(!this.isLoading && !this.configBusy)
@@ -1602,9 +1977,20 @@ export struct AiAssistantPanel {
         })
       }.width('100%')
       Divider().color(COLORS.border)
-      Text('上下文占用').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).width('100%')
-      Text(this.contextUsageSummary || '请求前自动估算')
-        .fontSize(UI.fontBody).fontColor(COLORS.ink).width('100%').lineHeight(20)
+      Row() {
+        Text('上下文占用').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).layoutWeight(1)
+        Text(this.tokenMeterState().badgeText)
+          .fontSize(11)
+          .fontFamily('monospace')
+          .fontColor(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.primary)
+      }.width('100%').alignItems(VerticalAlign.Center)
+      Progress({ value: this.tokenMeterState().percent, total: 100, type: ProgressType.Linear })
+        .color(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.primary)
+        .backgroundColor(COLORS.surfaceMuted)
+        .style({ strokeWidth: 6 })
+        .width('100%')
+      Text(`${this.contextUsageSummary || '请求前自动估算'} · 自动压缩阈值 ${this.tokenMeterState().thresholdPercent}%`)
+        .fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%').lineHeight(18)
       Text(this.contextDetail || this.contextSummary || '当前没有版图上下文')
         .fontSize(UI.fontCaption).fontColor(COLORS.ink).width('100%').lineHeight(19)
         .padding(10).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
@@ -2090,6 +2476,7 @@ export struct AiAssistantPanel {
 
   @Builder
   DesktopConversation() {
+    Stack({ alignContent: Alignment.Bottom }) {
     Scroll(this.conversationScroller) {
       Column() {
         if (this.showConversations) {
@@ -2105,14 +2492,31 @@ export struct AiAssistantPanel {
               .padding(UI.panelPadding).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
           }
           if (this.messages.length === 0 && !this.liveAssistantVisible() && !this.isLoading && this.pendingSummary.length === 0) {
-            Column({ space: 6 }) {
-              Text('开始新会话')
-                .fontSize(15)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(COLORS.ink)
+            Column({ space: 14 }) {
+              Column({ space: 6 }) {
+                Row({ space: 8 }) {
+                  WorkbenchIcon({ name: 'sparkles', iconSize: 18, color: COLORS.primary })
+                  Text('鸿图版图 Agent')
+                    .fontSize(16)
+                    .fontWeight(FontWeight.Bold)
+                    .fontColor(COLORS.ink)
+                }.alignItems(VerticalAlign.Center)
+                Text('读取当前版图、提出可撤销编辑预览或生成参数化脚本（输入 / 唤出快捷指令）')
+                  .fontSize(12)
+                  .fontColor(COLORS.muted)
+              }.width('100%').alignItems(HorizontalAlign.Start)
+
+              Row({ space: 8 }) {
+                this.WelcomeCard('search', '解释图形', '读取选中图形坐标与图层', '解释当前选中的图形及其用途')
+                this.WelcomeCard('verify', '检查版图', '盘点图层、Cell 与 DRC 状态', '检查当前版图并说明需要关注的问题')
+              }.width('100%')
+              Row({ space: 8 }) {
+                this.WelcomeCard('edit', '提出修复', '生成可预览的最小修改方案', '根据当前选区与 DRC 证据，提出最小修复方案供我预览确认，并在修改后复检；资料不足时先说明，不猜测工艺规则。')
+                this.WelcomeCard('sparkles', '画反相器', '通过隔离脚本生成标准单元', '画一个反相器')
+              }.width('100%')
             }
             .width('100%')
-            .padding({ left: 18, right: 18, top: 28, bottom: 24 })
+            .padding({ top: 18, bottom: 14 })
           }
           ForEach(this.messages, (msg: ChatMessage) => {
             this.ChatMessageRow(msg)
@@ -2121,19 +2525,10 @@ export struct AiAssistantPanel {
           if (this.liveAssistantVisible()) {
             this.LiveAssistantRow()
           }
-          if (this.pendingSummary.length > 0) {
-            this.PendingChangeCard()
-          }
-          if (this.isLoading) {
+          if (this.isLoading && !this.liveAssistantVisible()) {
             Row({ space: 8 }) {
-              LoadingProgress().width(18).height(18).color(COLORS.primary)
-              Text(this.generationStatus || 'AI 正在处理…').fontSize(12).fontColor(COLORS.muted).layoutWeight(1)
-              if (this.canCancel) {
-                Button('取消生成').type(ButtonType.Normal).height(UI.compactControlHeight)
-                  .fontSize(UI.fontBody).fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
-                  .borderRadius(UI.controlRadius)
-                  .onClick(this.cancelGenerationAction)
-              }
+              LoadingProgress().width(16).height(16).color(COLORS.primary)
+              Text(this.generationStatus || '正在连接模型…').fontSize(12).fontColor(COLORS.muted).layoutWeight(1)
             }
             .width('100%')
             .padding({ top: 10, bottom: 10 })
@@ -2149,27 +2544,24 @@ export struct AiAssistantPanel {
               .borderRadius(UI.controlRadius)
               .margin({ top: 8 })
           }
-          if (!this.isLoading && (this.messages.length > 0 || this.checkpointSummary.length > 0) && this.pendingSummary.length === 0) {
+          if (!this.isLoading && this.pendingSummary.length === 0 && (this.hasInterruptedTurn() || this.checkpointSummary.length > 0)) {
             Row({ space: 8 }) {
-              Button('继续任务', { type: ButtonType.Normal }).height(UI.compactControlHeight).fontSize(UI.fontCaption)
-                .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
+              Button('继续任务', { type: ButtonType.Normal }).height(28).padding({ left: 10, right: 10 }).fontSize(UI.fontCaption)
+                .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(RADIUS.capsule)
                 .enabled(!this.configBusy && this.contextOptions.includeHistory).onClick(() => this.continueAgent(false))
-              Button('复检分析', { type: ButtonType.Normal }).height(UI.compactControlHeight).fontSize(UI.fontCaption)
-                .fontColor(COLORS.primary).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
-                .enabled(!this.configBusy).onClick(this.analyzeResultAction)
               if (this.errorMessage.length > 0) {
-                Button('重试未完成', { type: ButtonType.Normal }).height(UI.compactControlHeight).fontSize(UI.fontCaption)
-                  .fontColor(COLORS.primary).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
+                Button('重试未完成', { type: ButtonType.Normal }).height(28).padding({ left: 10, right: 10 }).fontSize(UI.fontCaption)
+                  .fontColor(COLORS.primary).backgroundColor(COLORS.primarySoft).borderRadius(RADIUS.capsule)
                   .enabled(!this.configBusy && this.contextOptions.includeHistory && this.latestUserPrompt().length > 0).onClick(() => this.continueAgent(true))
               }
-            }.width('100%').margin({ top: 8 })
-            if (this.checkpointSummary.length > 0) {
-              Button('恢复未载入产物', { type: ButtonType.Normal }).height(UI.compactControlHeight).fontSize(UI.fontCaption)
-                .fontColor(COLORS.primary).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
-                .enabled(!this.configBusy).onClick(this.recoverArtifactAction)
-            }
+              if (this.checkpointSummary.length > 0) {
+                Button('恢复未载入产物', { type: ButtonType.Normal }).height(28).padding({ left: 10, right: 10 }).fontSize(UI.fontCaption)
+                  .fontColor(COLORS.primary).backgroundColor(COLORS.primarySoft).borderRadius(RADIUS.capsule)
+                  .enabled(!this.configBusy).onClick(this.recoverArtifactAction)
+              }
+            }.width('100%').margin({ top: 6 })
           }
-          if (this.resultFallbackVisible() || this.canUndo) {
+          if (this.isExplicitActionReceipt()) {
             Row({ space: 8 }) {
               Text(this.receiptSummaryText())
                 .fontSize(UI.fontCaption)
@@ -2183,7 +2575,7 @@ export struct AiAssistantPanel {
                   .type(ButtonType.Normal)
                   .height(26)
                   .fontSize(UI.fontCaption)
-                  .borderRadius(UI.controlRadius)
+                  .borderRadius(RADIUS.capsule)
                   .fontColor(COLORS.primary)
                   .backgroundColor(COLORS.surface)
                   .border({ width: 1, color: COLORS.border })
@@ -2194,11 +2586,11 @@ export struct AiAssistantPanel {
             }
             .width('100%')
             .alignItems(VerticalAlign.Center)
-            .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+            .padding({ left: 10, right: 10, top: 7, bottom: 7 })
             .backgroundColor(COLORS.surfaceMuted)
-            .border({ width: 1, color: COLORS.border })
-            .borderRadius(UI.controlRadius)
-            .margin({ top: 10 })
+            .border({ width: 0.8, color: COLORS.border })
+            .borderRadius(10)
+            .margin({ top: 8 })
           }
         }
       }
@@ -2230,6 +2622,28 @@ export struct AiAssistantPanel {
         this.userScrollPending = false;
       }
     })
+    if (!this.followsLatest && !this.showConversations && !this.showContext && !this.showSettings) {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 5 }) {
+          WorkbenchIcon({ name: 'chevronDown', iconSize: 13, color: COLORS.primary })
+          Text(this.isLoading ? '回到底部 · 实时输出中' : '回到底部')
+            .fontSize(11)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(COLORS.primary)
+        }.alignItems(VerticalAlign.Center)
+      }
+      .height(28)
+      .padding({ left: 12, right: 12 })
+      .margin({ bottom: 8 })
+      .backgroundColor(COLORS.surface)
+      .border({ width: 1, color: withAlpha(COLORS.primary, 0.35) })
+      .borderRadius(RADIUS.capsule)
+      .onClick(() => {
+        this.followsLatest = true;
+        this.scrollConversationToLatest();
+      })
+    }
+    }.width('100%').layoutWeight(1)
     if (this.showSettings) { this.SettingsFooter() }
     if (this.showConversations && this.renamingConversationId.length > 0) { this.ConversationRenameFooter() }
   }
@@ -2251,18 +2665,147 @@ export struct AiAssistantPanel {
         this.showConversations = false;
         this.showContext = false;
         this.showSettings = false;
-        this.promptAction(prompt);
+        this.promptAction(prompt, false, this.sessionMode === 'readonly');
       })
+  }
+
+  @Builder
+  WelcomeCard(icon: string, title: string, desc: string, prompt: string) {
+    Button({ type: ButtonType.Normal }) {
+      Column({ space: 4 }) {
+        Row({ space: 6 }) {
+          WorkbenchIcon({ name: icon, iconSize: 14, color: COLORS.primary })
+          Text(title).fontSize(12).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).maxLines(1)
+        }.width('100%').alignItems(VerticalAlign.Center)
+        Text(desc).fontSize(11).fontColor(COLORS.muted).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+      }.width('100%').alignItems(HorizontalAlign.Start)
+    }
+    .layoutWeight(1)
+    .padding({ left: 11, right: 11, top: 10, bottom: 10 })
+    .backgroundColor(COLORS.surface)
+    .border({ width: 0.8, color: COLORS.border })
+    .borderRadius(12)
+    .enabled(!this.isLoading && !this.configBusy)
+    .onClick(() => {
+      if (this.isLoading || this.configBusy) return;
+      this.followsLatest = true;
+      this.promptAction(prompt, false, this.sessionMode === 'readonly');
+    })
+  }
+
+  @Builder
+  SlashCommandPalette() {
+    if (this.visibleSlashCommands().length > 0) {
+      Column({ space: 2 }) {
+        Row() {
+          Text('快捷斜杠指令')
+            .fontSize(10)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(COLORS.muted)
+            .layoutWeight(1)
+          Button('关闭', { type: ButtonType.Normal })
+            .height(20).padding({ left: 6, right: 6 }).fontSize(10).fontColor(COLORS.muted)
+            .backgroundColor(Color.Transparent)
+            .onClick(() => {
+              this.slashMenuForced = false;
+              if (this.inputText.trim() === '/') this.inputText = '';
+            })
+        }.width('100%').padding({ left: 8, right: 4, top: 4, bottom: 2 })
+
+        Scroll() {
+          Column({ space: 2 }) {
+            ForEach(this.visibleSlashCommands(), (spec: AiSlashCommandSpec) => {
+              Button({ type: ButtonType.Normal }) {
+                Row({ space: 8 }) {
+                  Text(spec.command)
+                    .fontSize(11)
+                    .fontFamily('monospace')
+                    .fontWeight(FontWeight.Bold)
+                    .fontColor(COLORS.primary)
+                    .width(68)
+                  Text(spec.title)
+                    .fontSize(12)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor(COLORS.ink)
+                  Text(spec.subtitle)
+                    .fontSize(10)
+                    .fontColor(COLORS.muted)
+                    .layoutWeight(1)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                }.width('100%').alignItems(VerticalAlign.Center)
+              }
+              .width('100%')
+              .height(32)
+              .padding({ left: 8, right: 8 })
+              .backgroundColor(Color.Transparent)
+              .borderRadius(8)
+              .onClick(() => { this.executeSlashSpec(spec); })
+            }, (spec: AiSlashCommandSpec): string => spec.command)
+          }.width('100%')
+        }
+        .width('100%')
+        .constraintSize({ maxHeight: 168 })
+        .scrollBar(BarState.Auto)
+      }
+      .width('100%')
+      .padding(6)
+      .backgroundColor(COLORS.surface)
+      .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.35) })
+      .borderRadius(12)
+    }
+  }
+
+  @Builder
+  CompactContextBar() {
+    Row({ space: 6 }) {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 6 }) {
+          Circle({ width: 6, height: 6 })
+            .fill(this.contextOptions.includeLayout ? COLORS.primary : COLORS.muted)
+          Text(`${this.fileName || '未命名'} · ${this.cellName || this.topCellName || 'TOP'}` +
+            (this.selectionCount > 0 ? ` · 已选 ${this.selectionCount}` : ''))
+            .fontSize(11)
+            .fontColor(COLORS.muted)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }.alignItems(VerticalAlign.Center)
+      }
+      .height(26)
+      .padding({ left: 8, right: 8 })
+      .backgroundColor(COLORS.surfaceMuted)
+      .borderRadius(RADIUS.capsule)
+      .layoutWeight(1)
+      .enabled(!this.isLoading && !this.configBusy)
+      .accessibilityText('上下文范围')
+      .onClick(() => this.openManagement('context'))
+
+      if (aiService.getConfig().provider !== AiProvider.DEMO_MODE) {
+        Button('连接设置', { type: ButtonType.Normal })
+          .height(26)
+          .padding({ left: 8, right: 8 })
+          .fontSize(11)
+          .fontColor(COLORS.primary)
+          .backgroundColor(COLORS.primarySoft)
+          .borderRadius(RADIUS.capsule)
+          .enabled(!this.isLoading && !this.configBusy)
+          .onClick(this.openAgentConnectionAction)
+      }
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+    .border({ width: { bottom: 0.6 }, color: COLORS.border })
   }
 
   @Builder
   DesktopPanel() {
     Column() {
-      Row({ space: 6 }) {
+      // Single-row compact DSH Agent Header (with Minimize-to-Canvas-HUD button)
+      Row({ space: 5 }) {
         Button({ type: ButtonType.Normal }) {
           WorkbenchIcon({ name: this.showConversations || this.showContext || this.showSettings ? 'chevronLeft' : 'menu',
-            iconSize: 18, color: COLORS.ink })
-        }.width(32).height(32).padding(0).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
+            iconSize: 17, color: COLORS.ink })
+        }.width(30).height(30).padding(0).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
           .accessibilityText(this.showConversations || this.showContext || this.showSettings ? '返回聊天' : '会话管理')
           .onClick(() => {
             if (this.showConversations || this.showContext || this.showSettings) {
@@ -2270,19 +2813,63 @@ export struct AiAssistantPanel {
               this.followsLatest = true; this.scrollConversationToLatest();
             } else { this.openManagement('conversations'); }
           })
-        Text(this.showConversations ? '会话管理' : (this.showContext ? '上下文' : (this.showSettings ? '模型设置' : 'AI 版图助手')))
-          .fontSize(UI.titleSize).fontWeight(FontWeight.Bold).fontColor(COLORS.ink).layoutWeight(1).maxLines(1)
+
+        Text(this.showConversations ? '会话管理' : (this.showContext ? '上下文' : (this.showSettings ? '模型设置' : 'AI 助手')))
+          .fontSize(15).fontWeight(FontWeight.Bold).fontColor(COLORS.ink).maxLines(1)
+
         if (!this.showConversations && !this.showContext && !this.showSettings) {
-          Button('供应商/模型', { type: ButtonType.Normal }).height(30).padding({ left: 10, right: 10 }).fontSize(UI.fontCaption)
-            .fontColor(COLORS.ink).backgroundColor(COLORS.surface)
-            .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius)
-            .accessibilityText('管理供应商、模型与获取模型列表').onClick(() => this.openManagement('settings'))
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 5 }) {
+              Circle({ width: 6, height: 6 })
+                .fill(aiService.getConfig().provider === AiProvider.DEMO_MODE ? COLORS.muted : COLORS.success)
+              Text(this.shortModelPillLabel())
+                .fontSize(11)
+                .fontColor(COLORS.ink)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              WorkbenchIcon({ name: 'chevronDown', iconSize: 10, color: COLORS.muted })
+            }.alignItems(VerticalAlign.Center)
+          }
+          .height(28)
+          .padding({ left: 8, right: 7 })
+          .backgroundColor(COLORS.surface)
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(RADIUS.capsule)
+          .layoutWeight(1)
+          .accessibilityText('供应商/模型')
+          .onClick(() => this.openManagement('settings'))
+
+          Button({ type: ButtonType.Normal }) {
+            WorkbenchIcon({ name: 'plus', iconSize: 15, color: COLORS.ink })
+          }
+          .width(28).height(28).padding(0)
+          .backgroundColor(COLORS.surface)
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(UI.controlRadius)
+          .enabled(!this.isLoading && !this.configBusy)
+          .accessibilityText('新建会话')
+          .onClick(() => { this.createConversation(); })
+        } else {
+          Blank()
         }
-        Button({ type: ButtonType.Normal }) { WorkbenchIcon({ name: 'close', iconSize: 18, color: COLORS.muted }) }
-          .width(32).height(32).padding(0).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
+
+        Button({ type: ButtonType.Normal }) {
+          WorkbenchIcon({ name: 'minimize', iconSize: 16, color: COLORS.ink })
+        }
+        .id('ai-panel-minimize-btn')
+        .width(28).height(28).padding(0)
+        .backgroundColor(Color.Transparent)
+        .borderRadius(UI.controlRadius)
+        .accessibilityText('收起窗口并保留图纸运行提示')
+        .bindTips('收起窗口看全屏图纸')
+        .onClick(() => this.minimizeAction())
+
+        Button({ type: ButtonType.Normal }) { WorkbenchIcon({ name: 'close', iconSize: 17, color: COLORS.muted }) }
+          .width(28).height(28).padding(0).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
           .accessibilityText('关闭 AI 助手').onClick(() => this.closeAction())
-      }.width('100%').height(UI.titleBarHeight).padding({ left: 12, right: 12 })
-        .backgroundColor(COLORS.surfaceMuted).border({ width: { bottom: 1 }, color: COLORS.border })
+      }.width('100%').height(46).padding({ left: 10, right: 10 })
+        .backgroundColor(withAlpha(COLORS.surfaceMuted, 0.72)).border({ width: { bottom: 0.8 }, color: COLORS.border })
+
       if ((this.showConversations || this.showContext || this.showSettings) && (this.isLoading || this.configBusy)) {
         Row({ space: 8 }) {
           Text('任务运行中，暂停会话与配置修改').fontSize(UI.fontCaption).fontColor(COLORS.muted).layoutWeight(1)
@@ -2290,16 +2877,26 @@ export struct AiAssistantPanel {
             Button('取消生成', { type: ButtonType.Normal }).height(UI.compactControlHeight).fontSize(UI.fontCaption)
               .backgroundColor(COLORS.surfaceMuted).fontColor(COLORS.ink).borderRadius(UI.controlRadius).onClick(this.cancelGenerationAction)
           }
-        }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 8 })
+        }.width('100%').padding({ left: 14, right: 14, top: 8, bottom: 8 })
       }
       if (!this.showConversations && !this.showContext && !this.showSettings) {
-        this.AgentConnectionSummary()
-        this.ContextChips()
+        this.CompactContextBar()
       }
       this.DesktopConversation()
+
+      // DSH-Harmony Docked Approval Card pinned right above the input dock
+      if (!this.showConversations && !this.showContext && !this.showSettings && this.pendingSummary.length > 0) {
+        Column() {
+          this.PendingChangeCard()
+        }.width('100%').padding({ left: 12, right: 12, bottom: 4 })
+      }
+
+      // Unified Modern Agent Input Dock (Slash Commands + Agent/ReadOnly Mode Pill + Enter-to-Send)
       if (!this.showConversations && !this.showContext && !this.showSettings) {
-        Column({ space: 8 }) {
-          if (this.showQuickActions) {
+        Column({ space: 6 }) {
+          this.SlashCommandPalette()
+
+          if (this.showQuickActions && this.messages.length > 0 && this.pendingSummary.length === 0 && this.visibleSlashCommands().length === 0) {
             Scroll() {
               Row({ space: 6 }) {
                 this.QuickPrompt('解释图形', '解释当前选中的图形及其用途')
@@ -2307,55 +2904,128 @@ export struct AiAssistantPanel {
                 this.QuickPrompt('定位问题', '根据当前 DRC 具体问题，选中并定位第一个问题涉及的图形，不修改几何。')
                 this.QuickPrompt('提出修复', '根据当前选区与 DRC 证据，提出最小修复方案供我预览确认，并在修改后复检；资料不足时先说明，不猜测工艺规则。')
                 this.QuickPrompt('画反相器', '画一个反相器')
-                this.TemplateToggle()
               }
             }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
               .clip(true)
           }
-          Row({ space: 8 }) {
-            TextArea({ text: this.inputText, placeholder: this.pendingSummary.length > 0 ? '继续补充修改要求…' : '描述你的版图需求…' })
-              .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); }).layoutWeight(1).height(72)
+
+          Column({ space: 4 }) {
+            TextArea({
+              text: this.inputText,
+              placeholder: this.sessionMode === 'readonly'
+                ? '只读问答模式：提问或分析版图（不生成修改方案）…'
+                : (this.pendingSummary.length > 0 ? '继续补充修改要求，或输入 / 唤出快捷指令…' : '描述版图需求（Enter 发送，Shift+Enter 换行，/ 快捷指令）…')
+            })
+              .id('ai-composer-textarea')
+              .onKeyEvent((event: KeyEvent) => {
+                event.stopPropagation();
+                if (this.desktopMode && event.type === KeyType.Down &&
+                  canvasKeyName(event.keyCode, event.keyText) === 'ENTER' &&
+                  event.getModifierKeyState?.(['Shift']) !== true) {
+                  this.sendInput();
+                }
+              })
+              .width('100%').height(60)
               .fontSize(UI.fontBody).fontColor(COLORS.ink).placeholderColor(COLORS.muted)
-              .backgroundColor(Color.Transparent).padding({ left: 12, right: 6, top: 10, bottom: 10 })
-              .borderRadius(UI.controlRadius)
-              .onChange((value: string) => { this.inputText = value; })
-            Button({ type: ButtonType.Normal }) {
-              this.SendArrowGlyph()
-            }.width(36).height(36).padding(0)
-              .backgroundColor(COLORS.primary).borderRadius(UI.controlRadius)
-              .enabled(this.inputText.trim().length > 0 && !this.isLoading && !this.configBusy)
-              .accessibilityText('发送消息').onClick(() => this.sendInput())
-          }.width('100%').padding({ right: 10 }).backgroundColor(COLORS.surface)
-            .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius).alignItems(VerticalAlign.Center)
-          Row({ space: 10 }) {
-            Button(this.showQuickActions ? '收起建议' : '快捷建议', { type: ButtonType.Normal })
-              .height(24).fontSize(UI.fontCaption).padding(0).fontColor(COLORS.muted).backgroundColor(Color.Transparent)
-              .borderRadius(UI.controlRadius)
-              .onClick(() => this.showQuickActions = !this.showQuickActions)
-            Button('上下文范围', { type: ButtonType.Normal })
-              .height(24).fontSize(UI.fontCaption).padding(0).fontColor(COLORS.muted).backgroundColor(Color.Transparent)
-              .borderRadius(UI.controlRadius)
+              .backgroundColor(Color.Transparent).padding({ left: 12, right: 12, top: 9, bottom: 4 })
+              .onChange((value: string) => {
+                this.inputText = value;
+                if (!value.trimStart().startsWith('/')) {
+                  this.slashMenuForced = false;
+                }
+              })
+
+            Row({ space: 5 }) {
+              Button({ type: ButtonType.Normal }) {
+                Row({ space: 4 }) {
+                  Circle({ width: 6, height: 6 })
+                    .fill(this.sessionMode === 'readonly' ? COLORS.warning : COLORS.primary)
+                  Text(this.sessionMode === 'readonly' ? '只读问答' : 'Agent')
+                    .fontSize(11)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor(this.sessionMode === 'readonly' ? COLORS.warning : COLORS.primary)
+                }.alignItems(VerticalAlign.Center)
+              }
+              .id('ai-mode-toggle-btn')
+              .height(26)
+              .padding({ left: 8, right: 8 })
+              .backgroundColor(this.sessionMode === 'readonly' ? withAlpha(COLORS.warning, 0.14) : COLORS.primarySoft)
+              .borderRadius(RADIUS.capsule)
               .enabled(!this.isLoading && !this.configBusy)
-              .onClick(() => this.openManagement('context'))
-            Blank()
-            Button('Python 版图', { type: ButtonType.Normal }).height(24).fontSize(UI.fontCaption).padding(0)
-              .fontColor(COLORS.muted).backgroundColor(Color.Transparent).borderRadius(UI.controlRadius)
-              .enabled(!this.isLoading && !this.configBusy).onClick(this.openPythonAction)
-          }.width('100%')
+              .accessibilityText('切换 Agent 编辑模式与只读问答模式')
+              .onClick(() => this.toggleSessionModeAction())
+
+              Button({ type: ButtonType.Normal }) {
+                WorkbenchIcon({ name: 'slash', iconSize: 13, color: this.visibleSlashCommands().length > 0 ? COLORS.primary : COLORS.muted })
+              }
+              .id('ai-slash-menu-btn')
+              .width(26).height(26).padding(0)
+              .backgroundColor(this.visibleSlashCommands().length > 0 ? COLORS.primarySoft : COLORS.surfaceMuted)
+              .borderRadius(RADIUS.capsule)
+              .enabled(!this.isLoading && !this.configBusy)
+              .accessibilityText('斜杠快捷指令')
+              .onClick(() => { this.slashMenuForced = !this.slashMenuForced; })
+
+              Button('阵列', { type: ButtonType.Normal })
+                .height(26).padding({ left: 8, right: 8 }).fontSize(11)
+                .fontColor(this.showTaskTemplate ? COLORS.primary : COLORS.muted)
+                .backgroundColor(this.showTaskTemplate ? COLORS.primarySoft : COLORS.surfaceMuted)
+                .borderRadius(RADIUS.capsule)
+                .enabled(!this.isLoading && !this.configBusy)
+                .onClick(() => { this.showTaskTemplate = !this.showTaskTemplate; })
+
+              Button('Python', { type: ButtonType.Normal })
+                .height(26).padding({ left: 8, right: 8 }).fontSize(11)
+                .fontColor(COLORS.muted).backgroundColor(COLORS.surfaceMuted).borderRadius(RADIUS.capsule)
+                .enabled(!this.isLoading && !this.configBusy)
+                .onClick(this.openPythonAction)
+
+              Blank()
+
+              if (this.messages.length > 0 && this.pendingSummary.length === 0 && !this.isCompact) {
+                Button(this.showQuickActions ? '收起建议' : '建议', { type: ButtonType.Normal })
+                  .height(26).padding({ left: 5, right: 5 }).fontSize(11)
+                  .fontColor(COLORS.muted).backgroundColor(Color.Transparent).borderRadius(RADIUS.capsule)
+                  .onClick(() => { this.showQuickActions = !this.showQuickActions; })
+              }
+
+              if (this.isLoading && this.canCancel) {
+                Button('停止', { type: ButtonType.Normal })
+                  .height(30).padding({ left: 12, right: 12 }).fontSize(12)
+                  .fontColor(Color.White).backgroundColor(COLORS.danger).borderRadius(RADIUS.capsule)
+                  .accessibilityText('取消生成')
+                  .onClick(this.cancelGenerationAction)
+              } else {
+                Button({ type: ButtonType.Normal }) {
+                  this.SendArrowGlyph()
+                }.width(32).height(32).padding(0)
+                  .backgroundColor(this.inputText.trim().length > 0 ? COLORS.primary : COLORS.surfaceMuted)
+                  .borderRadius(RADIUS.capsule)
+                  .enabled(this.inputText.trim().length > 0 && !this.isLoading && !this.configBusy)
+                  .accessibilityText('发送消息').onClick(() => this.sendInput())
+              }
+            }.width('100%').padding({ left: 8, right: 8, bottom: 8 }).alignItems(VerticalAlign.Center)
+          }
+          .width('100%')
+          .backgroundColor(COLORS.surface)
+          .border({
+            width: 1,
+            color: this.sessionMode === 'readonly'
+              ? withAlpha(COLORS.warning, 0.42)
+              : (this.pendingSummary.length > 0 ? withAlpha(COLORS.primary, 0.35) : COLORS.border)
+          })
+          .borderRadius(16)
         }.width('100%').alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 8, bottom: 12 })
-          .border({ width: { top: 1 }, color: COLORS.border })
+          .padding({ left: 12, right: 12, top: 8, bottom: 12 })
+          .border({ width: { top: 0.8 }, color: COLORS.border })
       }
-    }.width(this.panelWidth).height(this.panelHeight)
+    }.width(this.desktopMode ? this.panelWidth : Math.min(this.panelWidth, this.isCompact ? 324 : 380))
+      .height(this.desktopMode ? this.panelHeight : Math.min(this.panelHeight, 640))
       .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay'))).clip(true)
   }
 
   build() {
-    if (this.desktopMode) {
-      this.DesktopPanel()
-    } else {
-      this.LegacyPanel()
-    }
+    this.DesktopPanel()
   }
 }
 
@@ -2968,7 +3638,7 @@ export struct LayerStylePanel {
     const next: UiLayer = cloneUiLayerModel(this.actualLayer) as UiLayer;
     if (field === 'lineStyle' && typeof value === 'string') next.lineStyle = value;
     else if (field === 'fillStyle' && typeof value === 'string') next.fillStyle = value;
-    else if (field === 'color' && typeof value === 'string') next.color = value;
+    else if (field === 'color' && typeof value === 'string') { next.color = value; next.fillColor = undefined; }
     else if (field === 'transparency' && value === 'default') next.transparency = undefined;
     else if (field === 'transparency' && typeof value === 'number') next.transparency = Math.round(value);
     else return;

@@ -5,7 +5,11 @@ import { cleanDbuNm } from '../main/ets/services/PrecisionService';
 import { GdsByteWriter } from '../main/ets/services/LayoutExportService';
 import { formatZoomPercent, worldToScreenPx, screenToWorldPx } from '../main/ets/common/constants';
 import { worldViewportFromCamera } from '../main/ets/services/HierarchyExpandService';
-import { LayerGroup } from '../main/ets/common/types';
+import { LayerGroup, UiLayer } from '../main/ets/common/types';
+import { AiService } from '../main/ets/services/AiService';
+import { queryAiWorkbench } from '../main/ets/services/AiWorkbenchQuery';
+import { parseLyp, mergeLypIntoLayers, entriesFromUiLayers, formatLyp } from '../main/ets/services/LypService';
+import { splitMarkdownSegments, repairStreamingMarkdown, describeAiToolCall, matchAiSlashCommands, buildAgentCanvasHudModel } from '../main/ets/services/AiAgentPresentation';
 import type { LayoutPort, LayoutCrossSection, LayoutContextRecord } from '../main/ets/models/LayoutPort';
 import type { LayoutPropRecord, NativeShape } from '../main/cpp/types/libhongtu/Index';
 import { EditService, editService, EditStructureState } from '../main/ets/services/EditService';
@@ -754,6 +758,119 @@ export default function localUnitTest(): void {
       expect(JSON.stringify(editor.getCurrentCellStack())).assertEqual('[0]');
       expect(editor.getCurrentCellId()).assertEqual(0);
       expect(zoomPercent).assertEqual(0.22);
+    });
+
+    it('allows_preview_confirmation_edits_reports_query_selection_and_preserves_lyp_fill_color', 0, (): void => {
+      const ai: AiService = new AiService();
+      expect(ai.isAgentReadOnlyRequest('将当前选中的矩形向右移动10000纳米，先预览待确认的修改，不要直接执行。')).assertFalse();
+      expect(ai.isAgentReadOnlyRequest('请把当前选中的矩形向右移动10000纳米，只生成待确认预览，不要直接执行。')).assertFalse();
+      expect(ai.isAgentReadOnlyRequest('请只读查询当前编辑Cell和选中图形的编号、图层、左下坐标、宽度和高度，并报告真实数据，不要修改版图。')).assertTrue();
+      expect(ai.isAgentReadOnlyRequest('不要画反相器')).assertTrue();
+      expect(ai.createAgentTask('将选中的矩形向右移动10000纳米', false, true).readOnly).assertTrue();
+      expect(ai.createAgentTask('将选中的矩形向右移动10000纳米', false, false).readOnly).assertFalse();
+
+      const testShape: Shape = {
+        id: 1,
+        type: ShapeType.RECT,
+        layerNumber: 4,
+        datatype: 0,
+        ownerCellId: 0,
+        points: [{ x: -150000, y: -150000 }, { x: 150000, y: 150000 }],
+        selected: true
+      };
+      const replyWithSel = queryAiWorkbench(
+        { kind: 'shapes', layer: 4, datatype: 0 },
+        {
+          context: {
+            coordinateUnit: 'nm',
+            dbuNm: 100,
+            documentIdentity: 'doc-ai-qa',
+            documentRevision: 26,
+            layoutContextIncluded: true,
+            selectionContextIncluded: true,
+            topCellId: 0,
+            currentCell: { id: 0, name: 'TOP', shapeCount: 1, children: [] },
+            currentLayer: 4,
+            shapeCount: 1,
+            selectedShape: null,
+            layers: [],
+            cells: [{ id: 0, name: 'TOP', shapeCount: 1, children: [] }]
+          },
+          shapes: [testShape],
+          cells: [{ id: 0, name: 'TOP', shapeCount: 1, children: [] }],
+          drc: [],
+          rules: [],
+          ports: [],
+          drcCurrent: false,
+          ruleSource: 'none'
+        }
+      );
+      expect(replyWithSel.items.length).assertEqual(1);
+      expect((replyWithSel.items[0].data as Shape).selected).assertTrue();
+
+      const lypXml: string = '<layer-properties><properties><frame-color>#2866cc</frame-color><fill-color>#68a3ee</fill-color><name>QA_STYLE_4</name><source>4/0@1</source><visible>true</visible></properties></layer-properties>';
+      const parsed = parseLyp(lypXml);
+      const baseLayers: UiLayer[] = [{
+        layerNumber: 4,
+        datatype: 0,
+        chineseName: '多晶硅',
+        englishName: 'Poly',
+        color: '#ff3b30',
+        visible: true,
+        elementCount: 1,
+        group: LayerGroup.DOPING
+      }];
+      const merged = mergeLypIntoLayers(baseLayers, parsed.layers);
+      expect(merged.layers[0].color).assertEqual('#2866cc');
+      expect(merged.layers[0].fillColor).assertEqual('#68a3ee');
+      const exportedXml: string = formatLyp(entriesFromUiLayers(merged.layers));
+      const reparsed = parseLyp(exportedXml);
+      expect(reparsed.layers[0].frameColor).assertEqual('#2866cc');
+      expect(reparsed.layers[0].fillColor).assertEqual('#68a3ee');
+    });
+
+    it('splits_gfm_tables_formats_semantic_tools_and_builds_two_phase_canvas_hud', 0, (): void => {
+      const md: string = '查询结果如下：\n\n| 图形ID | 图层 | 左下坐标(nm) | 尺寸(nm) |\n| :--- | :---: | ---: | ---: |\n| #1 | 4/0 | (-140000, -150000) | 300000 x 300000 |\n\n```python\n# 代码块内管道 | a | b | 不应被拆为表格\nx = 1 | 2\n```';
+      const segs = splitMarkdownSegments(md);
+      expect(segs.length).assertEqual(3);
+      expect(segs[0].kind).assertEqual('markdown');
+      expect(segs[1].kind).assertEqual('table');
+      expect(segs[1].table.headers.length).assertEqual(4);
+      expect(segs[1].table.rows.length).assertEqual(1);
+      expect(segs[1].table.aligns[2]).assertEqual('right');
+      expect(segs[1].table.totalWidth > 350).assertTrue();
+      expect(segs[2].kind).assertEqual('markdown');
+
+      const repaired: string = repairStreamingMarkdown('正在输出代码：\n```python\nimport hongtu as db');
+      expect(repaired.endsWith('```')).assertTrue();
+
+      const toolDesc = describeAiToolCall({
+        id: 'call-1',
+        name: 'query_editor',
+        status: 'completed',
+        arguments: '{"kind":"shapes","layer":4,"datatype":0,"selectedOnly":true}',
+        result: '{"success":true,"source":"shapes","total":1,"truncated":false}'
+      }, false);
+      expect(toolDesc.inlineTarget.includes('L4/0')).assertTrue();
+      expect(toolDesc.inlineTarget.includes('1 项')).assertTrue();
+
+      expect(matchAiSlashCommands('/ex').length).assertEqual(1);
+      expect(matchAiSlashCommands('/ex')[0].command).assertEqual('/explain');
+
+      const hudPhase1 = buildAgentCanvasHudModel(true, '', '', false, [{
+        id: 'call-2',
+        name: 'query_editor',
+        status: 'running',
+        arguments: '{"kind":"shapes","layer":4,"datatype":0}',
+        result: ''
+      }], '', '', 1000, 6000);
+      expect(hudPhase1.phase).assertEqual('drawing');
+      expect(hudPhase1.elapsedText).assertEqual('00:05');
+      expect(hudPhase1.detail.includes('L4/0')).assertTrue();
+
+      const hudPhase2 = buildAgentCanvasHudModel(false, '1 项操作待确认', '', false, [], '', '', 0, 6000);
+      expect(hudPhase2.phase).assertEqual('preview');
+      expect(hudPhase2.badge.includes('第二期')).assertTrue();
     });
   });
 }

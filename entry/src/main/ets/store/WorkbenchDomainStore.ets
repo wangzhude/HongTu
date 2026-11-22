@@ -292,6 +292,9 @@ export class AiAssistantStore {
   @Trace aiCheckpointSummary: string = '';
   @Trace aiProjectNote: string = '';
   @Trace aiReviewGroups: AiReviewGroup[] = [];
+  @Trace aiRunStartedAt: number = 0;
+  @Trace aiSessionMode: 'agent' | 'readonly' = 'agent';
+  @Trace aiMinimizedNotice: string = '';
 }
 
 export function connectDocumentDomainStore(): DocumentDomainStore {

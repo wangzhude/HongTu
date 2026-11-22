@@ -126,6 +126,23 @@ class AssistantTaskPolicy(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('"status":"pending"', "".join(chunks).replace(" ", "").replace('\\"', '"'))
                 self.assertFalse(state.artifact_generation_allowed)
 
+    async def test_preview_before_apply_edit_requests_allow_pending_editor_commands(self):
+        for goal in (
+            "将当前选中的矩形向右移动10000纳米，先预览待确认的修改，不要直接执行。",
+            "将当前选中的矩形向右移动10000纳米。请生成待确认方案，不要直接执行。",
+            "请把当前选中的矩形向右移动10000纳米，只生成待确认预览，不要直接执行。",
+            "Move selected rectangle right by 10000 nm, preview pending changes and do not directly execute.",
+        ):
+            with self.subTest(goal=goal):
+                payload = request_payload(goal)
+                chunks, state = await collect(
+                    mod.build_agent(tool_model("propose_editor_commands", {"commands": [MOVE]})),
+                    payload=payload,
+                )
+                self.assertFalse(state.read_only)
+                self.assertEqual(state.commands_proposed, 1)
+                self.assertTrue(any(e.get("name") == "hongtu.commands" for e in parse_sse(chunks)))
+
     def test_legacy_and_empty_profile_cannot_downgrade_original_inverter_requirement(self):
         for value in (None, "", "generic_inverter"):
             for payload in (request_payload(), recovery_payload()):
@@ -230,7 +247,6 @@ class AssistantTaskPolicyHTTP(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(any(e.get("name") == "hongtu.commands" for e in decode_sse(raw)))
         self.assert_slot_available()
-
 
 if __name__ == "__main__":
     unittest.main()

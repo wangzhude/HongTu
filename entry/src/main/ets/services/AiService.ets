@@ -978,8 +978,24 @@ export class AiService {
       commandStatus: success ? commandStatus : 'failed' }]);
   }
 
+  private stripConfirmationPreviewQualifiers(text: string): string {
+    if (!/待确认|预览|待审阅|审阅|确认方案|待应用|\b(?:preview|confirm|pending|review)\b/i.test(text)) {
+      return text;
+    }
+    let cleaned: string = text.replace(
+      /(?:请)?(?:不要|不用|无需|不需要|请勿|勿|别)\s*(?:直接|自动|立即|马上)\s*(?:执行|应用|提交|生效|落盘|改动|修改)(?:该|此|上述|这些)?(?:操作|命令|方案|修改|更改|改动)?/gi,
+      ''
+    );
+    cleaned = cleaned.replace(
+      /\b(?:do\s+not|don['’]t|without|never)\s+(?:directly|immediately|auto(?:matically)?)\s+(?:execute|apply|commit)\b/gi,
+      ''
+    );
+    return cleaned;
+  }
+
   private isNonExecutingRequest(text: string): boolean {
-    return /不要|不用|无需|不需要|不想|不能|不必|不是|不画|不创建|不生成|不绘制|别|勿|禁止|停止|取消|解释|说明|讲解|讲讲|介绍|告诉我|步骤|如果|假设|假如|为什么|为何|怎么|如何|帮助|分析|是什么|教程|教我|区别|比较|\b(?:don't|don’t|do\s+not|not|no|never|without|avoid|cancel|stop|what|why|how|explain|describe|help|analy[sz]e|tutorial|compare)\b/i.test(text);
+    const policyText: string = this.stripConfirmationPreviewQualifiers(text);
+    return /不要|不用|无需|不需要|不想|不能|不必|不是|不画|不创建|不生成|不绘制|别|勿|禁止|停止|取消|解释|说明|讲解|讲讲|介绍|告诉我|步骤|如果|假设|假如|为什么|为何|怎么|如何|帮助|分析|是什么|教程|教我|区别|比较|\b(?:don't|don’t|do\s+not|not|no|never|without|avoid|cancel|stop|what|why|how|explain|describe|help|analy[sz]e|tutorial|compare)\b/i.test(policyText);
   }
 
   redactConversationText(text: string): string {
@@ -1025,7 +1041,7 @@ export class AiService {
       ? 'generic_inverter' : undefined;
   }
 
-  createAgentTask(prompt: string, resumeTask: boolean = false): AiAgentTask {
+  createAgentTask(prompt: string, resumeTask: boolean = false, forceReadOnly: boolean = false): AiAgentTask {
     let originalRequest: string = prompt;
     let previous: AiAgentTask | undefined;
     if (resumeTask) {
@@ -1056,7 +1072,7 @@ export class AiService {
     }
     originalRequest = this.redactConversationText(originalRequest);
     if (originalRequest.trim().length === 0 || originalRequest.length > 16000) throw new Error('原任务须为 1–16000 字符');
-    const readOnly: boolean = this.isAgentReadOnlyRequest(originalRequest) || previous?.readOnly === true;
+    const readOnly: boolean = forceReadOnly || this.isAgentReadOnlyRequest(originalRequest) || previous?.readOnly === true;
     const artifactGenerationAllowed: boolean = !readOnly &&
       /画|创建|生成|绘制|布局|添加|阵列|\b(?:draw|create|generate|build|layout|add)\b/i.test(originalRequest) &&
       !/删除|移除|清除|擦除|\b(?:delete|remove|erase|clear)\b/i.test(originalRequest) &&

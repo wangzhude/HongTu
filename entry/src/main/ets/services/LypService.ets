@@ -1249,7 +1249,7 @@ export function entriesFromUiLayers(layers: UiLayer[]): LypLayerEntry[] {
     e.declaredEmpty = l.elementCount === 0;
     e.groupName = l.group; // LayerGroup 闭枚举的中文值即组名
     e.frameColor = l.color;
-    e.fillColor = l.color;
+    e.fillColor = l.fillColor !== undefined && l.fillColor.length > 0 ? l.fillColor : l.color;
     e.visible = l.visible;
     e.transparency = l.transparency !== undefined ? clampNum(l.transparency, 0, 100) : 0;
     e.lineWidth = l.lineWidth !== undefined ? Math.max(0, Math.round(l.lineWidth)) : 0;
@@ -1298,6 +1298,11 @@ export function mergeLypIntoLayers(layers: UiLayer[], entries: LypLayerEntry[]):
     } else if (e.fillColor.length > 0) {
       updated.color = e.fillColor;
     }
+    if (e.fillColor.length > 0) {
+      updated.fillColor = e.fillColor;
+    } else if (e.frameColor.length > 0) {
+      updated.fillColor = undefined;
+    }
     updated.transparency = e.transparency;
     if (e.lineWidth > 0) {
       updated.lineWidth = e.lineWidth;
@@ -1325,7 +1330,8 @@ export function mergeLypIntoLayers(layers: UiLayer[], entries: LypLayerEntry[]):
       if (e.declaredEmpty === true || e.sourceName !== undefined) {
         next.push({ layerNumber: e.layerNumber, datatype: e.datatype,
           chineseName: e.displayName || e.sourceName || `图层${e.layerNumber}`, englishName: `L${e.layerNumber}`,
-          sourceName: e.sourceName, color: e.frameColor || e.fillColor || '#808080', visible: e.visible,
+          sourceName: e.sourceName, color: e.frameColor || e.fillColor || '#808080',
+          fillColor: e.fillColor.length > 0 ? e.fillColor : undefined, visible: e.visible,
           elementCount: 0, group: mapGroupName(e.groupName).group, lineWidth: e.lineWidth,
           lineStyle: e.lineStyle, fillStyle: e.fillStyle, transparency: e.transparency, selectable: e.selectMode > 0 });
         applied++;

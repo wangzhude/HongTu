@@ -55,7 +55,8 @@ export function queryAiWorkbench(query: AiEditorQuery, source: AiQuerySource): A
       const position: number = matched++;
       if (position < reply.offset || rows.length >= limit) continue;
       const copy: Shape = { id: shape.id, type: shape.type, layerNumber: shape.layerNumber, datatype: shape.datatype,
-        ownerCellId: shape.ownerCellId, cellId: shape.cellId, points: shape.points.slice(0, 128).map((point: Point): Point => ({ x: point.x, y: point.y })), selected: false,
+        ownerCellId: shape.ownerCellId, cellId: shape.cellId, points: shape.points.slice(0, 128).map((point: Point): Point => ({ x: point.x, y: point.y })),
+        selected: source.context.selectionContextIncluded !== false && shape.selected === true,
         pathWidth: shape.pathWidth, pathType: shape.pathType, pathBeginExtension: shape.pathBeginExtension,
         pathEndExtension: shape.pathEndExtension, pathWidthAbsolute: shape.pathWidthAbsolute,
         text: shape.text?.substring(0, 1024), rotation: shape.rotation, mirror: shape.mirror, magnification: shape.magnification,

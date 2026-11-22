@@ -534,13 +534,46 @@ export struct PythonLayoutPanel {
       }.width('100%').alignItems(HorizontalAlign.Start)
       Column({ space: 8 }) {
         Text('描述版图需求').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
+        Scroll() {
+          Row({ space: 6 }) {
+            Button('圆孔光子晶体', { type: ButtonType.Normal }).height(26).padding({ left: 10, right: 10 }).fontSize(11)
+              .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(999).enabled(!this.busy)
+              .onClick(() => {
+                this.inputMode = 'new';
+                this.requestText = '生成 5x5 圆孔光子晶体阵列，周期 500nm，孔半径 120nm，位于图层 1/0，保留独立单元层级。';
+                this.persistDraft();
+              })
+            Button('90° 波导弯曲', { type: ButtonType.Normal }).height(26).padding({ left: 10, right: 10 }).fontSize(11)
+              .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(999).enabled(!this.busy)
+              .onClick(() => {
+                this.inputMode = 'new';
+                this.requestText = '生成单模硅波导 90 度圆弧弯曲，波导宽度 450nm，弯曲半径 5000nm，位于图层 1/0。';
+                this.persistDraft();
+              })
+            Button('CMOS 反相器', { type: ButtonType.Normal }).height(26).padding({ left: 10, right: 10 }).fontSize(11)
+              .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(999).enabled(!this.busy)
+              .onClick(() => {
+                this.inputMode = 'new';
+                this.requestText = '生成标准 CMOS 反相器单元，包含有源区、多晶硅栅极、金属互连与接触孔。';
+                this.persistDraft();
+              })
+            Button('当前文档阵列化', { type: ButtonType.Normal }).height(26).padding({ left: 10, right: 10 }).fontSize(11)
+              .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(999).enabled(!this.busy)
+              .onClick(() => {
+                this.inputMode = 'document';
+                this.requestText = '在当前文档副本中将顶层图形沿 X 方向复制 3 列，列间距 2000nm。';
+                this.persistDraft();
+              })
+          }
+        }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
         TextArea({ text: this.requestText, placeholder: '例如：生成圆孔光子晶体阵列，周期 500nm，孔半径 120nm，保留 Cell 层级。' })
-          .height(56).width('100%').fontSize(UI.fontBody).fontColor(COLORS.ink).placeholderColor(COLORS.muted)
+          .id('python-ai-request-input')
+          .height(60).width('100%').fontSize(UI.fontBody).fontColor(COLORS.ink).placeholderColor(COLORS.muted)
           .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius).enabled(!this.busy)
           .onKeyEvent((event: KeyEvent) => event.stopPropagation()).onChange((value: string) => { this.requestText = value; this.persistDraft(); })
         Row({ space: 8 }) {
           Blank()
-          Button('AI 生成并运行', { type: ButtonType.Normal }).fontSize(UI.fontBody).height(UI.controlHeight).width(this.panelWidth < 440 ? 148 : 164)
+          Button('AI 生成并运行', { type: ButtonType.Normal }).id('python-ai-run-btn').fontSize(UI.fontBody).height(UI.controlHeight).width(this.panelWidth < 440 ? 148 : 164)
             .enabled(!this.busy).borderRadius(UI.controlRadius).fontColor(Color.White).backgroundColor(COLORS.primary).onClick(() => this.run(true))
           Button('示例脚本', { type: ButtonType.Normal }).fontSize(UI.fontBody).height(UI.controlHeight).padding({ left: 8, right: 8 }).enabled(!this.busy)
             .borderRadius(UI.controlRadius).backgroundColor(COLORS.surfaceMuted).fontColor(COLORS.ink)

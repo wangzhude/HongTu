@@ -651,6 +651,9 @@ export class WorkspaceService {
       if (layer.sourceName !== undefined && (typeof layer.sourceName !== 'string' || layer.sourceName.length > 65535 || layer.sourceName.includes('\0'))) {
         throw new Error('工程源图层名称无效');
       }
+      if (layer.fillColor !== undefined && (typeof layer.fillColor !== 'string' || layer.fillColor.length > 32)) {
+        throw new Error('工程图层填充色无效');
+      }
     }
     if (doc.layerDefinitions !== undefined) {
       if (!Array.isArray(doc.layerDefinitions) || doc.layerDefinitions.length > 100000) throw new Error('工程图层定义超出预算');

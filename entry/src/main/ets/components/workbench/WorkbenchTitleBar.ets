@@ -18,6 +18,8 @@ import { WorkbenchIcon } from './WorkbenchIcon';
 export struct WorkbenchTitleBar {
   @StorageProp(USER_REDUCE_MOTION_KEY) userReduceMotion: boolean = false;
   @Prop showAiPanel: boolean = false;
+  @Prop aiRunning: boolean = false;
+  @Prop aiPending: boolean = false;
   @Prop showMacroPanel: boolean = false;
   @Prop currentModule: WorkModule = WorkModule.Layout;
   @Prop drcIssueCount: number = 0;
@@ -329,11 +331,18 @@ export struct WorkbenchTitleBar {
 
       Button({ type: ButtonType.Normal }) {
         Row({ space: 7 }) {
-          WorkbenchIcon({ name: 'ai', iconSize: 18, color: this.showAiPanel ? COLORS.primary : COLORS.ink })
-          Text('AI 助手')
+          if (this.aiRunning) {
+            LoadingProgress().width(15).height(15).color(COLORS.primary)
+          } else {
+            WorkbenchIcon({ name: 'ai', iconSize: 18, color: (this.showAiPanel || this.aiPending) ? COLORS.primary : COLORS.ink })
+          }
+          Text(this.aiRunning ? 'AI 绘图中' : (this.aiPending ? 'AI 待确认' : 'AI 助手'))
             .fontSize(UI.fontBody)
             .fontWeight(FontWeight.Medium)
-            .fontColor(this.showAiPanel ? COLORS.primary : COLORS.ink)
+            .fontColor((this.showAiPanel || this.aiRunning || this.aiPending) ? COLORS.primary : COLORS.ink)
+          if (this.aiPending && !this.aiRunning) {
+            Circle({ width: 6, height: 6 }).fill('#14B8A6')
+          }
         }
         .alignItems(VerticalAlign.Center)
       }
@@ -341,10 +350,10 @@ export struct WorkbenchTitleBar {
       .padding({ left: 14, right: 14 })
       .borderRadius(UI.controlRadius)
       .animation(null)
-      .backgroundColor(this.showAiPanel ? COLORS.primarySoft : COLORS.surfaceMuted)
+      .backgroundColor((this.showAiPanel || this.aiRunning || this.aiPending) ? COLORS.primarySoft : COLORS.surfaceMuted)
       .animation({ duration: motionDuration(MOTION.feedback), curve: feedbackCurve() })
       .animation(null)
-      .border({ width: 1, color: this.showAiPanel ? COLORS.primary : COLORS.border })
+      .border({ width: 1, color: (this.showAiPanel || this.aiRunning) ? COLORS.primary : (this.aiPending ? '#14B8A6' : COLORS.border) })
       .borderRadius(UI.controlRadius)
       .attributeModifier(hongTuThemeState.luminousPointLightModifier(LuminousLightLevel.EMPHASIS))
       .stateEffect(true)
@@ -411,6 +420,20 @@ export struct WorkbenchTitleBar {
         GhostCommand({ icon: 'search', label: '搜索命令', showLabel: false, activateAction: this.commandSearchAction })
         GhostCommand({ icon: 'save', label: '保存', showLabel: false, activateAction: this.saveAction })
       }
+      Button({ type: ButtonType.Circle }) {
+        if (this.aiRunning) {
+          LoadingProgress().width(16).height(16).color(COLORS.primary)
+        } else {
+          WorkbenchIcon({ name: 'ai', iconSize: 18, color: (this.showAiPanel || this.aiPending) ? COLORS.primary : COLORS.ink })
+        }
+      }
+      .width(UI.controlHeight)
+      .height(UI.controlHeight)
+      .padding(0)
+      .backgroundColor((this.showAiPanel || this.aiRunning || this.aiPending) ? COLORS.primarySoft : COLORS.surfaceMuted)
+      .border({ width: 1, color: (this.showAiPanel || this.aiRunning) ? COLORS.primary : (this.aiPending ? '#14B8A6' : COLORS.border) })
+      .accessibilityText('AI 助手')
+      .onClick(() => this.toggleAiAction())
       Button({ type: ButtonType.Circle }) {
         WorkbenchIcon({ name: 'appearance', iconSize: 18, color: COLORS.ink })
       }

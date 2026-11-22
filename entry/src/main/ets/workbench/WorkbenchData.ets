@@ -69,5 +69,6 @@ export function cloneLayerWithVisible(layer: UiLayer, visible: boolean): UiLayer
   if (layer.highlighted !== undefined) next.highlighted = layer.highlighted;
   if (layer.animated !== undefined) next.animated = layer.animated;
   if (layer.sourceName !== undefined) next.sourceName = layer.sourceName;
+  if (layer.fillColor !== undefined) next.fillColor = layer.fillColor;
   return next;
 }
