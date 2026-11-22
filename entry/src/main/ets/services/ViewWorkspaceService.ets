@@ -352,7 +352,6 @@ export class ViewWorkspaceService {
   }
   resolveLocation(documentId: string, location: ViewLocation): ViewResolvedLocation {
     validateLocation(location); const snapshot: ViewDatabaseSnapshot = this.readSource(documentId);
-    if (location.cellStackKeys[0] !== snapshot.topCellKey) throw new Error('视图根Cell已改变，请明确更新该视图');
     const cellStack: number[] = location.cellStackKeys.map((key: string): number => {
       const index: number = snapshot.cellKeys.indexOf(key); if (index < 0) throw new Error('视图Cell稳定键不存在或已删除'); return index;
     });

@@ -54,7 +54,6 @@ function sourceStamp(sources: ViewDatabaseSnapshot[]): string {
 }
 function locationDiagnostic(source: ViewDatabaseSnapshot, presentation: ViewPresentation): string {
   const location = presentation.location;
-  if (location.cellStackKeys[0] !== source.topCellKey) return '根Cell稳定键已改变';
   const indices: number[] = location.cellStackKeys.map((key: string): number => source.cellKeys.indexOf(key));
   if (indices.some((index: number): boolean => index < 0)) return 'Cell稳定键已删除或未载入';
   for (let index: number = 0; index < location.placements.length; index++) {

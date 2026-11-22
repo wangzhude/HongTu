@@ -3016,7 +3016,8 @@ export class EditService {
   /** Reopen a saved concrete path, or safely fall back to its legacy definition stack. */
   restoreNavigationPath(path: InstancePathStep[]): boolean {
     try {
-      const next: InstancePathStep[] = this.resolvePath(path, this.topCellId);
+      const rootCellId: number = this.currentCellStack.length > 0 ? this.currentCellStack[0] : this.topCellId;
+      const next: InstancePathStep[] = this.resolvePath(path, rootCellId);
       if (next.length !== this.currentCellStack.length - 1 ||
         next.some((step: InstancePathStep, i: number) => step.cellId !== this.currentCellStack[i + 1])) return false;
       this.navigationPath = next; return true;
@@ -3311,6 +3312,15 @@ export class EditService {
     this.currentCellStack = [this.topCellId];
     this.navigationPath = [];
     this.clearSelection();
+  }
+
+  /** 将当前导航栈直接重置到指定根 Cell（供独立根 Cell 视图精确恢复，不伪造父子层级） */
+  resetStackToCell(cellId: number): boolean {
+    if (!Number.isInteger(cellId) || cellId < 0) return false;
+    this.currentCellStack = [cellId];
+    this.navigationPath = [];
+    this.clearSelection();
+    return true;
   }
 
   /** 获取当前编辑上下文的 Cell ID（栈顶） */

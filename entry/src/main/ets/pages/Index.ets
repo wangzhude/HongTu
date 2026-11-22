@@ -4569,7 +4569,13 @@ struct Index {
     const stack: number[] = editService.getCurrentCellStack();
     if (JSON.stringify(stack) !== JSON.stringify(location.cellStack) ||
       JSON.stringify(editService.getNavigationPath()) !== JSON.stringify(location.navigationPath)) {
-      editService.exitToTop();
+      if (location.cellStack.length > 0 && location.cellStack[0] !== editService.getTopCellId()) {
+        if (!editService.resetStackToCell(location.cellStack[0])) {
+          throw new Error('独立根Cell无效，未切换视图');
+        }
+      } else {
+        editService.exitToTop();
+      }
       for (let index: number = 1; index < location.cellStack.length; index++) editService.enterCell(location.cellStack[index]);
       if (location.navigationPath.length > 0 && !editService.restoreNavigationPath(location.navigationPath)) {
         throw new Error('实例路径已失效，未切换视图');
@@ -4657,7 +4663,8 @@ struct Index {
     const initialCapture: ViewPresentation = this.viewWorkspaceCapture();
     const topCellId: number = editService.getTopCellId();
     if (topCellId >= 0 && topCellId < this.docCellKeys.length &&
-        (initialCapture.location.cellStackKeys.length === 0 || initialCapture.location.cellStackKeys[0] !== this.docCellKeys[topCellId])) {
+        (initialCapture.location.cellStackKeys.length === 0 ||
+          initialCapture.location.cellStackKeys.some((key: string): boolean => !this.docCellKeys.includes(key)))) {
       initialCapture.location = { cellStackKeys: [this.docCellKeys[topCellId]], placements: [] };
     }
     const current: ViewRecord = core.ensureDocument(this.docStore.activeWorkspaceId, initialCapture);
@@ -4774,7 +4781,7 @@ struct Index {
   private persistViewWorkspacePresentation(): boolean {
     if (!this.viewWorkspaceInitialized || this.viewWorkspaceCore === null || this.viewWorkspaceDocumentId !== this.docStore.activeWorkspaceId) return true;
     const activeStack: number[] = editService.getCurrentCellStack();
-    if (activeStack.length === 0 || activeStack[0] !== editService.getTopCellId()) return true;
+    if (activeStack.length === 0) return true;
     try {
       const current: ViewPresentation = this.viewWorkspaceCapture();
       if (JSON.stringify(this.viewWorkspaceCore.getView(this.viewportStore.viewWorkspaceActiveId).presentation) !== JSON.stringify(current)) {
@@ -10705,7 +10712,7 @@ struct Index {
     const path: InstancePathStep[] = this.localInstancePath();
     const picked: boolean = this.validPickedPlacement();
     const targetId: number = path.length > 0 ? path[path.length - 1].cellId : cellId;
-    const key: string = `${this.docStore.activeWorkspaceId}:${editService.getSessionRevision()}:${cellId}:${picked}:${JSON.stringify(path)}`;
+    const key: string = `${this.docStore.activeWorkspaceId}:${editService.getSessionRevision()}:${cellId}:${this.cellName(cellId)}:${picked}:${JSON.stringify(path)}`;
     if (key === this.scopeLabelKey) return this.scopeLabelValue;
     const impact = editService.getSharedImpact(targetId);
     if (!impact.ok) {
@@ -10726,8 +10733,10 @@ struct Index {
 
   /** Refresh presentation only; view/report navigation must retain analysis state. */
   private refreshEditingCellPresentation(): void {
-    this.docStore.currentEditingCellId = editService.getCurrentCellId();
-    this.docStore.currentEditingCellName = this.cellName(editService.getCurrentCellId());
+    const activeCellId: number = editService.getCurrentCellId();
+    this.docStore.currentEditingCellId = activeCellId;
+    this.docStore.currentTopCellId = activeCellId;
+    this.docStore.currentEditingCellName = this.cellName(activeCellId);
     this.viewportStore.instanceScopeLabel = this.sharedCellScopeText();
   }
 
@@ -12505,8 +12514,12 @@ struct Index {
     if (cellId !== editService.getTopCellId()) {
       this.preferredInstanceTargetId = cellId;
     }
+    this.docStore.currentTopCellId = editService.getCurrentCellId();
     this.syncShapesFromEditService();
     this.fitAllShapes();
+    if (this.viewWorkspaceInitialized) {
+      this.persistViewWorkspacePresentation();
+    }
     const depth: number = editService.getCurrentCellStack().length;
     this.panelStore.statusText = depth > 1
       ? `已进入 Cell ${this.cellName(cellId)} 的共享定义（面包屑可返回顶层）`

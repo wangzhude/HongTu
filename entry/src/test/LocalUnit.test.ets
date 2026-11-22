@@ -24,6 +24,8 @@ import {
   validatePropertyHierarchy
 } from '../main/ets/services/ShapePropertyService';
 import { WorkspaceDocument, WorkspaceService } from '../main/ets/services/WorkspaceService';
+import { ViewWorkspaceService } from '../main/ets/services/ViewWorkspaceService';
+import type { ViewDatabaseSnapshot, ViewPresentation, ViewResolvedLocation, ViewRuntime, ViewWorkspaceStore } from '../main/ets/models/ViewWorkspace';
 import {
   PYTHON_VERIFY_MAX_RESPONSE_BYTES,
   PYTHON_ARTIFACT_ID_REGEX,
@@ -612,10 +614,13 @@ export default function localUnitTest(): void {
       const simpleShape: Shape = { id: 11, type: ShapeType.POLYGON, layerNumber: 4, datatype: 0, points: simplePts, selected: false };
       expect(advEditService.isVertexEditable(simpleShape)).assertTrue();
 
-      const packed = packShapesCoordinates([keyholeShape]);
+      const packed = packShapesCoordinates([keyholeShape], 0);
+      const nativeItems: NativeShape[] = [
+        { id: 10, type: 'polygon', layerNumber: 4, datatype: 0, points: [], pathWidth: 0, text: '', cellName: '', ownerCellId: 0, cellId: -1, rotation: 0, mirror: 0, magnification: 1 }
+      ];
       const unpacked = nativeShapesToShapes(
-        [{ id: 10, type: 'polygon', layerNumber: 4, datatype: 0, points: [], pathWidth: 0, text: '', cellName: '', ownerCellId: 0, cellId: -1, rotation: 0, mirror: 0, magnification: 1 }],
-        packed.packedCoords, packed.pointOffsets, packed.pointCounts
+        nativeItems,
+        packed.packedCoords, packed.shapePointOffsets, packed.shapePointCounts
       );
       expect(unpacked.length).assertEqual(1);
       const b1 = getShapeBounds(unpacked[0]);
@@ -657,6 +662,98 @@ export default function localUnitTest(): void {
       const rich = snapService.snapRich(500005, 2, snapIdx, true, 50, ['顶点', '中点', '边'], false, 0, false, 0);
       expect(rich.snappedGeometry).assertTrue();
       expect(Math.abs(rich.point.x - 500000) <= 50).assertTrue();
+    });
+
+    it('persists_and_restores_independent_root_cell_view_across_workspace_switch', 0, (): void => {
+      let rawStore: string | undefined = undefined;
+      const memStore: ViewWorkspaceStore = {
+        read: (): string | undefined => rawStore,
+        compareAndSwap: (expected: string | undefined, next: string | undefined): void => {
+          expect(rawStore).assertEqual(expected);
+          rawStore = next;
+        }
+      };
+      const views: ViewWorkspaceService = new ViewWorkspaceService(memStore);
+      expect(views.initialize()).assertTrue();
+
+      const editor: EditService = new EditService();
+      editor.setTopCellId(1); // 0 = PIXLARGE (independent root), 1 = zhengban_1 (project topCell)
+      const khShapes: Shape[] = [
+        { id: 1, type: ShapeType.RECT, layerNumber: 4, datatype: 0, points: [{ x: -150000, y: -150000 }, { x: 150000, y: 150000 }], selected: false, ownerCellId: 0 },
+        { id: 2, type: ShapeType.INSTANCE, layerNumber: 0, datatype: 0, points: [{ x: 0, y: 0 }], selected: false, ownerCellId: 1, cellId: 2, rotation: 0, mirror: 0, magnification: 1 },
+        { id: 3, type: ShapeType.RECT, layerNumber: 4, datatype: 0, points: [{ x: 0, y: 0 }, { x: 1000, y: 1000 }], selected: false, ownerCellId: 2 }
+      ];
+      editor.adoptShapes(khShapes);
+
+      const cellKeys: string[] = ['cell-pixlarge', 'cell-zhengban-1', 'cell-outerband'];
+      const cellNames: string[] = ['PIXLARGE', 'zhengban_1', 'OUTERBAND'];
+      views.bindDatabase({
+        documentId: 'doc-khroot',
+        read: (): ViewDatabaseSnapshot => ({
+          documentId: 'doc-khroot',
+          revision: editor.getSessionRevision(),
+          dirty: editor.isDirty(),
+          historyToken: `${editor.getSessionRevision()}:false:false`,
+          shapes: editor.getShapes(),
+          cellKeys: cellKeys,
+          topCellKey: cellKeys[1],
+          cellNames: cellNames,
+          layers: []
+        })
+      });
+
+      let zoomPercent: number = 0.0015;
+      let centerXNm: number = 0;
+      let centerYNm: number = 0;
+      let activeViewId: string = '';
+
+      const capture = (): ViewPresentation => ({
+        camera: { centerXNm: centerXNm, centerYNm: centerYNm, zoomPercent: zoomPercent },
+        location: { cellStackKeys: editor.getCurrentCellStack().map((cid: number): string => cellKeys[cid]), placements: [] },
+        hierarchyDepth: 2,
+        layerVisibilities: [{ layerNumber: 4, datatype: 0, visible: true }]
+      });
+
+      const created = views.ensureDocument('doc-khroot', capture());
+      activeViewId = created.id;
+      expect(JSON.stringify(created.presentation.location.cellStackKeys)).assertEqual('["cell-zhengban-1"]');
+
+      // Enter independent unreferenced root cell PIXLARGE (cellId = 0) and fit zoom = 0.22%
+      expect(editor.navigateToCellDefinition(0)).assertTrue();
+      expect(JSON.stringify(editor.getCurrentCellStack())).assertEqual('[0]');
+      zoomPercent = 0.22;
+      views.updateView(activeViewId, capture());
+
+      // Simulate switching away / reopening document at topCell zhengban_1 before prepareViewWorkspace(true)
+      editor.exitToTop();
+      zoomPercent = 0.0015;
+      expect(JSON.stringify(editor.getCurrentCellStack())).assertEqual('[1]');
+
+      const runtime: ViewRuntime = {
+        documentId: (): string => 'doc-khroot',
+        viewId: (): string => activeViewId,
+        contextToken: (): string => JSON.stringify(capture()),
+        isIdle: (): boolean => true,
+        capturePresentation: capture,
+        applyPresentation: (presentation: ViewPresentation, location: ViewResolvedLocation, viewId: string): void => {
+          if (location.cellStack.length > 0 && location.cellStack[0] !== editor.getTopCellId()) {
+            expect(editor.resetStackToCell(location.cellStack[0])).assertTrue();
+          } else {
+            editor.exitToTop();
+          }
+          for (let i = 1; i < location.cellStack.length; i++) editor.enterCell(location.cellStack[i]);
+          zoomPercent = presentation.camera.zoomPercent;
+          centerXNm = presentation.camera.centerXNm;
+          centerYNm = presentation.camera.centerYNm;
+          activeViewId = viewId;
+        },
+        rollbackPresentation: (): void => {}
+      };
+
+      views.activateView(activeViewId, runtime);
+      expect(JSON.stringify(editor.getCurrentCellStack())).assertEqual('[0]');
+      expect(editor.getCurrentCellId()).assertEqual(0);
+      expect(zoomPercent).assertEqual(0.22);
     });
   });
 }
