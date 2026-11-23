@@ -33,14 +33,23 @@ struct HierarchyRenderOrigin {
     double y = 0.0;
 };
 
-// Shared across every source: exceeding a limit rejects the whole unpublished scene.
+// Shared across every source: adaptive sub-pixel coarsening kicks in well before
+// approaching GPU vertex limits so large chip scenes never crash back to JS fallback.
 struct HierarchyRenderBudget {
     size_t primitives = 0, vertices = 0;
-    size_t maxPrimitives = 2500000, maxVertices = 16000000;
+    size_t maxPrimitives = 4000000, maxVertices = 24000000;
+    bool tryConsume(size_t points) noexcept {
+        if (primitives >= maxPrimitives || points > maxVertices - vertices) {
+            return false;
+        }
+        ++primitives;
+        vertices += points;
+        return true;
+    }
     void consume(size_t points) {
-        if (primitives >= maxPrimitives || points > maxVertices - vertices)
-            throw std::length_error("Composite scene exceeds aggregate visible geometry budget (2500000 primitives / 16000000 vertices)");
-        ++primitives; vertices += points;
+        if (!tryConsume(points)) {
+            throw std::length_error("Composite scene exceeds aggregate visible geometry budget (4000000 primitives / 24000000 vertices)");
+        }
     }
 };
 
@@ -51,12 +60,8 @@ inline GeometryEngine::Transform2D HierarchyExplicitInverse(const GeometryEngine
     if (!std::isfinite(determinant) || determinant == 0)
         throw std::invalid_argument("Composite source requires a finite nonzero affine determinant");
     GeometryEngine::Transform2D inverse;
-    // Divide each numerator directly. A reciprocal can overflow even when every
-    // actual inverse coefficient is finite (e.g. a=d=1e-160, det~=1e-320).
     inverse.a = t.d / determinant; inverse.b = -t.b / determinant;
     inverse.c = -t.c / determinant; inverse.d = t.a / determinant;
-    // Use the same numerator/division sequence as the shared ETS contract.
-    // Algebraically regrouping these terms changes overflow acceptance.
     inverse.tx = (t.b * t.ty - t.d * t.tx) / determinant;
     inverse.ty = (t.c * t.tx - t.a * t.ty) / determinant;
     for (double value : {inverse.a, inverse.b, inverse.c, inverse.d, inverse.tx, inverse.ty})
@@ -125,9 +130,10 @@ inline bool SameRelativeContourTemplate(const std::vector<Vec2>& a, const std::v
 }
 
 /** Shared geometry for both JS-batch compatibility and direct surface submission.
- * Includes KLayout-style screen-space sub-pixel LOD proxy, half-pixel overdraw culling,
- * relative-contour triangulation template reuse across flat repeated shapes, and
- * unexpanded child instance bounding-box outlines.
+ * Includes KLayout-style screen-space sub-pixel LOD proxy (covering ALL primitives
+ * including 4-vertex rectangles/BOXes + sub-pixel child instances + dense AREF lattices),
+ * adaptive half-pixel overdraw deduplication, relative-contour triangulation template reuse,
+ * and unexpanded child instance bounding-box outlines.
  */
 inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout, int cellId, int hierarchyDepth,
     const BBox* viewport = nullptr, const HierarchyLayerStyles* styles = nullptr,
@@ -137,18 +143,21 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
     batches.reserve(std::min<size_t>(layout.shapes.size() + 16, 16384));
     std::unordered_map<uint64_t, size_t> mergeIndex;
     const HierarchyLayerStyle defaultStyle;
+    HierarchyRenderBudget localBudget;
+    HierarchyRenderBudget* activeBudget = budget ? budget : &localBudget;
     const double originX = (origin && std::isfinite(origin->x)) ? origin->x : 0.0;
     const double originY = (origin && std::isfinite(origin->y)) ? origin->y : 0.0;
     BBox localViewport;
     const BBox* traversalViewport = viewport;
+    double sourceScale = 1.0;
     if (source) {
         ValidateHierarchyRenderSource(*source);
         if (source->opacity == 0) return batches;
+        const double det = std::abs(source->transform.determinant());
+        if (std::isfinite(det) && det > 0.0) sourceScale = std::sqrt(det);
         if (viewport) { localViewport = HierarchyInverseViewport(*viewport, source->transform); traversalViewport = &localViewport; }
     }
 
-    // An all-hidden layer table is a successful empty submission, not a fallback.
-    // Check stored leaves and instances once before potentially expanding large arrays.
     if (styles) {
         bool visibleGeometry = !layout.instances.empty();
         if (!visibleGeometry) {
@@ -161,19 +170,91 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
         if (!visibleGeometry) return batches;
     }
 
-    // Conservative screen-space pixel span (nm per pixel on a 3200px reference viewport).
+    // Conservative screen-space pixel span (nm per pixel on a 2560px reference viewport).
     double pixelSpanNm = 0.0;
     if (viewport && viewport->valid()) {
         const double span = std::max((viewport->maxX - viewport->minX), (viewport->maxY - viewport->minY));
         if (std::isfinite(span) && span > 0.0) {
-            pixelSpanNm = span / 3200.0;
+            pixelSpanNm = span / 2560.0;
         }
     }
-    const double subpixelCellNm = pixelSpanNm > 0.0 ? std::max(1e-6, 0.5 * pixelSpanNm) : 0.0;
+    const double baseSubpixelCellNm = pixelSpanNm > 0.0 ? std::max(1e-6, 0.55 * pixelSpanNm) : 0.0;
+
+    // Representative visible LayerKey per cell so collapsed sub-pixel instances/arrays
+    // inherit authentic layer color/style instead of expanding millions of hidden/tiny leaves.
+    struct CellProxyLayerInfo {
+        bool resolved = false;
+        bool hasVisible = false;
+        LayerKey key{1, 0};
+    };
+    std::unordered_map<int, CellProxyLayerInfo> cellProxyLayers;
+    cellProxyLayers.reserve(layout.cells.size() + 8);
+    if (pixelSpanNm > 0.0 && !layout.instances.empty()) {
+        std::unordered_map<int, std::vector<LayerKey>> directVisibleLayers;
+        std::unordered_map<int, std::vector<int>> childRefs;
+        for (const auto& s : layout.shapes) {
+            if (s.type == ShapeType::INSTANCE || s.type == ShapeType::NODE || s.type == ShapeType::TEXT) continue;
+            if (styles) {
+                const auto found = styles->find(s.layerKey);
+                if (found != styles->end() && !found->second.visible) continue;
+            }
+            auto& vec = directVisibleLayers[s.ownerCellId];
+            if (vec.empty()) vec.push_back(s.layerKey);
+        }
+        for (const auto& inst : layout.instances) {
+            if (inst.referencedCellId >= 0) {
+                childRefs[inst.ownerCellId].push_back(inst.referencedCellId);
+            }
+        }
+        std::unordered_map<int, int> state;
+        std::function<CellProxyLayerInfo(int)> resolveLayer = [&](int cid) -> CellProxyLayerInfo {
+            auto stIt = state.find(cid);
+            if (stIt != state.end()) {
+                if (stIt->second == 2) return cellProxyLayers[cid];
+                return {true, false, {1, 0}};
+            }
+            state[cid] = 1;
+            CellProxyLayerInfo info{true, false, {1, 0}};
+            auto dirIt = directVisibleLayers.find(cid);
+            if (dirIt != directVisibleLayers.end() && !dirIt->second.empty()) {
+                info.hasVisible = true;
+                info.key = dirIt->second.front();
+            } else {
+                auto chIt = childRefs.find(cid);
+                if (chIt != childRefs.end()) {
+                    for (int refId : chIt->second) {
+                        const auto childInfo = resolveLayer(refId);
+                        if (childInfo.hasVisible) {
+                            info = childInfo;
+                            break;
+                        }
+                    }
+                }
+            }
+            cellProxyLayers[cid] = info;
+            state[cid] = 2;
+            return info;
+        };
+        for (const auto& c : layout.cells) {
+            resolveLayer(c.id);
+        }
+    }
 
     // Half-pixel occupancy set per (layer, datatype, gx, gy) to eliminate millions of
-    // redundant sub-pixel photonic-crystal / array overdraws at wafer-level zoom.
+    // redundant sub-pixel standard-cell / photonic-crystal overdraws at wafer-level zoom.
     std::unordered_set<uint64_t> subpixelOccupied;
+    if (pixelSpanNm > 0.0) {
+        subpixelOccupied.reserve(32768);
+    }
+
+    // Adaptive LOD scale: if primitive count already exceeds 1.5M on ultra-dense full-chip views,
+    // progressively coarsen sub-pixel grid cell size (1x -> 2x -> 4x) so OpenGL stays fast and complete
+    // without ever throwing std::length_error to the 2000-node ArkUI fallback.
+    auto currentLodMultiplier = [&]() noexcept -> double {
+        if (activeBudget->primitives >= 2600000 || activeBudget->vertices >= 16000000) return 4.0;
+        if (activeBudget->primitives >= 1400000 || activeBudget->vertices >= 9000000) return 2.0;
+        return 1.0;
+    };
 
     struct CachedShapeGeometry {
         std::vector<Vec2> localPoints;
@@ -236,7 +317,12 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
     auto appendAxisAlignedBox = [&](RenderBatch& target, double minX, double minY, double maxX, double maxY) {
         validateWorldCoord(minX, minY);
         validateWorldCoord(maxX, maxY);
-        if (budget) budget->consume(4);
+        if (!activeBudget->tryConsume(4)) {
+            if (budget && pixelSpanNm <= 0.0) {
+                budget->consume(4);
+            }
+            return;
+        }
         const float x0 = static_cast<float>(minX - originX);
         const float y0 = static_cast<float>(minY - originY);
         const float x1 = static_cast<float>(maxX - originX);
@@ -248,6 +334,33 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
         if (target.vertices.size() > size_t(std::numeric_limits<int>::max()))
             throw std::runtime_error("Hierarchy render vertex count exceeds renderer range");
         target.vertexCount = static_cast<int>(target.vertices.size());
+    };
+
+    auto emitSubpixelProxyBox = [&](LayerKey lk, const HierarchyLayerStyle& st, const BBox& worldBox) {
+        const double lodMul = currentLodMultiplier();
+        const double cellNm = baseSubpixelCellNm * lodMul;
+        const double maxDim = std::max((worldBox.maxX - worldBox.minX), (worldBox.maxY - worldBox.minY));
+        const double cx = 0.5 * (worldBox.minX + worldBox.maxX);
+        const double cy = 0.5 * (worldBox.minY + worldBox.maxY);
+        if (cellNm > 0.0 && maxDim <= 1.25 * pixelSpanNm * lodMul) {
+            const int64_t gx = static_cast<int64_t>(std::floor((cx - originX) / cellNm));
+            const int64_t gy = static_cast<int64_t>(std::floor((cy - originY) / cellNm));
+            const uint64_t cellKey = (uint64_t(uint16_t(lk.layer)) << 48) |
+                                     (uint64_t(uint16_t(lk.datatype)) << 32) |
+                                     ((uint64_t(uint32_t(gx)) * 2654435761ULL) ^ uint64_t(uint32_t(gy)));
+            if (!subpixelOccupied.insert(cellKey).second) {
+                return;
+            }
+        }
+        const double minHalf = 0.40 * pixelSpanNm;
+        const double halfW = std::max(0.5 * (worldBox.maxX - worldBox.minX), minHalf);
+        const double halfH = std::max(0.5 * (worldBox.maxY - worldBox.minY), minHalf);
+        const GLPrimitiveType proxyType = (st.strokeOnly && st.fillPattern == 0)
+            ? GLPrimitiveType::RECT_OUTLINE
+            : GLPrimitiveType::RECT_FILLED;
+        RenderBatch& proxyBatch = getOrCreateMergedRectBatch(
+            proxyType, lk.layer, lk.datatype, st.fillPattern, st.color, 0);
+        appendAxisAlignedBox(proxyBatch, cx - halfW, cy - halfH, cx + halfW, cy + halfH);
     };
 
     std::function<void(const BBox&)> onStoppedInstanceBox = [&](const BBox& localBox) {
@@ -271,6 +384,35 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
         appendAxisAlignedBox(frameBatch, worldBox.minX, worldBox.minY, worldBox.maxX, worldBox.maxY);
     };
 
+    std::function<void(int, const BBox&)> onSubpixelInstance = [&](int refCellId, const BBox& localBox) {
+        if (!localBox.valid()) return;
+        const auto layerIt = cellProxyLayers.find(refCellId);
+        if (layerIt == cellProxyLayers.end() || !layerIt->second.hasVisible) return;
+        const LayerKey lk = layerIt->second.key;
+        const HierarchyLayerStyle* st = &defaultStyle;
+        if (styles) {
+            const auto found = styles->find(lk);
+            if (found != styles->end()) st = &found->second;
+            if (!st->visible) return;
+        }
+        BBox worldBox;
+        if (source) {
+            for (const Vec2 c : {Vec2{localBox.minX, localBox.minY}, Vec2{localBox.maxX, localBox.minY},
+                                 Vec2{localBox.maxX, localBox.maxY}, Vec2{localBox.minX, localBox.maxY}}) {
+                const Vec2 w = source->transform.apply(c);
+                if (!std::isfinite(w.x) || !std::isfinite(w.y)) return;
+                worldBox = worldBox.unite(BBox(w.x, w.y, w.x, w.y));
+            }
+        } else {
+            worldBox = localBox;
+        }
+        if (!worldBox.valid() || (viewport && !worldBox.intersects(*viewport))) return;
+        emitSubpixelProxyBox(lk, *st, worldBox);
+    };
+
+    const double localSubpixelInstanceSpanNm =
+        (pixelSpanNm > 0.0 && sourceScale > 0.0) ? (1.35 * pixelSpanNm / sourceScale) : 0.0;
+
     layout.flattenHierarchy(cellId, hierarchyDepth,
         [&](const SceneShape& shape, const GeometryEngine::Transform2D& transform) {
             if (shape.type == ShapeType::NODE || shape.type == ShapeType::TEXT) return;
@@ -281,17 +423,24 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                 if (!style->visible) return;
             }
 
-            const bool cacheableShape =
-                (shape.type == ShapeType::POLYGON && shape.points.size() >= 3) ||
-                (shape.type == ShapeType::PATH && !shape.pathWidthAbsolute);
+            const bool isRectBox = (shape.type == ShapeType::RECT || shape.type == ShapeType::BOX) && shape.points.size() == 2;
+            const bool directPolygonCache = (shape.type == ShapeType::POLYGON && shape.points.size() >= 3);
+            const bool cacheableShape = directPolygonCache || (shape.type == ShapeType::PATH && !shape.pathWidthAbsolute);
             CachedShapeGeometry* cachedGeom = nullptr;
 
-            const bool directPolygonCache = (shape.type == ShapeType::POLYGON && shape.points.size() >= 3);
+            BBox rectLocalBox;
             const BBox* preCullLocalBox = nullptr;
-            size_t localVertexCount = shape.points.size();
 
-            // Zero-allocation persistent BBox on SceneShape for POLYGONs (eliminates 2.31M-vertex BBox + hash map per pan/zoom)
-            if (directPolygonCache) {
+            if (isRectBox) {
+                const double x0 = std::min(shape.points[0].x, shape.points[1].x);
+                const double y0 = std::min(shape.points[0].y, shape.points[1].y);
+                const double x1 = std::max(shape.points[0].x, shape.points[1].x);
+                const double y1 = std::max(shape.points[0].y, shape.points[1].y);
+                if (std::isfinite(x0) && std::isfinite(y0) && std::isfinite(x1) && std::isfinite(y1)) {
+                    rectLocalBox = BBox(x0, y0, x1, y1);
+                    preCullLocalBox = &rectLocalBox;
+                }
+            } else if (directPolygonCache) {
                 if ((shape.renderCacheFlags & 1u) == 0u) {
                     BBox lb;
                     for (const auto& lp : shape.points) {
@@ -316,59 +465,38 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                 }
                 if (cachedGeom->localPoints.empty()) return;
                 preCullLocalBox = &cachedGeom->localBox;
-                localVertexCount = cachedGeom->localPoints.size();
             }
 
-            if (preCullLocalBox != nullptr) {
-                if (viewport && preCullLocalBox->valid()) {
-                    BBox approxWorldBox;
-                    bool approxFinite = true;
-                    const BBox& lb = *preCullLocalBox;
-                    for (const Vec2 corner : {Vec2{lb.minX, lb.minY}, Vec2{lb.maxX, lb.minY},
-                                              Vec2{lb.maxX, lb.maxY}, Vec2{lb.minX, lb.maxY}}) {
-                        Vec2 wp = transform.apply(corner);
-                        if (source) wp = source->transform.apply(wp);
-                        if (!std::isfinite(wp.x) || !std::isfinite(wp.y)) {
-                            approxFinite = false;
-                            break;
-                        }
-                        approxWorldBox = approxWorldBox.unite(BBox(wp.x, wp.y, wp.x, wp.y));
+            if (preCullLocalBox != nullptr && viewport && preCullLocalBox->valid()) {
+                BBox approxWorldBox;
+                bool approxFinite = true;
+                const BBox& lb = *preCullLocalBox;
+                for (const Vec2 corner : {Vec2{lb.minX, lb.minY}, Vec2{lb.maxX, lb.minY},
+                                          Vec2{lb.maxX, lb.maxY}, Vec2{lb.minX, lb.maxY}}) {
+                    Vec2 wp = transform.apply(corner);
+                    if (source) wp = source->transform.apply(wp);
+                    if (!std::isfinite(wp.x) || !std::isfinite(wp.y)) {
+                        approxFinite = false;
+                        break;
                     }
-                    if (approxFinite && approxWorldBox.valid()) {
-                        if (!approxWorldBox.intersects(*viewport)) return;
+                    approxWorldBox = approxWorldBox.unite(BBox(wp.x, wp.y, wp.x, wp.y));
+                }
+                if (approxFinite && approxWorldBox.valid()) {
+                    if (!approxWorldBox.intersects(*viewport)) return;
 
-                        const double maxDim = std::max((approxWorldBox.maxX - approxWorldBox.minX), (approxWorldBox.maxY - approxWorldBox.minY));
-                        if (pixelSpanNm > 0.0 && maxDim <= 2.4 * pixelSpanNm && localVertexCount > 4) {
-                            const double cx = 0.5 * (approxWorldBox.minX + approxWorldBox.maxX);
-                            const double cy = 0.5 * (approxWorldBox.minY + approxWorldBox.maxY);
-                            if (subpixelCellNm > 0.0 && maxDim <= 0.85 * pixelSpanNm) {
-                                const int64_t gx = static_cast<int64_t>(std::floor((cx - originX) / subpixelCellNm));
-                                const int64_t gy = static_cast<int64_t>(std::floor((cy - originY) / subpixelCellNm));
-                                uint64_t cellKey = (uint64_t(uint16_t(shape.layerKey.layer)) << 48) |
-                                                   (uint64_t(uint16_t(shape.layerKey.datatype)) << 32) |
-                                                   ((uint64_t(uint32_t(gx)) * 2654435761ULL) ^ uint64_t(uint32_t(gy)));
-                                if (!subpixelOccupied.insert(cellKey).second) {
-                                    return;
-                                }
-                            }
-                            const double minHalf = 0.38 * pixelSpanNm;
-                            const double halfW = std::max(0.5 * (approxWorldBox.maxX - approxWorldBox.minX), minHalf);
-                            const double halfH = std::max(0.5 * (approxWorldBox.maxY - approxWorldBox.minY), minHalf);
-                            const GLPrimitiveType proxyType = (style->strokeOnly && style->fillPattern == 0)
-                                ? GLPrimitiveType::RECT_OUTLINE
-                                : GLPrimitiveType::RECT_FILLED;
-                            RenderBatch& proxyBatch = getOrCreateMergedRectBatch(
-                                proxyType, shape.layerKey.layer, shape.layerKey.datatype,
-                                style->fillPattern, style->color, 0);
-                            appendAxisAlignedBox(proxyBatch, cx - halfW, cy - halfH, cx + halfW, cy + halfH);
-                            return;
-                        }
+                    const double lodMul = currentLodMultiplier();
+                    const double maxDim = std::max((approxWorldBox.maxX - approxWorldBox.minX), (approxWorldBox.maxY - approxWorldBox.minY));
+                    // Apply sub-pixel proxy & occupancy deduplication to ALL shapes (including 4-pt rectangles/BOXes)!
+                    const double proxyThreshold = (isRectBox ? 1.35 : 2.4) * pixelSpanNm * lodMul;
+                    if (pixelSpanNm > 0.0 && maxDim <= proxyThreshold) {
+                        emitSubpixelProxyBox(shape.layerKey, *style, approxWorldBox);
+                        return;
                     }
                 }
             }
 
             std::vector<Vec2> points;
-            if ((shape.type == ShapeType::RECT || shape.type == ShapeType::BOX) && shape.points.size() == 2) {
+            if (isRectBox) {
                 const auto& a = shape.points[0]; const auto& b = shape.points[1];
                 points = transform.applyToPolygon({{a.x, a.y}, {b.x, a.y}, {b.x, b.y}, {a.x, b.y}});
             } else if (directPolygonCache) {
@@ -392,7 +520,6 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
             }
             if (viewport && !box.intersects(*viewport)) return;
 
-            // Screen-space sub-pixel chord decimation for dense curved polygons/rings at any zoom.
             bool decimated = false;
             if (pixelSpanNm > 0.0 && points.size() >= 24) {
                 const double minChordSq = (0.50 * pixelSpanNm) * (0.50 * pixelSpanNm);
@@ -407,15 +534,20 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                     }
                 }
                 simplified.push_back(points.back());
-                // Only adopt chord-decimated contour when it cuts vertex count by >=2x and stays <=512 pts;
-                // otherwise reusing the persistent SceneShape triangulation indices is >10x faster.
                 if (simplified.size() >= 4 && simplified.size() <= 512 && simplified.size() * 2 <= points.size()) {
                     points = std::move(simplified);
                     decimated = true;
                 }
             }
 
-            if (budget) budget->consume(points.size());
+            if (!activeBudget->tryConsume(points.size())) {
+                if (pixelSpanNm > 0.0) {
+                    emitSubpixelProxyBox(shape.layerKey, *style, box);
+                    return;
+                }
+                if (budget) budget->consume(points.size());
+                return;
+            }
 
             GLPrimitiveType type = GLPrimitiveType::POLYGON_FILLED;
             if (shape.type == ShapeType::PATH) {
@@ -509,26 +641,26 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                         cachedGeom->triangleIndices = {0u, 1u, 2u};
                         cachedGeom->triangulated = true;
                     } else {
-                    const uint64_t tplHash = HashRelativeContourTemplate(cachedGeom->localPoints);
-                    auto& bucket = relativeTemplates[tplHash];
-                    bool matchedTemplate = false;
-                    for (const auto& entry : bucket) {
-                        if (entry.samplePoints != nullptr &&
-                            SameRelativeContourTemplate(*entry.samplePoints, cachedGeom->localPoints)) {
-                            cachedGeom->triangleIndices = entry.triangleIndices;
-                            cachedGeom->triangulated = entry.triangulated;
-                            matchedTemplate = true;
-                            break;
+                        const uint64_t tplHash = HashRelativeContourTemplate(cachedGeom->localPoints);
+                        auto& bucket = relativeTemplates[tplHash];
+                        bool matchedTemplate = false;
+                        for (const auto& entry : bucket) {
+                            if (entry.samplePoints != nullptr &&
+                                SameRelativeContourTemplate(*entry.samplePoints, cachedGeom->localPoints)) {
+                                cachedGeom->triangleIndices = entry.triangleIndices;
+                                cachedGeom->triangulated = entry.triangulated;
+                                matchedTemplate = true;
+                                break;
+                            }
                         }
-                    }
-                    if (!matchedTemplate) {
-                        cachedGeom->triangulated =
-                            Triangulator::triangulate(cachedGeom->localPoints, cachedGeom->triangleIndices) &&
-                            cachedGeom->triangleIndices.size() >= 3;
-                        if (bucket.size() < 8) {
-                            bucket.push_back({&cachedGeom->localPoints, cachedGeom->triangleIndices, cachedGeom->triangulated});
+                        if (!matchedTemplate) {
+                            cachedGeom->triangulated =
+                                Triangulator::triangulate(cachedGeom->localPoints, cachedGeom->triangleIndices) &&
+                                cachedGeom->triangleIndices.size() >= 3;
+                            if (bucket.size() < 8) {
+                                bucket.push_back({&cachedGeom->localPoints, cachedGeom->triangleIndices, cachedGeom->triangulated});
+                            }
                         }
-                    }
                     }
                 }
                 if (cachedGeom->triangulated) {
@@ -556,7 +688,10 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
             if (target->vertices.size() > size_t(std::numeric_limits<int>::max()))
                 throw std::runtime_error("Hierarchy render vertex count exceeds renderer range");
             target->vertexCount = static_cast<int>(target->vertices.size());
-        }, traversalViewport, nullptr, nullptr, &onStoppedInstanceBox);
+        },
+        traversalViewport, nullptr, nullptr, &onStoppedInstanceBox,
+        localSubpixelInstanceSpanNm,
+        localSubpixelInstanceSpanNm > 0.0 ? &onSubpixelInstance : nullptr);
     return batches;
 }
 

@@ -52,12 +52,18 @@ function validateSource(s: ViewSceneSource): void {
 
 interface SceneLayerKey { layerNumber: number; datatype: number; }
 interface SceneDefinitionIndex {
-  revision: number; shapes: Shape[]; byOwner: Map<number, Shape[]>;
-  textTraversalByOwner: Map<number, Shape[]>; textOwners: Set<number>; layerKeys: SceneLayerKey[];
+  revision: number;
+  shapes: Shape[];
+  byOwner: Map<number, Shape[]>;
+  textTraversalByOwner: Map<number, Shape[]>;
+  textOwners: Set<number>;
+  layerKeys: SceneLayerKey[];
+  packedReady: boolean;
+  packedCoords?: Float64Array;
+  shapePointOffsets?: Int32Array;
+  shapePointCounts?: Int32Array;
 }
 
-/** Scene camera uses the actual positive zoom; the legacy hierarchy helper has
- * a zoom floor which would wrongly cull tiny-scale TEXT/geometry. */
 export function sceneViewportFromCamera(width: number, height: number, zoomPercent: number,
   offsetX: number, offsetY: number, marginPx: number = 96): WorldViewport {
   if (![width, height, zoomPercent, offsetX, offsetY, marginPx].every((n: number): boolean => Number.isFinite(n)) ||
@@ -70,9 +76,6 @@ export function sceneViewportFromCamera(width: number, height: number, zoomPerce
   return vp;
 }
 
-/** Native-matching PATH outline, before the independent source affine. Absolute
- * WIDTH is built after the hierarchy matrix; source affine then transforms the
- * complete painted contour, including caps and signed type-4 extensions. */
 export function scenePathOutline(shape: Shape, hierarchy: ViewAffine): Point[] {
   const width: number = shape.pathWidth ?? 0;
   if (!Number.isFinite(width) || !Number.isFinite(shape.pathBeginExtension ?? 0) ||
@@ -135,7 +138,6 @@ export function scenePathOutline(shape: Shape, hierarchy: ViewAffine): Point[] {
   return absolute ? out : out.map((p: Point): Point => point(hierarchy, p));
 }
 
-/** Complete bounded scene consumption; failures return no partial frame. */
 export class ViewRenderSceneService {
   private cacheKey: string = '';
   private cacheSources: Shape[][] = [];
@@ -146,14 +148,10 @@ export class ViewRenderSceneService {
   private textRequired: boolean = false;
   private textGeometry: SceneTextGeometryService;
 
-  /** Production passes MeasureText with the same fixed monospace font/size as
-   * ViewSceneNode. Host/default width is deliberately conservative (2 EM per
-   * UTF-16 unit). Explicit node dimensions prevent wrapping beyond this box. */
   constructor(measureTextWidth: (text: string) => number = (text: string): number => text.length * 24) {
     this.textGeometry = new SceneTextGeometryService(instanceTransformMat, measureTextWidth);
   }
 
-  /** Release retained documents after preparation failure or component teardown. */
   clear(): void {
     this.cacheKey = ''; this.cacheSources = [];
     this.cache = { primitives: [], overflow: false, limit: 2000, message: '' };
@@ -192,7 +190,8 @@ export class ViewRenderSceneService {
         { layerNumber: shape.layerNumber, datatype: shape.datatype });
     }
     this.indices.set(id, { revision: s.revision, shapes: s.shapes, byOwner: byOwner,
-      textTraversalByOwner: textTraversalByOwner, textOwners: textOwners, layerKeys: Array.from(layerKeys.values()) });
+      textTraversalByOwner: textTraversalByOwner, textOwners: textOwners,
+      layerKeys: Array.from(layerKeys.values()), packedReady: false });
     return byOwner;
   }
 
@@ -211,21 +210,6 @@ export class ViewRenderSceneService {
       }
       cells.clear(); for (const id of next) cells.add(id);
       if (cells.size === 0) break;
-    }
-    return false;
-  }
-
-  private hasStoppedReferences(s: ViewSceneSource, definitions: SceneDefinitionIndex): boolean {
-    if (s.opacity === 0) return false;
-    let cells: Set<number> = new Set<number>([s.cellId]);
-    for (let depth: number = 1; depth <= s.depth; depth++) {
-      const next: Set<number> = new Set<number>();
-      for (const id of cells) for (const shape of definitions.textTraversalByOwner.get(id) ?? []) {
-        if (shape.type !== ShapeType.INSTANCE) continue;
-        if (depth === s.depth) return true;
-        if (shape.cellId !== undefined) next.add(shape.cellId);
-      }
-      cells = next; if (cells.size === 0) break;
     }
     return false;
   }
@@ -268,37 +252,41 @@ export class ViewRenderSceneService {
       });
       this.definitionsFor(s);
       const definitions: SceneDefinitionIndex | undefined = this.indices.get(indexIdentity(s));
-      if (definitions !== undefined) for (const key of definitions.layerKeys) {
-        if (styles.some((style: NativeLayerRenderStyle): boolean => style.layerNumber === key.layerNumber && style.datatype === key.datatype)) continue;
-        const st = layerRenderStyle(undefined);
-        styles.push({ layerNumber: key.layerNumber, datatype: key.datatype, visible: true,
-          color: rgba('#2F6DF6', st.fillOpacity), strokeOnly: false, fillPattern: 0 });
+      if (definitions !== undefined) {
+        for (const key of definitions.layerKeys) {
+          if (styles.some((style: NativeLayerRenderStyle): boolean => style.layerNumber === key.layerNumber && style.datatype === key.datatype)) continue;
+          const st = layerRenderStyle(undefined);
+          styles.push({ layerNumber: key.layerNumber, datatype: key.datatype, visible: true,
+            color: rgba('#2F6DF6', st.fillOpacity), strokeOnly: false, fillPattern: 0 });
+        }
+        // Cache TypedArray packed coordinates per (revision, shapes) so panning across overscan tiles
+        // never re-packs hundreds of thousands of JS shapes on the ArkUI main thread.
+        if (!definitions.packedReady) {
+          const packed = packShapesCoordinates(s.shapes, 8192);
+          definitions.packedCoords = packed.packedCoords;
+          definitions.shapePointOffsets = packed.shapePointOffsets;
+          definitions.shapePointCounts = packed.shapePointCounts;
+          definitions.packedReady = true;
+        }
       }
-      const packed = packShapesCoordinates(s.shapes, 8192);
       return { sourceId: sourceIdentity(s), revision: s.revision,
         snapshot: {
           shapes: s.shapes,
           cellNames: s.cellNames,
           topCellId: s.topCellId,
-          packedCoords: packed.packedCoords,
-          shapePointOffsets: packed.shapePointOffsets,
-          shapePointCounts: packed.shapePointCounts,
+          packedCoords: definitions?.packedCoords,
+          shapePointOffsets: definitions?.shapePointOffsets,
+          shapePointCounts: definitions?.shapePointCounts,
         },
         cellId: s.cellId, depth: s.depth, transform: s.transform, opacity: s.opacity, styles: styles };
     });
   }
 
-  /**
-   * OpenGL C++ 主路径现已原生绘制全部多边形/路径几何及未展开子实例边界框（RECT_OUTLINE），
-   * 可见 TEXT 标签则由 LayoutCanvasView 在 glActive=true 时通过 drawTextOverlays 独立叠层绘制，
-   * 绝不再因存在未展开子实例或 TEXT 标签而强制关闭 GPU 退回 20 万顶点上限的 ArkUI 软渲染。
-   */
   requiresArkUi(sources: ViewSceneSource[], _viewport: WorldViewport, _zoomPercent: number = 100): boolean {
     this.sourceKey(sources);
     return false;
   }
 
-  /** 仅提取当前视口可见的 TEXT 标签图元供 GPU 画布上方轻量叠层渲染（远景 <0.5% 自动隐藏亚像素文字） */
   drawTextOverlays(sources: ViewSceneSource[], viewport: WorldViewport,
     limit: number = 256, zoomPercent: number = 100): ViewScenePrimitive[] {
     if (!Number.isFinite(zoomPercent) || zoomPercent < 0.5) {
@@ -326,12 +314,16 @@ export class ViewRenderSceneService {
 
   draw(sources: ViewSceneSource[], viewport: WorldViewport, limit: number = 2000,
     zoomPercent: number = 100, textOnly: boolean = false): ViewSceneDrawResult {
+    let validKey: string = '';
+    let validSources: Shape[][] = [];
     try {
       const key: string = `${this.sourceKey(sources)}:${JSON.stringify(viewport)}:${limit}:${zoomPercent}:${textOnly}`;
       if (key === this.cacheKey && this.sameDefinitions(sources, this.cacheSources)) return this.cache;
       if (!Number.isSafeInteger(limit) || limit < 0 || ![viewport.minX, viewport.minY, viewport.maxX, viewport.maxY]
         .every((n: number): boolean => Number.isFinite(n)) || viewport.maxX < viewport.minX || viewport.maxY < viewport.minY ||
         !Number.isFinite(zoomPercent) || zoomPercent <= 0) throw new Error('场景视口或预算无效');
+      validKey = key;
+      validSources = sources.map((s: ViewSceneSource): Shape[] => s.shapes);
       const primitives: ViewScenePrimitive[] = [];
       let nodes: number = 0; let points: number = 0;
       for (const s of sources) {
@@ -430,18 +422,23 @@ export class ViewRenderSceneService {
           }
         };
         visit(s.cellId, identity(), s.depth, [], 'root');
-        // Native orders layer/datatype inside each source. Source order remains
-        // the outer paint order, including TEXT; never sort the merged array.
         sourcePrimitives.sort((a: ViewScenePrimitive, b: ViewScenePrimitive): number => {
           return a.layerNumber - b.layerNumber || a.datatype - b.datatype;
         });
         primitives.push(...sourcePrimitives);
       }
-      this.cacheKey = key; this.cacheSources = sources.map((s: ViewSceneSource): Shape[] => s.shapes);
+      this.cacheKey = validKey; this.cacheSources = validSources;
       this.cache = { primitives: primitives, overflow: false, limit: limit, message: '' }; return this.cache;
     } catch (e) {
-      this.cacheKey = ''; this.cacheSources = [];
-      // Atomic rejection must also release the previous frame's derived points/keys.
+      // Cache deterministic budget-overflow results per viewport key so multiple UI queries in the same frame
+      // never re-run 500,000-node JS traversals; only reset cacheKey if source/viewport validation itself failed.
+      if (validKey.length > 0) {
+        this.cacheKey = validKey;
+        this.cacheSources = validSources;
+      } else {
+        this.cacheKey = '';
+        this.cacheSources = [];
+      }
       this.cache = { primitives: [], overflow: true, limit: limit, message: `当前场景未完整绘制：${e}` };
       return this.cache;
     }

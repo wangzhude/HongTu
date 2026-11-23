@@ -5,7 +5,7 @@ import { UI } from '../../common/UiTokens';
 import { WorkbenchIcon } from './WorkbenchIcon';
 import { AiContext, aiService } from '../../services/AiService';
 import { pythonBridgeService, PythonLayoutArtifact, PythonDocumentInput, PythonInputMode,
-  PythonParameter, PythonOperationHandle, PythonCancellationResult } from '../../services/PythonBridgeService';
+  PythonParameter, PythonOperationHandle, PythonCancellationResult, PythonExecutionMode } from '../../services/PythonBridgeService';
 import { pythonWorkspaceService, PythonTemplate, PythonRunRecord, PythonEditorDraft } from '../../services/PythonWorkspaceService';
 import { readAutomationText, saveAutomationText } from '../../services/AutomationFiles';
 
@@ -40,6 +40,8 @@ export struct PythonLayoutPanel {
   @State busy: boolean = false;
   @State running: boolean = false;
   @State showSettings: boolean = false;
+  @State executionMode: PythonExecutionMode = 'embedded';
+  @State embeddedVersionLabel: string = '';
   @State endpoint: string = 'http://127.0.0.1:7865';
   @State token: string = '';
   @State previewPath: string = '';
@@ -82,11 +84,15 @@ export struct PythonLayoutPanel {
     this.templates = pythonWorkspaceService.templates();
     this.history = pythonWorkspaceService.history();
     const generation: number = this.panelGeneration;
+    const rtInfo = pythonBridgeService.getEmbeddedRuntimeInfo();
+    this.embeddedVersionLabel = rtInfo.available ? rtInfo.version : '端侧内置引擎未就绪';
+    this.executionMode = pythonBridgeService.getExecutionMode();
     pythonBridgeService.loadConfig().then((config) => {
       if (!this.active || generation !== this.panelGeneration) return;
       this.endpoint = config.endpoint;
       this.token = config.token;
-      this.showSettings = this.openConnectionSettings || config.token.length === 0;
+      this.executionMode = config.executionMode ?? 'embedded';
+      this.showSettings = this.openConnectionSettings && this.executionMode === 'remote';
     }).catch((error: Error) => { if (this.active && generation === this.panelGeneration) this.status = error.message; });
   }
 
@@ -361,7 +367,7 @@ export struct PythonLayoutPanel {
         .border({ width: { bottom: 1 }, color: COLORS.border })
       Row({ space: 4 }) {
         this.SectionTab('编辑器', 'editor')
-        this.SectionTab('连接', 'connection')
+        this.SectionTab('引擎', 'connection')
         this.SectionTab('模板', 'templates')
         this.SectionTab('历史', 'history')
       }.width('100%').padding({ left: 16, right: 16, top: 4, bottom: 0 }).border({ width: { bottom: 1 }, color: COLORS.border })
@@ -412,9 +418,41 @@ export struct PythonLayoutPanel {
 
   @Builder
   ConnectionSection() {
-    Column({ space: 16 }) {
-      Text('连接电脑上的 Python 执行服务').fontSize(UI.titleSize).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
-      Text('CPython · KLayout API').fontSize(UI.fontCaption).fontColor(COLORS.muted)
+    Column({ space: 14 }) {
+      Text('Python 执行引擎切换').fontSize(UI.titleSize).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
+      Column({ space: 8 }) {
+        Row({ space: 8 }) {
+          Button('端侧内置 Python 3（推荐·免伴随端）', { type: ButtonType.Normal })
+            .layoutWeight(1).height(34).fontSize(12)
+            .fontWeight(this.executionMode === 'embedded' ? FontWeight.Bold : FontWeight.Regular)
+            .fontColor(this.executionMode === 'embedded' ? COLORS.primary : COLORS.ink)
+            .backgroundColor(this.executionMode === 'embedded' ? COLORS.primarySoft : COLORS.surfaceMuted)
+            .borderRadius(UI.controlRadius)
+            .onClick(() => {
+              this.executionMode = 'embedded';
+              pythonBridgeService.setExecutionMode('embedded');
+              this.status = '已切换至端侧内置 Python 3 引擎（离线可用，无需桌面伴随服务）';
+            })
+          Button('远程算力伴随端（可选）', { type: ButtonType.Normal })
+            .layoutWeight(1).height(34).fontSize(12)
+            .fontWeight(this.executionMode === 'remote' ? FontWeight.Bold : FontWeight.Regular)
+            .fontColor(this.executionMode === 'remote' ? COLORS.primary : COLORS.ink)
+            .backgroundColor(this.executionMode === 'remote' ? COLORS.primarySoft : COLORS.surfaceMuted)
+            .borderRadius(UI.controlRadius)
+            .onClick(() => {
+              this.executionMode = 'remote';
+              pythonBridgeService.setExecutionMode('remote');
+              this.status = '已切换至远程伴随端模式，请在下方配置服务地址与令牌';
+            })
+        }.width('100%')
+        Text(`当前内置运行时：${this.embeddedVersionLabel}`)
+          .fontSize(11).fontColor(COLORS.success).width('100%').lineHeight(17)
+        Text('内置引擎原生支持 import hongtu as db / import klayout.db as db / import pya、Box/Polygon/Path/Text/CellInstArray(AREF)、Clipper2 Region 布尔与偏置及参数扫描。')
+          .fontSize(11).fontColor(COLORS.muted).width('100%').lineHeight(17)
+      }.width('100%').padding(12).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
+
+      Text('远程桌面伴随服务配置（仅远程模式需要）').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
+      Text('CPython · KLayout 桌面重型签核节点').fontSize(UI.fontCaption).fontColor(COLORS.muted)
       Column({ space: 6 }) {
         Text('服务地址').fontSize(UI.fontBody).fontColor(COLORS.ink)
         TextInput({ text: this.endpoint, placeholder: 'http://127.0.0.1:7865' })

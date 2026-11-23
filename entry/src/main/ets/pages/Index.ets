@@ -41,7 +41,7 @@ import { WorkbenchInspector, DrcRulesPopover } from '../components/workbench/Wor
 import { ShapePropertiesPopover } from '../components/workbench/ShapePropertiesPopover';
 import { DrcResultsDock } from '../components/workbench/DrcResultsDock';
 import { HdsTabs, HdsTabsController, DividerMode } from '@kit.UIDesignKit';
-import { hongTuThemeState, Radius, ThemeState, ZIndexTokens } from '../store/ThemeStore';
+import { hongTuThemeState, Radius, ThemeMode, ThemeState, ZIndexTokens } from '../store/ThemeStore';
 import { resolveHdsSystemMaterialEffect } from '../store/LuminousMaterial';
 import {
   buildLuminousContextMenuOptions,
@@ -100,10 +100,12 @@ import { layoutCompareService, LayoutCompareRun } from '../services/LayoutCompar
 import { layerStackExportService } from '../services/LayerStackExportService';
 import { pythonWorkspaceService, PythonWorkspaceBundle, PythonEditorDraft, PythonTemplate } from '../services/PythonWorkspaceService';
 import { aiHarnessService, AiHarnessResult, HarnessToolState, HarnessContextUsage } from '../services/AiHarnessService';
-import { dshLayoutAgentService, DshLayoutBackendHost, DshCmosInverterParams, DshEditOperation, DshToolExecutionOutcome, DshAgentRunResult } from '../services/DshLayoutAgentService';
+import { dshLayoutAgentService, DshLayoutBackendHost, DshCmosInverterParams, DshEditOperation, DshToolExecutionOutcome, DshAgentRunResult, DshAskUserPromptParams } from '../services/DshLayoutAgentService';
+import { aiAttachmentService, AiChatAttachment, AiClipboardPasteResult } from '../services/AiAttachmentService';
+import type { DshWebSearchItem } from '../services/DshWebSearchService';
 import type { DshPermissionMode } from '../components/dsh/DshDesign';
 import { publishAiLiveStream, resetAiLiveStream, splitInlineThinking } from '../services/AiAgentPresentation';
-import type { AiProcessStep } from '../services/AiService';
+import type { AiAskUserExchange, AiAskUserOption, AiAskUserRequest, AiProcessStep } from '../services/AiService';
 import { WorkspaceTabs } from '../components/workbench/WorkspaceTabs';
 import { ProjectPanel, ProjectRecoveryEntry } from '../components/workbench/ProjectPanel';
 import { fileRecoveryService } from '../services/FileRecoveryService';
@@ -225,7 +227,8 @@ import { defaultLayoutLayer, hasSky130DisplaySignature } from '../services/Layou
 import { BREAKPOINT_MD, BreakpointManager, DeviceType, LayoutConfig, breakpointManager } from '../common/BreakpointManager';
 import { setShiftHeld, setCtrlHeld, setAltHeld, isShiftHeld, isCtrlHeld } from '../common/ModifierKeys';
 import { canvasKeyName } from '../common/CanvasKeyboard';
-import { promptAction, window, display } from '@kit.ArkUI';
+import { componentSnapshot, promptAction, window, display } from '@kit.ArkUI';
+import { image } from '@kit.ImageKit';
 import { Elevation, SHADOW_BY_ELEVATION, BLUR_BY_LAYER } from '../common/MaterialTokens';
 import {
   dialogTransition,
@@ -303,6 +306,24 @@ interface DshLayoutLayerSummary {
   chineseName: string;
   name: string;
   visible: boolean;
+  locked?: boolean;
+  elementCount?: number;
+}
+
+interface DshAttachmentBriefItem {
+  id: string;
+  name: string;
+  kind: string;
+  mimeType: string;
+  sizeBytes: number;
+  summary: string;
+}
+
+interface DshEmbeddedPythonBrief {
+  available: boolean;
+  tier: string;
+  version: string;
+  executionMode: string;
 }
 
 interface DshLayoutActiveLayer {
@@ -564,6 +585,13 @@ struct Index {
   private readonly aiStore: AiAssistantStore = connectAiAssistantStore();
   /** 当前视图模式（查看 / 编辑），对应 KLayout viewer/editor 模式分离 */
   private canvasViewportMeasured: boolean = false;
+  private cachedDisplayLayersKey: string = '';
+  private cachedDisplayLayers: UiLayer[] = [];
+  private cachedVisibleLayerKey: string = '';
+  private cachedVisibleLayerNums: number[] = [];
+  private cachedRenderCellNamesKey: string = '';
+  private cachedRenderCellNames: string[] = [];
+  private pendingAskUserResolve: ((exchange: AiAskUserExchange) => void) | null = null;
   /** S-1: 光标世界坐标（nm）— @Observed CursorStore 隔离高频更新。
    *  必须为 @State 才能下传给子组件 @ObjectLink（CanvasHud/StatusBar 属性级观察），
    *  光标移动仅刷新观察方，不触发 Index 整树重渲染。 */
@@ -2412,6 +2440,7 @@ struct Index {
     }) {
       this.workbench()
     }
+    .id('hongtu-workbench-root')
   }
 
   @Builder
@@ -2423,8 +2452,34 @@ struct Index {
           DesktopModuleRail({
             currentModule: this.viewportStore.currentModule,
             drcIssueCount: this.verifyStore.drcIssues.length,
-            projectAction: () => { this.docStore.workspaceHistory = workspaceService.listHistory(this.docStore.activeWorkspaceId); this.panelStore.showProjectPanel = true; },
-            shortcutAction: () => { this.panelStore.showShortcutPanel = true; },
+            searchActive: this.panelStore.showSearchPanel,
+            libraryActive: this.panelStore.showLibraryPanel,
+            pythonActive: this.panelStore.showPythonPanel,
+            techActive: this.panelStore.showTechnologyPanel || this.panelStore.showLayerStackPanel,
+            compareActive: this.panelStore.showComparePanel,
+            aiActive: this.panelStore.showAiPanel,
+            macroActive: this.panelStore.showMacroPanel,
+            searchAction: () => { this.openExclusiveUtilitySheet('search'); },
+            libraryAction: () => {
+              this.docStore.libraryEntries = componentLibraryService.list();
+              this.openExclusiveUtilitySheet('library');
+            },
+            pythonAction: () => {
+              if (this.panelStore.showPythonPanel) {
+                this.closeAssistantPanel('python');
+              } else {
+                this.openPythonPanel(false);
+              }
+            },
+            technologyAction: () => { this.openExclusiveUtilitySheet('technology'); },
+            compareAction: () => { this.openExclusiveUtilitySheet('compare'); },
+            aiAction: () => { this.toggleAiPanel(); },
+            macroAction: () => { this.openExclusiveUtilitySheet('macro'); },
+            projectAction: () => {
+              this.docStore.workspaceHistory = workspaceService.listHistory(this.docStore.activeWorkspaceId);
+              this.openExclusiveUtilitySheet('project');
+            },
+            shortcutAction: () => { this.openExclusiveUtilitySheet('shortcut'); },
             openAppearanceAction: () => { this.showAppearanceSheet = true; },
             selectModuleAction: (module: WorkModule, label: string) => {
               this.selectModule(module, label);
@@ -2504,6 +2559,10 @@ struct Index {
           styleLayerAction: (layer: UiLayer) => {
             this.selectLayer(layer);
           },
+          addLayerAction: () => { this.addNewLayerQuick(); },
+          clearLayerAction: (layerNumber: number, datatype: number) => { this.clearShapesOnLayer(layerNumber, datatype, false); },
+          deleteLayerAction: (layerNumber: number, datatype: number) => { this.deleteLayerWithUndo(layerNumber, datatype, true); },
+          deleteEmptyLayersAction: () => { this.deleteAllEmptyLayersWithUndo(); },
           openShortcutAction: () => {
             this.panelStore.showShortcutPanel = true;
           },
@@ -2532,6 +2591,21 @@ struct Index {
           },
           flattenCellAction: (cellId: number) => {
             this.flattenCellInstances(cellId);
+          },
+          cellMaintenanceAction: () => {
+            this.openCanvasDialog(this.cellMaintenanceController);
+          },
+          openPCellAction: () => {
+            this.openPCellDialog();
+          },
+          openCurveAction: (kind: string) => {
+            this.openCurveDialog(kind);
+          },
+          makeCellFromSelectionAction: () => {
+            this.openMakeCellDialog();
+          },
+          arrayCopySelectionAction: () => {
+            this.openArrayCopyDialog();
           },
           lockLayerAction: (layerNumber: number, datatype: number) => {
             this.toggleLayerLock(layerNumber, datatype);
@@ -2721,23 +2795,55 @@ struct Index {
           }
           if (this.isDesktopWorkspace()) {
             Row() {
-              CanvasViewToolbar({ viewMode: this.viewportStore.currentViewMode === ViewMode.VIEWER ? '查看' : '编辑',
-                compactMode: this.viewportStore.canvasViewportWidth < 1180,
-                zoomPercent: this.viewportStore.zoomPercent, canUndo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanUndo, canRedo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanRedo,
+              CanvasViewToolbar({
+                viewMode: this.viewportStore.currentViewMode === ViewMode.VIEWER ? '查看' : '编辑',
+                compactMode: this.viewportStore.canvasViewportWidth < 1220,
+                zoomPercent: this.viewportStore.zoomPercent,
+                canUndo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanUndo,
+                canRedo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanRedo,
+                editable: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT,
+                hasSelection: this.viewportStore.selectedShapeCount > 0 || this.viewportStore.selectedShapeId >= 0,
+                selectionCount: this.viewportStore.selectedShapeCount,
+                moveToolActive: this.viewportStore.currentTool === ActiveTool.Move,
+                activeLayerNumber: this.viewportStore.selectedLayerNumber,
+                activeDatatype: this.viewportStore.selectedDatatype,
+                activeLayerColor: this.activeSelectedLayerColor(),
+                activeLayerLabel: this.activeSelectedLayerShortLabel(),
                 scopeText: this.viewportStore.instanceScopeLabel,
                 gridSnapEnabled: this.viewportStore.snapEnabled,
                 geometrySnapEnabled: this.viewportStore.geometrySnapEnabled,
                 routingModeLabel: routingConstraintService.modeLabel(this.viewportStore.routingMode),
                 routingLocked: this.viewportStore.routingMode !== RoutingMode.FREE,
                 multiSelectAdditive: this.viewportStore.multiSelectAdditive,
-                undoAction: () => this.undoEdit(), redoAction: () => this.redoEdit(),
-                zoomAction: (delta: number) => this.setZoom(delta * 20), fitAction: () => this.fitAllShapes(),
+                undoAction: () => this.undoEdit(),
+                redoAction: () => this.redoEdit(),
+                duplicateAction: () => this.duplicateSelection(),
+                deleteAction: () => this.removeSelectedShape(),
+                moveToolAction: () => this.switchToMoveTool(),
+                rotate90Action: () => this.transformSelection('rotate', 90),
+                mirrorHAction: () => this.transformSelection('mirror', 0),
+                mirrorVAction: () => this.transformSelection('mirror', 1),
+                alignAction: (m: string) => {
+                  const t = this.alignTypeFromString(m);
+                  if (t !== null) this.alignSelection(t, this.alignLabel(t));
+                },
+                booleanAction: (op: 'merge' | 'subtract' | 'dialog') => {
+                  if (op === 'dialog') {
+                    this.openCanvasDialog(this.booleanPreviewController);
+                  } else {
+                    this.applyBooleanOp(op);
+                  }
+                },
+                traceAction: () => this.traceNets(),
+                openLayerStyleAction: () => { this.openExclusiveUtilitySheet('layer_style'); },
+                zoomAction: (delta: number) => this.setZoom(delta * 20),
+                fitAction: () => this.fitAllShapes(),
                 modeAction: (mode: string) => this.setViewMode(mode === '查看' ? ViewMode.VIEWER : ViewMode.EDIT),
                 toggleGridSnapAction: () => this.toggleGridSnapQuick(),
                 toggleGeometrySnapAction: () => this.toggleGeometrySnapQuick(),
                 cycleRoutingModeAction: () => this.cycleRoutingModeQuick(),
-                toggleMultiSelectAdditiveAction: () => this.toggleMultiSelectAdditiveQuick() })
-              Blank()
+                toggleMultiSelectAdditiveAction: () => this.toggleMultiSelectAdditiveQuick()
+              })
               if (this.viewportStore.canvasViewportWidth >= 1100) {
                 Row({ space: 4 }) {
                   Text(`选择：${this.viewportStore.selectedShapeCount} 个图形`).fontSize(12).fontColor(COLORS.ink)
@@ -2827,6 +2933,7 @@ struct Index {
             Column() {
           Stack({ alignContent: Alignment.TopStart }) {
             LayoutCanvasView({
+              preferNativeExpand: this.canPreferNativeExpand(),
               sceneRevision: this.viewportStore.viewWorkspaceSceneRevision + this.docStore.editorRevision * 2 + (this.canPreferNativeExpand() ? 0 : 1),
               sceneDiagnostic: this.viewportStore.viewWorkspaceSceneDiagnostic,
               renderSceneProvider: (): ViewSceneSource[] => this.viewWorkspaceRenderScene(),
@@ -2921,7 +3028,7 @@ struct Index {
               boxZoomAction: (left: number, top: number, width: number, height: number) => {
                 this.onCanvasBoxZoom(left, top, width, height);
               },
-              renderCellNames: this.placeableCells.map((cell: CellInfo): string => cell.name),
+              renderCellNames: this.renderCellNamesForCanvas(),
             desktopMode: this.isDesktopWorkspace(),
             isCompact: this.isCompact(),
             cursorStore: this.cursorStore,
@@ -3058,6 +3165,7 @@ struct Index {
             }
             this.buildAgentLiveHud()
           }
+          .id('hongtu-canvas-stage')
           .layoutWeight(1)
           .width('100%')
           .geometryTransition(this.canvasStageGeometryId(), { follow: true })
@@ -3489,6 +3597,320 @@ struct Index {
     }
   }
 
+  private activeSelectedLayerColor(): string {
+    const found: UiLayer | undefined = this.docStore.layers.find((l: UiLayer): boolean =>
+      l.layerNumber === this.viewportStore.selectedLayerNumber && l.datatype === this.viewportStore.selectedDatatype
+    );
+    return found !== undefined ? found.color : COLORS.primary;
+  }
+
+  private activeSelectedLayerShortLabel(): string {
+    const found: UiLayer | undefined = this.docStore.layers.find((l: UiLayer): boolean =>
+      l.layerNumber === this.viewportStore.selectedLayerNumber && l.datatype === this.viewportStore.selectedDatatype
+    );
+    if (found === undefined) return '';
+    return found.chineseName.trim().length > 0 ? found.chineseName.trim() : found.englishName.trim();
+  }
+
+  private hasActiveUtilitySheet(): boolean {
+    return this.panelStore.showProjectPanel ||
+      this.panelStore.showSearchPanel ||
+      this.panelStore.showLibraryPanel ||
+      this.panelStore.showViewWorkspacePanel ||
+      this.panelStore.showComparePanel ||
+      this.panelStore.showTechnologyPanel ||
+      this.panelStore.showVerificationPanel ||
+      this.panelStore.showMacroPanel ||
+      this.panelStore.showFilePanel ||
+      this.panelStore.showShortcutPanel ||
+      this.panelStore.showLayerStylePanel;
+  }
+
+  private closeAllUtilitySheets(): void {
+    const wasViewWs: boolean = this.panelStore.showViewWorkspacePanel;
+    this.panelStore.showProjectPanel = false;
+    this.panelStore.showSearchPanel = false;
+    this.panelStore.showLibraryPanel = false;
+    this.panelStore.showViewWorkspacePanel = false;
+    this.panelStore.showComparePanel = false;
+    this.panelStore.showTechnologyPanel = false;
+    this.panelStore.showVerificationPanel = false;
+    this.panelStore.showMacroPanel = false;
+    this.panelStore.showFilePanel = false;
+    this.panelStore.showShortcutPanel = false;
+    this.panelStore.showLayerStylePanel = false;
+    if (wasViewWs) {
+      this.closeViewWorkspace();
+    }
+  }
+
+  private openExclusiveUtilitySheet(kind: string): void {
+    const currentlyActive: boolean =
+      (kind === 'project' && this.panelStore.showProjectPanel) ||
+      (kind === 'search' && this.panelStore.showSearchPanel) ||
+      (kind === 'library' && this.panelStore.showLibraryPanel) ||
+      (kind === 'view_workspace' && this.panelStore.showViewWorkspacePanel) ||
+      (kind === 'compare' && this.panelStore.showComparePanel) ||
+      (kind === 'technology' && this.panelStore.showTechnologyPanel) ||
+      (kind === 'verification' && this.panelStore.showVerificationPanel) ||
+      (kind === 'macro' && this.panelStore.showMacroPanel) ||
+      (kind === 'file' && this.panelStore.showFilePanel) ||
+      (kind === 'shortcut' && this.panelStore.showShortcutPanel) ||
+      (kind === 'layer_style' && this.panelStore.showLayerStylePanel);
+    this.closeAllUtilitySheets();
+    if (currentlyActive) {
+      this.restoreCanvasFocusAfterPanelClose();
+      return;
+    }
+    if (kind === 'project') this.panelStore.showProjectPanel = true;
+    else if (kind === 'search') this.panelStore.showSearchPanel = true;
+    else if (kind === 'library') this.panelStore.showLibraryPanel = true;
+    else if (kind === 'view_workspace') this.panelStore.showViewWorkspacePanel = true;
+    else if (kind === 'compare') this.panelStore.showComparePanel = true;
+    else if (kind === 'technology') this.panelStore.showTechnologyPanel = true;
+    else if (kind === 'verification') this.panelStore.showVerificationPanel = true;
+    else if (kind === 'macro') this.panelStore.showMacroPanel = true;
+    else if (kind === 'file') this.panelStore.showFilePanel = true;
+    else if (kind === 'shortcut') this.panelStore.showShortcutPanel = true;
+    else if (kind === 'layer_style') this.panelStore.showLayerStylePanel = true;
+  }
+
+  @Builder
+  private buildActiveUtilitySheet() {
+    if (this.panelStore.showProjectPanel) {
+      ProjectPanel({
+        panelWidth: Math.min(640, this.panelStore.windowWidthVp - 24),
+        actionStatus: this.panelStore.statusText,
+        history: unwrapObserved(this.docStore.workspaceHistory),
+        recoveryStatus: this.docStore.recoveryStatus,
+        engineeringDependencies: unwrapObserved(this.docStore.engineeringDependencies),
+        toolBundleAvailable: this.engineeringBundle !== undefined,
+        restoreToolContentsAction: () => { this.confirmRestoreEngineeringTools(); },
+        recentEdits: editService.getHistorySummary(8),
+        recoveryEntries: unwrapObserved(this.docStore.fileRecoveryEntries),
+        recoverAction: (item: ProjectRecoveryEntry) => { this.exportRecoveryCopy(item); },
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); },
+        createAction: (library: string, top: string, dbu: number) => this.createWorkspaceDocument(library, top, dbu),
+        saveProjectAction: () => { this.saveProject(); },
+        saveProjectAsAction: () => { this.saveProject(true); },
+        openProjectAction: () => { this.openProject(); },
+        checkpointAction: () => { this.saveWorkspaceDraft(true); },
+        restoreAction: (item: WorkspaceHistory) => { this.restoreWorkspaceHistory(item); }
+      })
+    } else if (this.panelStore.showSearchPanel) {
+      ShapeSearchPanel({
+        panelWidth: Math.min(520, this.panelStore.windowWidthVp - 24),
+        shapes: this.shapes,
+        currentCellId: editService.getCurrentCellId(),
+        documentKey: `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
+        cellNames: this.propertyCellOptions().map((cell: PropertyCellOption): string => cell.name),
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); },
+        selectAction: (ids: number[]) => {
+          editService.selectMultiple(ids);
+          this.viewportStore.selectedShapeId = editService.getSelectedId();
+          this.viewportStore.selectedShapeCount = editService.getSelectedIds().length;
+          this.shapes = editService.getShapes().slice();
+          this.panelStore.statusText = `已选择 ${editService.getSelectedIds().length} 个搜索结果`;
+        },
+        locateAction: (id: number) => this.locateShapeById(id),
+        batchEditAction: (ids: number[]) => {
+          this.viewportStore.pickedPlacement = null;
+          editService.selectMultiple(ids);
+          this.syncShapesFromEditService();
+          const appliedIds: number[] = editService.getSelectedIds();
+          this.viewportStore.selectedShapeId = appliedIds.length > 0 ? appliedIds[0] : -1;
+          if (appliedIds.length > 0) {
+            const first: Shape | undefined = this.shapes.find((item: Shape) => item.id === appliedIds[0]);
+            if (first !== undefined) {
+              this.viewportStore.selectedLayerNumber = first.layerNumber;
+              this.viewportStore.selectedDatatype = first.datatype;
+            }
+            this.ensureFloatingPropertyToolReady();
+          }
+          this.closeAllUtilitySheets();
+          this.panelStore.propertyPanelClosed = false;
+          this.panelStore.statusText = `批量属性：当前 Cell 的 ${appliedIds.length} 个可编辑匹配项`;
+        },
+        enterResultCellAction: (id: number) => {
+          const shape: Shape | undefined = this.shapes.find((item: Shape) => item.id === id);
+          if (shape !== undefined && this.enterCellDefinition(shape.ownerCellId ?? editService.getTopCellId())) {
+            this.locateShapeById(id);
+          }
+        }
+      })
+    } else if (this.panelStore.showLibraryPanel) {
+      ComponentLibraryPanel({
+        panelWidth: Math.min(640, this.panelStore.windowWidthVp - 24),
+        actionStatus: this.panelStore.statusText,
+        entries: unwrapObserved(this.docStore.libraryEntries),
+        selectedPCellName: this.selectedPCellVariant()?.name ?? '',
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); },
+        editPCellAction: () => this.openPCellEditor(),
+        addPresetAction: (title: string, category: string) => { this.addPCellToLibrary(title, category); },
+        addCellAction: (title: string, category: string) => { this.addCellToLibrary(title, category); },
+        insertAction: (entry: ComponentLibraryEntry, x: number, y: number) => this.insertLibraryEntry(entry, x, y),
+        removeAction: (id: string) => { this.removeLibraryEntry(id); },
+        importAction: () => { this.importComponentLibrary(); },
+        exportAction: () => { this.exportComponentLibrary(); }
+      })
+    } else if (this.panelStore.showViewWorkspacePanel) {
+      ViewWorkspacePanel({
+        documentId: this.docStore.activeWorkspaceId,
+        documentTitle: this.docStore.currentDocumentTitle,
+        activeViewId: this.viewportStore.viewWorkspaceActiveId,
+        cellKeyNames: this.cellKeyNameLookup(),
+        views: unwrapObserved(this.viewportStore.viewWorkspaceViews),
+        bookmarks: unwrapObserved(this.viewportStore.viewWorkspaceBookmarks),
+        overlayDocuments: unwrapObserved(this.viewportStore.viewWorkspaceOverlayDocuments),
+        overlayDiagnostics: unwrapObserved(this.viewportStore.viewWorkspaceOverlayDiagnostics),
+        overlayContext: this.viewportStore.viewWorkspaceOverlayContext,
+        overlayAction: (viewId: string, expectedContext: string, overlays: ViewOverlayState[]): boolean =>
+          this.handleViewWorkspaceOverlays(viewId, expectedContext, overlays),
+        status: this.viewportStore.viewWorkspaceStatus,
+        ready: this.docStore.workspaceReady && this.viewWorkspaceDocumentId === this.docStore.activeWorkspaceId,
+        busy: this.viewportStore.viewWorkspaceFileBusy,
+        panelWidth: Math.min(620, this.panelStore.windowWidthVp - 24),
+        panelHeight: Math.max(240, this.panelStore.windowHeightVp - 120),
+        action: (kind: string, id: string, name: string): boolean => this.handleViewWorkspaceAction(kind, id, name),
+        fileAction: (importing: boolean, replace: boolean): void => { this.viewWorkspaceFileAction(importing, replace); },
+        closeAction: (): void => this.closeViewWorkspace(),
+      })
+    } else if (this.panelStore.showComparePanel) {
+      LayoutComparePanel({
+        panelWidth: Math.min(640, this.panelStore.windowWidthVp - 24),
+        panelHeight: Math.max(320, this.panelStore.windowHeightVp - 120),
+        snapshotProvider: () => this.currentExportInput(),
+        inputRevision: `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
+        revisionProvider: () => `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
+        locateAction: (layer: NativeLayoutCompareLayer, cell: string) => {
+          this.showResultCell(cell);
+          this.verifyStore.comparisonPair = `${layer.layerNumber}/${layer.datatype}`;
+          this.focusWorldBounds({ minX: layer.minX, minY: layer.minY, maxX: layer.maxX, maxY: layer.maxY });
+          this.closeAllUtilitySheets();
+          this.panelStore.statusText = `已定位比较差异：${cell} · L${layer.layerNumber}/D${layer.datatype}`;
+        },
+        resultAction: (result: NativeLayoutCompareResult) => {
+          this.verifyStore.comparisonLayers = result.success ? result.layers : [];
+          this.verifyStore.comparisonPair = '';
+          this.verifyStore.comparisonCellName = result.cellA;
+        },
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); }
+      })
+    } else if (this.panelStore.showTechnologyPanel) {
+      TechnologyPanel({
+        panelWidth: Math.min(640, this.panelStore.windowWidthVp - 24),
+        panelHeight: Math.max(320, this.panelStore.windowHeightVp - 120),
+        revisionProvider: () => `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
+        applyAction: (technology: TechnologyPackage) => this.applyTechnology(technology),
+        clearAction: () => this.clearTechnology(),
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); },
+        layerStackAction: () => { this.closeAllUtilitySheets(); this.openLayerStack(); }
+      })
+    } else if (this.panelStore.showVerificationPanel) {
+      VerificationPanel({
+        panelWidth: Math.min(680, this.panelStore.windowWidthVp - 24),
+        panelHeight: Math.max(320, this.panelStore.windowHeightVp - 120),
+        inputRevision: `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
+        documentProvider: () => this.createPythonSnapshot('document'),
+        revisionProvider: () => `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
+        locateAction: (violation: PythonViolation, cell: string) => { this.showResultCell(cell); this.locateExternalViolation(violation); },
+        resultAction: (result: PythonVerificationResult) => {
+          this.panelStore.statusText = !result.success
+            ? result.error ? `工艺验证失败：${result.error}` : '工艺验证未运行或已失效'
+            : `${result.scope}：${result.complete ? (result.passed ? '通过' : '未通过') : '不完整'}，${result.violationCount} 项`;
+        },
+        technologyAction: () => { this.openExclusiveUtilitySheet('technology'); },
+        settingsAction: () => { this.closeAllUtilitySheets(); this.openPythonPanel(false); },
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); }
+      })
+    } else if (this.panelStore.showMacroPanel) {
+      MacroPanel({
+        isCompact: this.isCompact(),
+        availableWidth: this.panelStore.layerStyleAvailableWidth,
+        availableHeight: this.panelStore.layerStyleAvailableHeight,
+        macros: this.macroList(),
+        lastStatus: this.panelStore.macroStatusText,
+        isRecording: this.panelStore.macroRecording,
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); },
+        runMacroAction: (macroId: number) => { this.runMacro(macroId); },
+        startRecordingAction: (name: string) => {
+          try {
+            macroService.startRecording(name, this.docStore.activeWorkspaceId);
+            this.panelStore.macroRecording = true;
+            this.panelStore.macroStatusText = `正在录制宏「${name}」，后续编辑操作将被记录`;
+          } catch (error) {
+            this.panelStore.macroRecording = macroService.isRecording();
+            this.panelStore.macroStatusText = `未开始新录制：${String(error)}`;
+          }
+        },
+        stopRecordingAction: () => {
+          try {
+            const macro = macroService.stopRecording();
+            this.panelStore.macroRecording = false;
+            this.panelStore.macroStatusText = macro !== null
+              ? `已保存宏「${macro.name}」（${macro.steps.length} 步）` : '未录制到任何步骤，宏未保存';
+          } catch (error) {
+            this.panelStore.macroRecording = macroService.isRecording();
+            this.panelStore.macroStatusText = `宏未保存，待录制内容保留，可重试：${String(error)}`;
+          }
+        },
+        cancelRecordingAction: () => {
+          macroService.cancelRecording();
+          this.panelStore.macroRecording = false;
+          this.panelStore.macroStatusText = '已取消录制';
+        }
+      })
+    } else if (this.panelStore.showFilePanel) {
+      FileOpenPanel({
+        isCompact: this.isCompact(),
+        files: unwrapObserved(this.docStore.recentFiles),
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); },
+        chooseFileAction: (file: RecentFile) => {
+          this.closeAllUtilitySheets();
+          this.loadRecentFile(file);
+        }
+      })
+    } else if (this.panelStore.showShortcutPanel) {
+      ShortcutPanel({
+        isCompact: this.isCompact(),
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); }
+      })
+    } else if (this.panelStore.showLayerStylePanel) {
+      LayerStylePanel({
+        availableHeight: this.panelStore.layerStyleAvailableHeight,
+        availableWidth: this.panelStore.layerStyleAvailableWidth,
+        actualLayer: this.docStore.layers.find((layer: UiLayer) =>
+          layer.layerNumber === this.viewportStore.selectedLayerNumber && layer.datatype === this.viewportStore.selectedDatatype
+        ),
+        changeStyleAction: (nextLayer: UiLayer) => {
+          this.docStore.layers = this.docStore.layers.map((layer: UiLayer): UiLayer =>
+            layer.layerNumber === nextLayer.layerNumber && layer.datatype === nextLayer.datatype ? nextLayer : layer
+          );
+          this.syncLayerVisibilityMirror();
+          this.docStore.editorRevision++;
+          this.scheduleWorkspaceDraft();
+          this.panelStore.statusText = `已更新 L${nextLayer.layerNumber}/D${nextLayer.datatype} 显示设置；真实层号与几何未改变`;
+        },
+        isCompact: this.isCompact(),
+        selectedLayerNumber: this.viewportStore.selectedLayerNumber,
+        selectedDatatype: this.viewportStore.selectedDatatype,
+        closeAction: () => { this.closeAllUtilitySheets(); this.restoreCanvasFocusAfterPanelClose(); },
+        hideLayerAction: (layerNumber: number, datatype: number) => {
+          this.setLayerVisible(layerNumber, false, datatype);
+          this.closeAllUtilitySheets();
+        },
+        setCurrentLayerAction: (layerNumber: number, datatype: number) => {
+          this.viewportStore.selectedLayerNumber = layerNumber;
+          this.viewportStore.selectedDatatype = datatype;
+          this.panelStore.statusText = `L${layerNumber}/D${datatype} 已设为当前绘制层`;
+          this.closeAllUtilitySheets();
+        }
+      })
+    } else {
+      Column().width(1).height(1)
+    }
+  }
+
   @Builder
   private buildAppearanceSheet() {
     AppearanceSettingsSheet({
@@ -3538,21 +3960,30 @@ struct Index {
       Column() {
         WorkbenchTitleBar({
           openAppearanceAction: () => { this.showAppearanceSheet = true; },
-          newFileAction: () => { this.panelStore.showProjectPanel = true; },
+          newFileAction: () => {
+            this.docStore.workspaceHistory = workspaceService.listHistory(this.docStore.activeWorkspaceId);
+            this.openExclusiveUtilitySheet('project');
+          },
           saveAsAction: () => { this.saveCurrentLayout(true); },
           shareLayoutAction: () => { this.shareCurrentLayoutSnapshot('png'); },
-          projectAction: () => { this.docStore.workspaceHistory = workspaceService.listHistory(this.docStore.activeWorkspaceId); this.panelStore.showProjectPanel = true; },
-          searchAction: () => { this.panelStore.showSearchPanel = true; },
+          projectAction: () => {
+            this.docStore.workspaceHistory = workspaceService.listHistory(this.docStore.activeWorkspaceId);
+            this.openExclusiveUtilitySheet('project');
+          },
+          searchAction: () => { this.openExclusiveUtilitySheet('search'); },
           commandSearchAction: (): void => { this.openCanvasDialog(this.commandSearchController); },
-          libraryAction: () => { this.docStore.libraryEntries = componentLibraryService.list(); this.panelStore.showLibraryPanel = true; },
-          compareAction: () => { this.panelStore.showComparePanel = true; },
+          libraryAction: () => {
+            this.docStore.libraryEntries = componentLibraryService.list();
+            this.openExclusiveUtilitySheet('library');
+          },
+          compareAction: () => { this.openExclusiveUtilitySheet('compare'); },
           viewWorkspaceAction: () => this.openViewWorkspace(),
           rdbReviewAction: () => this.openRdbReview(),
-          technologyAction: () => { this.panelStore.showTechnologyPanel = true; },
-          verificationAction: () => { this.panelStore.showVerificationPanel = true; },
+          technologyAction: () => { this.openExclusiveUtilitySheet('technology'); },
+          verificationAction: () => { this.openExclusiveUtilitySheet('verification'); },
           isCompact: this.isCompact(),
           isDesktop: this.isDesktopWorkspace(),
-          narrowWindow: this.panelStore.windowWidthVp < 1100,
+          narrowWindow: this.panelStore.windowWidthVp < 1180,
           zoomPercent: this.viewportStore.zoomPercent,
           canUndo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanUndo,
           canRedo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanRedo,
@@ -3563,6 +3994,18 @@ struct Index {
           aiRunning: this.aiStore.aiLoading,
           aiPending: this.aiStore.aiPendingSummary.length > 0,
           showMacroPanel: this.panelStore.showMacroPanel,
+          showPythonPanel: this.panelStore.showPythonPanel,
+          openPythonAction: () => {
+            if (this.panelStore.showPythonPanel) {
+              this.closeAssistantPanel('python');
+            } else {
+              this.openPythonPanel(false);
+            }
+          },
+          tabs: unwrapObserved(this.docStore.workspaceTabs),
+          activeTabId: this.docStore.activeWorkspaceId,
+          selectTabAction: (id: string) => this.switchWorkspaceDocument(id),
+          closeTabAction: (id: string) => { this.closeWorkspaceDocument(id); },
           currentModule: this.viewportStore.currentModule,
           drcIssueCount: this.verifyStore.drcIssues.length,
           viewMode: this.viewportStore.currentViewMode === ViewMode.VIEWER ? '查看' : '编辑',
@@ -3574,7 +4017,7 @@ struct Index {
           openFileAction: async () => {
             await this.pickAndParseFile();
           },
-          recentFilesAction: () => { this.panelStore.showFilePanel = true; },
+          recentFilesAction: () => { this.openExclusiveUtilitySheet('file'); },
           saveAction: () => {
             this.saveCurrentLayout();
           },
@@ -3585,10 +4028,7 @@ struct Index {
             this.runDrcBackground();
           },
           toggleMacroAction: () => {
-            this.panelStore.showMacroPanel = !this.panelStore.showMacroPanel;
-            if (this.panelStore.showMacroPanel) {
-              this.panelStore.showAiPanel = false;
-            }
+            this.openExclusiveUtilitySheet('macro');
           },
           toggleAiAction: () => this.toggleAiPanel(),
           selectModuleAction: (module: WorkModule, label: string) => {
@@ -3614,14 +4054,15 @@ struct Index {
           toggleInspectorAction: () => this.toggleInspectorPanel()
         })
 
-        if (this.viewportStore.currentModule !== WorkModule.Data) {
+        // 桌面端标签页已直接内联进 WorkbenchTitleBar，仅在触控窄屏且打开 ≥2 个文档时展示次级标签栏
+        if (!this.isDesktopWorkspace() && this.viewportStore.currentModule !== WorkModule.Data && this.docStore.workspaceTabs.length > 1) {
           WorkspaceTabs({
-            desktopMode: this.isDesktopWorkspace(),
+            desktopMode: false,
             tabs: unwrapObserved(this.docStore.workspaceTabs),
             activeId: this.docStore.activeWorkspaceId,
             selectAction: (id: string) => this.switchWorkspaceDocument(id),
             closeAction: (id: string) => { this.closeWorkspaceDocument(id); },
-            newAction: () => { this.panelStore.showProjectPanel = true; }
+            newAction: () => { this.openExclusiveUtilitySheet('project'); }
           })
           .transition(this.floatingTransition(TransitionEdge.TOP))
         }
@@ -3638,97 +4079,6 @@ struct Index {
       .backgroundColor(this.themeState.isLuminousBackgroundEnabled() ? Color.Transparent : COLORS.bg)
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-
-      if (this.panelStore.showProjectPanel) {
-        Stack({ alignContent: Alignment.Center }) {
-          Column()
-            .width('100%')
-            .height('100%')
-            .backgroundColor('rgba(15, 23, 42, 0.24)')
-            .onClick(() => { this.panelStore.showProjectPanel = false; this.restoreCanvasFocusAfterPanelClose(); })
-          ProjectPanel({
-            panelWidth: Math.min(640, this.panelStore.windowWidthVp - 24),
-            actionStatus: this.panelStore.statusText,
-            history: unwrapObserved(this.docStore.workspaceHistory),
-            recoveryStatus: this.docStore.recoveryStatus,
-            engineeringDependencies: unwrapObserved(this.docStore.engineeringDependencies),
-            toolBundleAvailable: this.engineeringBundle !== undefined,
-            restoreToolContentsAction: () => { this.confirmRestoreEngineeringTools(); },
-            recentEdits: editService.getHistorySummary(8),
-            recoveryEntries: unwrapObserved(this.docStore.fileRecoveryEntries),
-            recoverAction: (item: ProjectRecoveryEntry) => { this.exportRecoveryCopy(item); },
-            closeAction: () => { this.panelStore.showProjectPanel = false; this.restoreCanvasFocusAfterPanelClose(); },
-            createAction: (library: string, top: string, dbu: number) => this.createWorkspaceDocument(library, top, dbu),
-            saveProjectAction: () => { this.saveProject(); },
-            saveProjectAsAction: () => { this.saveProject(true); },
-            openProjectAction: () => { this.openProject(); },
-            checkpointAction: () => { this.saveWorkspaceDraft(true); },
-            restoreAction: (item: WorkspaceHistory) => { this.restoreWorkspaceHistory(item); }
-          })
-        }
-        .width('100%')
-        .height('100%')
-        .padding({
-          top: Math.max(8, this.safeAreaTopVp + 8),
-          bottom: this.isDesktopWorkspace() ? Math.max(12, this.safeAreaBottomVp + 8) : 78
-        })
-        .zIndex(ZIndexTokens.projectPanel)
-        .transition(this.modalTransition())
-      }
-      if (this.panelStore.showSearchPanel) {
-        ShapeSearchPanel({
-          panelWidth: Math.min(460, this.panelStore.windowWidthVp - 32),
-          shapes: this.shapes,
-          currentCellId: editService.getCurrentCellId(),
-          documentKey: `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
-          cellNames: this.propertyCellOptions().map((cell: PropertyCellOption): string => cell.name),
-          closeAction: () => { this.panelStore.showSearchPanel = false; },
-          selectAction: (ids: number[]) => { editService.selectMultiple(ids); this.viewportStore.selectedShapeId = editService.getSelectedId(); this.viewportStore.selectedShapeCount = editService.getSelectedIds().length; this.shapes = editService.getShapes().slice(); this.panelStore.statusText = `已选择 ${editService.getSelectedIds().length} 个搜索结果`; },
-          locateAction: (id: number) => this.locateShapeById(id),
-          batchEditAction: (ids: number[]) => {
-            this.viewportStore.pickedPlacement = null;
-            editService.selectMultiple(ids);
-            this.syncShapesFromEditService();
-            const appliedIds: number[] = editService.getSelectedIds();
-            this.viewportStore.selectedShapeId = appliedIds.length > 0 ? appliedIds[0] : -1;
-            if (appliedIds.length > 0) {
-              const first: Shape | undefined = this.shapes.find((item: Shape) => item.id === appliedIds[0]);
-              if (first !== undefined) {
-                this.viewportStore.selectedLayerNumber = first.layerNumber;
-                this.viewportStore.selectedDatatype = first.datatype;
-              }
-              this.ensureFloatingPropertyToolReady();
-            }
-            this.panelStore.showSearchPanel = false;
-            this.panelStore.propertyPanelClosed = false;
-            this.panelStore.statusText = `批量属性：当前 Cell 的 ${appliedIds.length} 个可编辑匹配项`;
-          },
-          enterResultCellAction: (id: number) => {
-            const shape: Shape | undefined = this.shapes.find((item: Shape) => item.id === id);
-            if (shape !== undefined && this.enterCellDefinition(shape.ownerCellId ?? editService.getTopCellId())) {
-              this.locateShapeById(id);
-            }
-          }
-        })
-        .transition(this.floatingTransition(TransitionEdge.END))
-      }
-      if (this.panelStore.showLibraryPanel) {
-        ComponentLibraryPanel({
-          panelWidth: Math.min(640, this.panelStore.windowWidthVp - 32),
-          actionStatus: this.panelStore.statusText,
-          entries: unwrapObserved(this.docStore.libraryEntries),
-          selectedPCellName: this.selectedPCellVariant()?.name ?? '',
-          closeAction: () => { this.panelStore.showLibraryPanel = false; },
-          editPCellAction: () => this.openPCellEditor(),
-          addPresetAction: (title: string, category: string) => { this.addPCellToLibrary(title, category); },
-          addCellAction: (title: string, category: string) => { this.addCellToLibrary(title, category); },
-          insertAction: (entry: ComponentLibraryEntry, x: number, y: number) => this.insertLibraryEntry(entry, x, y),
-          removeAction: (id: string) => { this.removeLibraryEntry(id); },
-          importAction: () => { this.importComponentLibrary(); },
-          exportAction: () => { this.exportComponentLibrary(); }
-        })
-        .transition(this.modalTransition())
-      }
 
       if (this.panelStore.showAiPanel) {
         AiAssistantPanel({
@@ -3820,6 +4170,22 @@ struct Index {
               promptAction: (prompt: string, resumeTask?: boolean, forceReadOnly?: boolean) => {
                 this.handleAiPromptFull(prompt, resumeTask, forceReadOnly);
               },
+              pendingAttachments: unwrapObserved(this.aiStore.aiPendingAttachments),
+              webSearchEnabled: this.aiStore.aiWebSearchEnabled,
+              pendingAskUser: unwrapObserved(this.aiStore.aiPendingAskUser),
+              toggleWebSearchAction: (enabled: boolean) => { this.aiStore.aiWebSearchEnabled = enabled; },
+              pickPhotoAttachmentAction: () => { this.pickAiPhotosForChat(); },
+              pickFileAttachmentAction: () => { this.pickAiFilesForChat(); },
+              captureCanvasAttachmentAction: () => { this.attachCurrentCanvasSnapshotToChat(); },
+              pasteClipboardAttachmentAction: () => { this.pasteClipboardIntoAiChat(); },
+              dropAttachmentUrisAction: (uris: string[]) => { this.ingestDroppedUrisIntoAiChat(uris); },
+              removePendingAttachmentAction: (id: string) => {
+                this.aiStore.aiPendingAttachments = this.aiStore.aiPendingAttachments.filter((a: AiChatAttachment): boolean => a.id !== id);
+              },
+              copyAttachmentAction: (att: AiChatAttachment) => { this.copyAiAttachmentToClipboard(att); },
+              saveAttachmentAsAction: (att: AiChatAttachment) => { this.saveAiAttachmentAs(att); },
+              openAttachmentLayoutAction: (att: AiChatAttachment) => { this.openAiLayoutAttachment(att, 'new_tab'); },
+              submitAskUserAction: (exchange: AiAskUserExchange) => { this.resolvePendingAskUser(exchange); },
               contextSummary: this.aiContextDetail()
             })
             .zIndex(ZIndexTokens.aiAssistantPanel)
@@ -3852,23 +4218,6 @@ struct Index {
           .transition(this.floatingTransition(TransitionEdge.END))
       }
 
-      if (this.panelStore.showViewWorkspacePanel) {
-        ViewWorkspacePanel({ documentId: this.docStore.activeWorkspaceId, documentTitle: this.docStore.currentDocumentTitle,
-          activeViewId: this.viewportStore.viewWorkspaceActiveId, cellKeyNames: this.cellKeyNameLookup(), views: unwrapObserved(this.viewportStore.viewWorkspaceViews), bookmarks: unwrapObserved(this.viewportStore.viewWorkspaceBookmarks),
-          overlayDocuments: unwrapObserved(this.viewportStore.viewWorkspaceOverlayDocuments), overlayDiagnostics: unwrapObserved(this.viewportStore.viewWorkspaceOverlayDiagnostics),
-          overlayContext: this.viewportStore.viewWorkspaceOverlayContext,
-          overlayAction: (viewId: string, expectedContext: string, overlays: ViewOverlayState[]): boolean =>
-            this.handleViewWorkspaceOverlays(viewId, expectedContext, overlays),
-          status: this.viewportStore.viewWorkspaceStatus, ready: this.docStore.workspaceReady && this.viewWorkspaceDocumentId === this.docStore.activeWorkspaceId,
-          busy: this.viewportStore.viewWorkspaceFileBusy, panelWidth: Math.min(620, this.panelStore.windowWidthVp - 32),
-          panelHeight: Math.max(240, this.panelStore.windowHeightVp - 140),
-          action: (kind: string, id: string, name: string): boolean => this.handleViewWorkspaceAction(kind, id, name),
-          fileAction: (importing: boolean, replace: boolean): void => { this.viewWorkspaceFileAction(importing, replace); },
-          closeAction: (): void => this.closeViewWorkspace(),
-        })
-          .position({ x: Math.max(16, this.panelStore.windowWidthVp - 636), y: 68 })
-          .transition(this.floatingTransition(TransitionEdge.END))
-      }
       if (this.panelStore.showRdbReviewPanel) {
         RdbReviewPanel({ state: unwrapObserved(this.verifyStore.rdbReviewUi), status: this.verifyStore.rdbReviewStatus, busy: this.verifyStore.rdbReviewBusy,
           canUseCurrentDrc: this.canExportDrcRdb(), panelWidth: Math.min(1100, this.panelStore.windowWidthVp - 32),
@@ -3920,36 +4269,6 @@ struct Index {
           .position({ x: Math.max(16, (this.panelStore.windowWidthVp - Math.min(700, this.panelStore.windowWidthVp - 32)) / 2), y: 68 })
           .transition(this.modalTransition())
       }
-      if (this.panelStore.showComparePanel) {
-        LayoutComparePanel({ panelWidth: Math.min(640, this.panelStore.windowWidthVp - 32),
-          panelHeight: Math.max(320, this.panelStore.windowHeightVp - 140), snapshotProvider: () => this.currentExportInput(),
-          inputRevision: `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
-          revisionProvider: () => `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
-          locateAction: (layer: NativeLayoutCompareLayer, cell: string) => {
-            this.showResultCell(cell);
-            this.verifyStore.comparisonPair = `${layer.layerNumber}/${layer.datatype}`;
-            this.focusWorldBounds({ minX: layer.minX, minY: layer.minY, maxX: layer.maxX, maxY: layer.maxY });
-            this.panelStore.showComparePanel = false;
-            this.panelStore.statusText = `已定位比较差异：${cell} · L${layer.layerNumber}/D${layer.datatype}`;
-          },
-          resultAction: (result: NativeLayoutCompareResult) => {
-            this.verifyStore.comparisonLayers = result.success ? result.layers : []; this.verifyStore.comparisonPair = ''; this.verifyStore.comparisonCellName = result.cellA;
-          },
-          closeAction: () => { this.panelStore.showComparePanel = false; }
-        })
-          .position({ x: Math.max(16, this.panelStore.windowWidthVp - 656), y: 68 })
-          .transition(this.floatingTransition(TransitionEdge.END))
-      }
-      if (this.panelStore.showTechnologyPanel) {
-        TechnologyPanel({ panelWidth: Math.min(640, this.panelStore.windowWidthVp - 32), panelHeight: Math.max(320, this.panelStore.windowHeightVp - 140),
-          revisionProvider: () => `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
-          applyAction: (technology: TechnologyPackage) => this.applyTechnology(technology),
-          clearAction: () => this.clearTechnology(), closeAction: () => { this.panelStore.showTechnologyPanel = false; },
-          layerStackAction: () => { this.panelStore.showTechnologyPanel = false; this.openLayerStack(); }
-        })
-          .position({ x: Math.max(16, this.panelStore.windowWidthVp - 656), y: 68 })
-          .transition(this.floatingTransition(TransitionEdge.END))
-      }
       if (this.panelStore.showLayerStackPanel) {
         LayerStackPanel({ panelWidth: Math.min(1020, this.panelStore.windowWidthVp - 32), panelHeight: Math.max(320, this.panelStore.windowHeightVp - 140),
           inputContext: this.layerStackContext(),
@@ -3959,119 +4278,35 @@ struct Index {
           .position({ x: Math.max(16, (this.panelStore.windowWidthVp - Math.min(1020, this.panelStore.windowWidthVp - 32)) / 2), y: 68 })
           .transition(this.modalTransition())
       }
-      if (this.panelStore.showVerificationPanel) {
-        VerificationPanel({ panelWidth: Math.min(680, this.panelStore.windowWidthVp - 32), panelHeight: Math.max(320, this.panelStore.windowHeightVp - 140),
-          inputRevision: `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
-          documentProvider: () => this.createPythonSnapshot('document'), revisionProvider: () => `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`,
-          locateAction: (violation: PythonViolation, cell: string) => { this.showResultCell(cell); this.locateExternalViolation(violation); },
-          resultAction: (result: PythonVerificationResult) => { this.panelStore.statusText = !result.success
-            ? result.error ? `工艺验证失败：${result.error}` : '工艺验证未运行或已失效'
-            : `${result.scope}：${result.complete ? (result.passed ? '通过' : '未通过') : '不完整'}，${result.violationCount} 项`; },
-          technologyAction: () => { this.panelStore.showVerificationPanel = false; this.panelStore.showTechnologyPanel = true; },
-          settingsAction: () => { this.panelStore.showVerificationPanel = false; this.openPythonPanel(false); },
-          closeAction: () => { this.panelStore.showVerificationPanel = false; }
-        })
-          .position({ x: Math.max(16, this.panelStore.windowWidthVp - 696), y: 68 })
-          .transition(this.floatingTransition(TransitionEdge.END))
-      }
-
-      if (this.panelStore.showMacroPanel) {
-        MacroPanel({
-          isCompact: this.isCompact(),
-          availableWidth: this.panelStore.layerStyleAvailableWidth,
-          availableHeight: this.panelStore.layerStyleAvailableHeight,
-          macros: this.macroList(),
-          lastStatus: this.panelStore.macroStatusText,
-          isRecording: this.panelStore.macroRecording,
-          closeAction: () => {
-            this.panelStore.showMacroPanel = false;
-          },
-          runMacroAction: (macroId: number) => {
-            this.runMacro(macroId);
-          },
-          startRecordingAction: (name: string) => {
-            try {
-              macroService.startRecording(name, this.docStore.activeWorkspaceId);
-              this.panelStore.macroRecording = true;
-              this.panelStore.macroStatusText = `正在录制宏「${name}」，后续编辑操作将被记录`;
-            } catch (error) {
-              this.panelStore.macroRecording = macroService.isRecording();
-              this.panelStore.macroStatusText = `未开始新录制：${String(error)}`;
-            }
-          },
-          stopRecordingAction: () => {
-            try {
-              const macro = macroService.stopRecording();
-              this.panelStore.macroRecording = false;
-              this.panelStore.macroStatusText = macro !== null
-                ? `已保存宏「${macro.name}」（${macro.steps.length} 步）` : '未录制到任何步骤，宏未保存';
-            } catch (error) {
-              this.panelStore.macroRecording = macroService.isRecording();
-              this.panelStore.macroStatusText = `宏未保存，待录制内容保留，可重试：${String(error)}`;
-            }
-          },
-          cancelRecordingAction: () => {
-            macroService.cancelRecording();
-            this.panelStore.macroRecording = false;
-            this.panelStore.macroStatusText = '已取消录制';
-          }
-        })
-        .transition(this.modalTransition())
-      }
-
-      if (this.panelStore.showFilePanel) {
-        FileOpenPanel({
-          isCompact: this.isCompact(),
-          files: unwrapObserved(this.docStore.recentFiles),
-          closeAction: () => {
-            this.panelStore.showFilePanel = false;
-          },
-          chooseFileAction: (file: RecentFile) => {
-            this.loadRecentFile(file);
-          }
-        })
-        .transition(this.modalTransition())
-      }
-
-      if (this.panelStore.showShortcutPanel) {
-        ShortcutPanel({
-          isCompact: this.isCompact(),
-          closeAction: () => {
-            this.panelStore.showShortcutPanel = false;
-          }
-        })
-        .transition(this.modalTransition())
-      }
-
-      if (this.panelStore.showLayerStylePanel) {
-        LayerStylePanel({
-          availableHeight: this.panelStore.layerStyleAvailableHeight,
-          availableWidth: this.panelStore.layerStyleAvailableWidth,
-          actualLayer: this.docStore.layers.find((layer: UiLayer) => layer.layerNumber === this.viewportStore.selectedLayerNumber && layer.datatype === this.viewportStore.selectedDatatype),
-          changeStyleAction: (nextLayer: UiLayer) => {
-            this.docStore.layers = this.docStore.layers.map((layer: UiLayer): UiLayer => layer.layerNumber === nextLayer.layerNumber && layer.datatype === nextLayer.datatype ? nextLayer : layer);
-            this.syncLayerVisibilityMirror(); this.docStore.editorRevision++; this.scheduleWorkspaceDraft();
-            this.panelStore.statusText = `已更新 L${nextLayer.layerNumber}/D${nextLayer.datatype} 显示设置；真实层号与几何未改变`;
-          },
-          isCompact: this.isCompact(),
-          selectedLayerNumber: this.viewportStore.selectedLayerNumber,
-            selectedDatatype: this.viewportStore.selectedDatatype,
-          closeAction: () => {
-            this.panelStore.showLayerStylePanel = false;
-          },
-          hideLayerAction: (layerNumber: number, datatype: number) => {
-            this.setLayerVisible(layerNumber, false, datatype);
-            this.panelStore.showLayerStylePanel = false;
-          },
-          setCurrentLayerAction: (layerNumber: number, datatype: number) => {
-            this.viewportStore.selectedLayerNumber = layerNumber;
-            this.viewportStore.selectedDatatype = datatype;
-            this.panelStore.statusText = `L${layerNumber}/D${datatype} 已设为当前绘制层`;
-            this.panelStore.showLayerStylePanel = false;
-          }
-        })
-        .transition(this.modalTransition())
-      }
+      // 统一鸿蒙原生光感半模态/居中模态宿主（收口 11 个工作台二级面板：手机底部无极半屏 / 平板与桌面居中玻璃弹窗）
+      Stack()
+        .width('100%')
+        .height('100%')
+        .hitTestBehavior(HitTestMode.None)
+        .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+        .bindSheet(
+          this.hasActiveUtilitySheet(),
+          this.buildActiveUtilitySheet(),
+          buildLuminousSheetOptions(
+            {
+              detents: this.compactSquare ? ['88%', SheetSize.MEDIUM] : [SheetSize.MEDIUM, SheetSize.LARGE],
+              preferType: this.isCompact() ? SheetType.BOTTOM : SheetType.CENTER,
+              showClose: false,
+              dragBar: true,
+              onWillDismiss: (dismissSheetAction: DismissSheetAction) => {
+                this.closeAllUtilitySheets();
+                dismissSheetAction.dismiss();
+              },
+              onDisappear: () => {
+                this.closeAllUtilitySheets();
+                this.restoreCanvasFocusAfterPanelClose();
+              }
+            },
+            this.themeState.luminous,
+            this.themeState.resolveLuminousRenderMode()
+          )
+        )
 
       if (this.docStore.activeNativeJobId.length > 0) {
         this.buildLiveJobCapsule()
@@ -4505,13 +4740,44 @@ struct Index {
     }
   }
 
+  private layersQuickSignature(): string {
+    const srcLayers: UiLayer[] = this.docStore.layers;
+    const parts: string[] = [];
+    for (let i = 0; i < srcLayers.length; i++) {
+      const l: UiLayer = srcLayers[i];
+      parts.push(`${l.layerNumber}/${l.datatype}:${l.visible ? 1 : 0}:${l.locked ? 1 : 0}:${l.selectable === false ? 0 : 1}:${l.color}:${l.fillStyle ?? ''}:${l.lineStyle ?? ''}:${l.transparency ?? -1}:${l.lineWidth ?? -1}:${l.chineseName}:${l.englishName}`);
+    }
+    return parts.join('|');
+  }
+
+  private renderCellNamesForCanvas(): string[] {
+    const key: string = `${this.docStore.activeWorkspaceId}:${this.placeableCells.length}:${this.placeableCells.map((c: CellInfo): string => `${c.id}=${c.name}`).join(',')}`;
+    if (key === this.cachedRenderCellNamesKey) {
+      return this.cachedRenderCellNames;
+    }
+    this.cachedRenderCellNamesKey = key;
+    this.cachedRenderCellNames = this.placeableCells.map((cell: CellInfo): string => cell.name);
+    return this.cachedRenderCellNames;
+  }
+
   private visibleLayerNumbers(): number[] {
+    const srcLayers: UiLayer[] = this.docStore.layers;
+    const parts: string[] = [];
+    for (let i = 0; i < srcLayers.length; i++) {
+      if (srcLayers[i].visible) parts.push(`${srcLayers[i].layerNumber}`);
+    }
+    const key: string = parts.join(',');
+    if (key === this.cachedVisibleLayerKey) {
+      return this.cachedVisibleLayerNums;
+    }
     const values: number[] = [];
-    for (let i = 0; i < this.docStore.layers.length; i++) {
-      if (this.docStore.layers[i].visible) {
-        values.push(this.docStore.layers[i].layerNumber);
+    for (let i = 0; i < srcLayers.length; i++) {
+      if (srcLayers[i].visible) {
+        values.push(srcLayers[i].layerNumber);
       }
     }
+    this.cachedVisibleLayerKey = key;
+    this.cachedVisibleLayerNums = values;
     return values;
   }
 
@@ -6116,7 +6382,7 @@ struct Index {
     }
   }
 
-  private activateWorkspaceDocument(document: WorkspaceDocument, adoptValidatedInPlace: boolean = false): void {
+  private activateWorkspaceDocument(document: WorkspaceDocument, adoptValidatedInPlace: boolean = false, skipRedundantNativeSync: boolean = false): void {
     this.canvasFocusReturnTicket++;
     this.revokeRdbWaiverPreview(); layerExpressionService.cancel();
     if (this.verifyStore.engineeringRestorePreview !== undefined) this.cancelEngineeringReviewRestore(this.verifyStore.engineeringRestorePreview.token);
@@ -6131,7 +6397,7 @@ struct Index {
       cellKeys: doc.cellKeys, ports: doc.ports, crossSections: doc.crossSections,
       layoutContextRecords: doc.layoutContextRecords, cellContextRecords: doc.cellContextRecords,
       cellProperties: doc.cellProperties, libProperties: doc.libProperties, layerDefinitions: doc.layerDefinitions };
-    const nativeDocument = layoutExportService.buildNativeDocument(input);
+    const nativeDocument = skipRedundantNativeSync ? null : layoutExportService.buildNativeDocument(input);
     const ownsTools: boolean = engineeringProjectService.canRefreshBundle(doc.id, doc.engineering);
     const previousTechnology: string = technologyService.serialize();
     const previousDeck: EngineeringRuleSnapshot = { name: drcService.ruleSourceText(), rules: drcService.getRules() };
@@ -6167,10 +6433,12 @@ struct Index {
       // Existing global templates/macros alone are not an edit of this document.
       if (doc.engineering === undefined) nextToolBaseline = this.engineeringBundleContext(
         this.buildEngineeringBundle(doc, this.collectPCellVariants(doc.shapes, doc.topCellId)), false);
-      const synchronized = nativeHongTuService.syncDocument(nativeDocument);
-      if (!synchronized.success) throw new Error(synchronized.errorMessage || '工作区文档无法同步');
-      nextPortCapabilityNotice = (synchronized.portCapabilityDiagnostics ?? []).join('；');
-      nativeChanged = true;
+      if (!skipRedundantNativeSync && nativeDocument !== null) {
+        const synchronized = nativeHongTuService.syncDocument(nativeDocument);
+        if (!synchronized.success) throw new Error(synchronized.errorMessage || '工作区文档无法同步');
+        nextPortCapabilityNotice = (synchronized.portCapabilityDiagnostics ?? []).join('；');
+        nativeChanged = true;
+      }
       // Native validation must succeed before ending recording; a refused macro save rolls it back below.
       this.finishMacroRecordingForDocumentChange(doc.id);
     } catch (error) {
@@ -6461,6 +6729,12 @@ struct Index {
 
   private async saveWorkspaceDraft(checkpoint: boolean = false, forceFlush: boolean = false): Promise<boolean> {
     if (!this.docStore.workspaceReady || (this.workspaceCloseConfirming && !forceFlush)) return false;
+    if (!checkpoint && !forceFlush && !editService.isDirty() && !this.docStore.documentDirty && !this.localPythonDraftDirty &&
+      this.docStore.currentFilePath.length > 0 && editService.getShapes().length > 50000) {
+      this.refreshWorkspaceTabs();
+      this.docStore.recoveryStatus = `大版图原文件已关联 · 免拷贝就绪 (${editService.getShapes().length} 图元)`;
+      return true;
+    }
     try {
       this.refreshWorkspaceTabs();
       const document: WorkspaceDocument = this.workspaceDocument();
@@ -7045,7 +7319,14 @@ struct Index {
   }
 
   private layersForDisplay(): UiLayer[] {
-    return this.layersWithCounts(unwrapObserved(this.docStore.layers), editService.getCurrentCellShapes());
+    const key: string = `${this.docStore.activeWorkspaceId}:${editService.getSessionRevision()}:${editService.getCurrentCellId()}:${this.layersQuickSignature()}`;
+    if (key === this.cachedDisplayLayersKey && this.cachedDisplayLayers.length > 0) {
+      return this.cachedDisplayLayers;
+    }
+    const computed: UiLayer[] = this.layersWithCounts(unwrapObserved(this.docStore.layers), editService.getCurrentCellShapes());
+    this.cachedDisplayLayersKey = key;
+    this.cachedDisplayLayers = computed;
+    return computed;
   }
 
   // Copy supported JSON layer payloads without sharing nested objects. Runtime
@@ -8387,7 +8668,7 @@ struct Index {
     const document: WorkspaceDocument = workspaceService.adoptValidatedDocument(candidate);
     // Validation and native activation finish before publishing a new document or source association.
     this.captureWorkspaceDocument();
-    this.activateWorkspaceDocument(document, true);
+    this.activateWorkspaceDocument(document, true, true);
     this.workspaceDocuments.set(document.id, document);
     const firstDrawable: Shape | undefined = importedShapes.find((shape: Shape) =>
       shape.type !== ShapeType.NODE && shape.type !== ShapeType.INSTANCE);
@@ -8993,7 +9274,12 @@ struct Index {
   }
 
   private async handleAiPromptFull(prompt: string, resumeTask: boolean = false, forceReadOnly: boolean = false): Promise<void> {
+    const stagedAttachments: AiChatAttachment[] = unwrapObserved(this.aiStore.aiPendingAttachments).slice();
+    if (prompt.trim().length === 0 && stagedAttachments.length > 0) {
+      prompt = '请分析并处理我附带的图片或文件。';
+    }
     if (!this.pageAlive || this.aiStore.aiLoading || this.aiOperationTicket > 0 || prompt.trim().length === 0) return;
+    this.aiStore.aiPendingAttachments = [];
     prompt = aiService.redactConversationText(prompt);
     const generation: number = this.pageGeneration;
     this.cancelPendingAiCommands(false);
@@ -9029,16 +9315,21 @@ struct Index {
       // A cold credential load can complete after the initial input check.
       prompt = aiService.redactConversationText(prompt);
       context = this.filteredAiContext(context);
-      this.aiStore.aiMessages = aiService.getChatHistory().slice().concat([{ role: ChatRole.USER, content: prompt, timestamp: Date.now() }]);
+      this.aiStore.aiMessages = aiService.getChatHistory().slice().concat([{
+        role: ChatRole.USER,
+        content: prompt,
+        attachments: stagedAttachments.length > 0 ? stagedAttachments : undefined,
+        timestamp: Date.now()
+      }]);
       if (aiService.getConfig().provider !== AiProvider.DEMO_MODE) {
         const effectivePerm: DshPermissionMode = forceReadOnly ? 'readonly' : this.aiStore.aiPermissionMode;
         harnessStarted = true;
-        await this.runDshNativeAgentPrompt(prompt, ticket, effectivePerm);
+        await this.runDshNativeAgentPrompt(prompt, ticket, effectivePerm, stagedAttachments);
         return;
       }
-      if (!forceReadOnly && this.aiStore.aiPermissionMode === 'auto' && /^(?:画|生成|创建|绘制).*(?:cmos\s*)?(?:反相器|inverter)/i.test(prompt.trim())) {
+      const demoHandled: boolean = await this.tryRunDemoHarnessShortcut(prompt, ticket, forceReadOnly ? 'readonly' : this.aiStore.aiPermissionMode, stagedAttachments);
+      if (demoHandled) {
         harnessStarted = true;
-        await this.runDemoDirectInverter(prompt, ticket);
         return;
       }
       this.panelStore.statusText = '演示模式：使用本地指令，不调用真实模型';
@@ -9219,6 +9510,22 @@ struct Index {
       this.aiNativeCancellation = pythonBridgeService.cancelOperation(this.aiNativeOperation);
       this.aiNativeCancellation.then((result: PythonCancellationResult): void => { this.aiStore.aiLastResult = result.message; });
       return;
+    }
+    if (this.pendingAskUserResolve !== null) {
+      const pendingReq: AiAskUserRequest | null = this.aiStore.aiPendingAskUser;
+      const resolver = this.pendingAskUserResolve;
+      this.pendingAskUserResolve = null;
+      this.aiStore.aiPendingAskUser = null;
+      resolver({
+        id: pendingReq?.id ?? 'cancelled',
+        question: pendingReq?.question ?? '',
+        context: pendingReq?.context,
+        options: pendingReq?.options ?? [],
+        multiSelect: pendingReq?.multiSelect ?? false,
+        selectedLabels: [],
+        customText: '',
+        skipped: true
+      });
     }
     if (this.aiPythonPhase === 'dsh_native') {
       dshLayoutAgentService.cancel();
@@ -9540,6 +9847,502 @@ struct Index {
     };
   }
 
+  private resolvePendingAskUser(exchange: AiAskUserExchange): void {
+    const resolver = this.pendingAskUserResolve;
+    this.pendingAskUserResolve = null;
+    this.aiStore.aiPendingAskUser = null;
+    if (resolver !== null) {
+      resolver(exchange);
+    }
+  }
+
+  private async pickAiPhotosForChat(): Promise<void> {
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const picked: AiChatAttachment[] = await aiAttachmentService.pickImagesFromGallery(context, 6);
+      if (picked.length > 0) {
+        this.aiStore.aiPendingAttachments = this.aiStore.aiPendingAttachments.concat(picked).slice(0, 12);
+        this.panelStore.statusText = `已添加 ${picked.length} 张图片附件`;
+      }
+    } catch (e) {
+      this.panelStore.statusText = `选择图片未完成：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  private async pickAiFilesForChat(): Promise<void> {
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const picked: AiChatAttachment[] = await aiAttachmentService.pickFiles(context, 6);
+      if (picked.length > 0) {
+        this.aiStore.aiPendingAttachments = this.aiStore.aiPendingAttachments.concat(picked).slice(0, 12);
+        this.panelStore.statusText = `已添加 ${picked.length} 个文件附件`;
+      }
+    } catch (e) {
+      this.panelStore.statusText = `选择文件未完成：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  private async attachCurrentCanvasSnapshotToChat(): Promise<void> {
+    try {
+      const outcome: DshToolExecutionOutcome = await this.captureWorkbenchOrCanvasPng('canvas_viewport', 1440, 960, false, false);
+      const att: AiChatAttachment | undefined = outcome.visualAttachment ?? outcome.generatedAttachment;
+      if (att !== undefined) {
+        this.aiStore.aiPendingAttachments = this.aiStore.aiPendingAttachments.concat([att]).slice(0, 12);
+        this.panelStore.statusText = `已截取当前画布快照 (${att.summary ?? att.name})`;
+      } else {
+        this.panelStore.statusText = outcome.summary;
+      }
+    } catch (e) {
+      this.panelStore.statusText = `画布截图未完成：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  private async pasteClipboardIntoAiChat(): Promise<void> {
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const res: AiClipboardPasteResult = await aiAttachmentService.pasteFromClipboard(context);
+      if (res.attachments.length > 0) {
+        this.aiStore.aiPendingAttachments = this.aiStore.aiPendingAttachments.concat(res.attachments).slice(0, 12);
+      }
+      this.panelStore.statusText = res.statusMessage;
+      showAppToast(this.getUIContext(), res.statusMessage, AppToastDuration.SHORT);
+    } catch (e) {
+      this.panelStore.statusText = `剪贴板粘贴失败：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  private ingestDroppedUrisIntoAiChat(uris: string[]): void {
+    if (uris.length === 0) return;
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const added: AiChatAttachment[] = [];
+      for (let i = 0; i < uris.length && added.length < 8; i++) {
+        try {
+          added.push(aiAttachmentService.ingestUri(context, uris[i]));
+        } catch (_) {}
+      }
+      if (added.length > 0) {
+        this.aiStore.aiPendingAttachments = this.aiStore.aiPendingAttachments.concat(added).slice(0, 12);
+        this.panelStore.statusText = `已拖入 ${added.length} 个附件`;
+      }
+    } catch (e) {
+      this.panelStore.statusText = `拖入附件处理未完成：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  private async copyAiAttachmentToClipboard(att: AiChatAttachment): Promise<void> {
+    const msg: string = await aiAttachmentService.copyAttachmentToClipboard(att);
+    this.panelStore.statusText = msg;
+    showAppToast(this.getUIContext(), msg, AppToastDuration.SHORT);
+  }
+
+  private async saveAiAttachmentAs(att: AiChatAttachment): Promise<void> {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    const msg: string = await aiAttachmentService.saveAttachmentAs(context, att);
+    this.panelStore.statusText = msg;
+    showAppToast(this.getUIContext(), msg, AppToastDuration.SHORT);
+  }
+
+  private async openAiLayoutAttachment(att: AiChatAttachment, mode: 'new_tab' | 'merge'): Promise<boolean> {
+    if (att.kind !== 'layout') {
+      this.panelStore.statusText = '该附件不是 GDSII/OASIS 版图文件';
+      return false;
+    }
+    const revision: string = `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}`;
+    if (mode === 'merge') {
+      const artifact: PythonLayoutArtifact = {
+        name: att.name,
+        path: att.sandboxPath,
+        summary: att.summary ?? att.name,
+        sourceRevision: this.docStore.editorRevision
+      };
+      const curRev: number = this.docStore.editorRevision;
+      return await this.applyPythonResult(artifact, 'merge', curRev, (): boolean => this.pageAlive);
+    }
+    await this.loadGeneratedPython(att.sandboxPath, att.name, (): boolean =>
+      this.pageAlive && `${this.docStore.activeWorkspaceId}:${this.docStore.editorRevision}` === revision
+    );
+    return true;
+  }
+
+  private addNewLayerQuick(): void {
+    let nextNum: number = 1;
+    const used: Set<number> = new Set<number>(this.docStore.layers.map((l: UiLayer): number => l.layerNumber));
+    while (used.has(nextNum) && nextNum < 32767) nextNum++;
+    const color: string = this.layerColor(this.docStore.layers.length);
+    this.ensureDshLayerExists(nextNum, 0, `LAYER_${nextNum}`, `自定义层 ${nextNum}`, color);
+    this.viewportStore.selectedLayerNumber = nextNum;
+    this.viewportStore.selectedDatatype = 0;
+    this.docStore.editorRevision++;
+    this.scheduleWorkspaceDraft();
+    this.panelStore.statusText = `已新建并激活图层 L${nextNum}/D0`;
+  }
+
+  private clearShapesOnLayer(layerNumber: number, datatype: number, currentCellOnly: boolean = false): number {
+    if (!this.assertEditMode()) {
+      this.setViewMode(ViewMode.EDIT);
+    }
+    const curCell: number = editService.getCurrentCellId();
+    const targets: number[] = editService.getShapes()
+      .filter((s: Shape): boolean =>
+        s.type !== ShapeType.INSTANCE &&
+        s.type !== ShapeType.NODE &&
+        s.layerNumber === layerNumber &&
+        s.datatype === datatype &&
+        (!currentCellOnly || (s.ownerCellId ?? editService.getTopCellId()) === curCell)
+      )
+      .map((s: Shape): number => s.id);
+    if (targets.length === 0) {
+      this.panelStore.statusText = `图层 L${layerNumber}/D${datatype} 当前无图形可清空`;
+      return 0;
+    }
+    const deleted: number[] = editService.deleteShapesWithSelectionHistory(targets);
+    this.syncShapesFromEditService();
+    this.scheduleWorkspaceDraft();
+    this.panelStore.statusText = `已清空图层 L${layerNumber}/D${datatype} 上的 ${deleted.length} 个图形（Ctrl+Z 可撤销）`;
+    return deleted.length;
+  }
+
+  private deleteLayerWithUndo(layerNumber: number, datatype: number, deleteShapes: boolean = true): boolean {
+    if (!this.assertEditMode()) {
+      this.setViewMode(ViewMode.EDIT);
+    }
+    if (this.docStore.layers.length <= 1) {
+      this.panelStore.statusText = '至少需保留 1 个有效绘图层，无法删除最后一个图层';
+      return false;
+    }
+    const exists: boolean = this.docStore.layers.some((l: UiLayer): boolean => l.layerNumber === layerNumber && l.datatype === datatype);
+    if (!exists) {
+      this.panelStore.statusText = `图层 L${layerNumber}/D${datatype} 不存在`;
+      return false;
+    }
+    const candidate: WorkspaceDocument = workspaceService.cloneValidatedDocument(this.workspaceDocument());
+    let removedShapes: number = 0;
+    if (deleteShapes) {
+      const kept: Shape[] = [];
+      for (let i = 0; i < candidate.shapes.length; i++) {
+        const s: Shape = candidate.shapes[i];
+        if (s.type !== ShapeType.INSTANCE && s.type !== ShapeType.NODE && s.layerNumber === layerNumber && s.datatype === datatype) {
+          removedShapes++;
+          continue;
+        }
+        kept.push(s);
+      }
+      candidate.shapes = kept;
+      candidate.selectedIds = candidate.selectedIds.filter((id: number): boolean => kept.some((s: Shape): boolean => s.id === id));
+    }
+    candidate.layers = candidate.layers.filter((l: UiLayer): boolean => !(l.layerNumber === layerNumber && l.datatype === datatype));
+    if (candidate.layers.length === 0) {
+      this.panelStore.statusText = '至少需保留 1 个图层';
+      return false;
+    }
+    if (candidate.layerDefinitions !== undefined) {
+      candidate.layerDefinitions = candidate.layerDefinitions.filter(
+        (d: SourceLayerDefinition): boolean => !(d.layerNumber === layerNumber && d.datatype === datatype)
+      );
+    }
+    if (!this.commitCellStructure(candidate, candidate.selectedIds, true)) {
+      return false;
+    }
+    if (this.viewportStore.selectedLayerNumber === layerNumber && this.viewportStore.selectedDatatype === datatype) {
+      this.viewportStore.selectedLayerNumber = this.docStore.layers[0].layerNumber;
+      this.viewportStore.selectedDatatype = this.docStore.layers[0].datatype;
+    }
+    this.syncLayerVisibilityMirror();
+    this.scheduleWorkspaceDraft();
+    this.panelStore.statusText = `已删除图层 L${layerNumber}/D${datatype}${removedShapes > 0 ? `（连同清理 ${removedShapes} 个图形）` : ''}，可一键撤销`;
+    return true;
+  }
+
+  private deleteAllEmptyLayersWithUndo(): number {
+    if (!this.assertEditMode()) {
+      this.setViewMode(ViewMode.EDIT);
+    }
+    const nonEmptyKeys: Set<string> = new Set<string>();
+    for (const s of editService.getShapes()) {
+      if (s.type === ShapeType.INSTANCE || s.type === ShapeType.NODE) continue;
+      nonEmptyKeys.add(`${s.layerNumber}:${s.datatype}`);
+    }
+    for (const p of this.docPorts) {
+      nonEmptyKeys.add(`${p.layerNumber}:${p.datatype}`);
+    }
+    const candidate: WorkspaceDocument = workspaceService.cloneValidatedDocument(this.workspaceDocument());
+    const beforeLen: number = candidate.layers.length;
+    let filtered: UiLayer[] = candidate.layers.filter((l: UiLayer): boolean => nonEmptyKeys.has(`${l.layerNumber}:${l.datatype}`));
+    if (filtered.length === 0 && candidate.layers.length > 0) {
+      filtered = [candidate.layers[0]];
+    }
+    const removedCount: number = beforeLen - filtered.length;
+    if (removedCount <= 0) {
+      this.panelStore.statusText = '当前没有可清理的空图层';
+      return 0;
+    }
+    candidate.layers = filtered;
+    if (!this.commitCellStructure(candidate)) {
+      return 0;
+    }
+    if (!this.docStore.layers.some((l: UiLayer): boolean =>
+      l.layerNumber === this.viewportStore.selectedLayerNumber && l.datatype === this.viewportStore.selectedDatatype)) {
+      this.viewportStore.selectedLayerNumber = this.docStore.layers[0].layerNumber;
+      this.viewportStore.selectedDatatype = this.docStore.layers[0].datatype;
+    }
+    this.syncLayerVisibilityMirror();
+    this.scheduleWorkspaceDraft();
+    this.panelStore.statusText = `已清理 ${removedCount} 个无图元空图层（可撤销）`;
+    return removedCount;
+  }
+
+  private async captureWorkbenchOrCanvasPng(
+    target: string,
+    widthPx: number,
+    heightPx: number,
+    showInChat: boolean,
+    fitBeforeCapture: boolean
+  ): Promise<DshToolExecutionOutcome> {
+    if (fitBeforeCapture && (editService.getCurrentCellShapes().length > 0 || this.docPorts.length > 0)) {
+      this.fitAllShapes();
+    }
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    let capturedAttachment: AiChatAttachment | undefined = undefined;
+    let captureMethod: string = '';
+
+    if (target === 'workbench_window' || target === 'canvas_viewport') {
+      let pixmap: image.PixelMap | null = null;
+      try {
+        if (target === 'workbench_window') {
+          try {
+            const win = await window.getLastWindow(context);
+            pixmap = await win.snapshot();
+            captureMethod = 'window.snapshot';
+          } catch (_) {
+            pixmap = await componentSnapshot.get('hongtu-workbench-root');
+            captureMethod = 'componentSnapshot(workbench)';
+          }
+        } else {
+          pixmap = await componentSnapshot.get('hongtu-canvas-stage');
+          captureMethod = 'componentSnapshot(canvas)';
+        }
+        if (pixmap !== null) {
+          capturedAttachment = await aiAttachmentService.savePixelMapPng(
+            context,
+            pixmap,
+            `${this.currentShareBaseName()}_${target}.png`
+          );
+        }
+      } catch (_) {
+        // Fallback to C++ native rasterizer below when componentSnapshot is offscreen or unavailable
+      } finally {
+        try { if (pixmap !== null) await pixmap.release(); } catch (_) {}
+      }
+    }
+
+    if (capturedAttachment === undefined) {
+      if (this.synchronizeCurrentDocument()) {
+        const safeW: number = Math.min(4096, Math.max(320, Math.round(widthPx)));
+        const safeH: number = Math.min(4096, Math.max(240, Math.round(heightPx)));
+        try {
+          const exported = layoutExportService.exportImageToCacheForShare(
+            'png',
+            context.cacheDir,
+            `${this.currentShareBaseName()}_render`,
+            this.buildExportLayerStyles(),
+            safeW,
+            safeH
+          );
+          capturedAttachment = aiAttachmentService.adoptSandboxFile(
+            context,
+            exported.sandboxPath,
+            exported.fileName,
+            'image/png'
+          );
+          captureMethod = 'nativeLayoutRasterizerPng';
+        } catch (err) {
+          return {
+            success: false,
+            summary: `截图生成未完成：${err instanceof Error ? err.message : String(err)}`,
+            payloadJson: JSON.stringify({
+              success: false,
+              error: err instanceof Error ? err.message : String(err),
+              uiState: JSON.parse(this.inspectCurrentWorkbenchUiJson()) as Object
+            })
+          };
+        }
+      }
+    }
+
+    if (capturedAttachment === undefined) {
+      return {
+        success: false,
+        summary: '当前画布尚无图形且组件离屏，已返回结构化 UI 状态',
+        payloadJson: JSON.stringify({
+          success: false,
+          error: '当前无法生成位图快照，请参考 uiState 结构化状态',
+          uiState: JSON.parse(this.inspectCurrentWorkbenchUiJson()) as Object
+        })
+      };
+    }
+
+    const summaryText: string = `已完成 ${target === 'workbench_window' ? '软件整窗' : (target === 'layout_render' ? '版图高清光栅' : '画布视口')}截图 (${capturedAttachment.width ?? widthPx}×${capturedAttachment.height ?? heightPx} px)`;
+    return {
+      success: true,
+      summary: summaryText,
+      visualAttachment: capturedAttachment,
+      generatedAttachment: showInChat ? capturedAttachment : undefined,
+      payloadJson: JSON.stringify({
+        success: true,
+        target,
+        method: captureMethod,
+        fileName: capturedAttachment.name,
+        width: capturedAttachment.width ?? widthPx,
+        height: capturedAttachment.height ?? heightPx,
+        sizeBytes: capturedAttachment.sizeBytes,
+        visionInjected: true,
+        currentCell: this.docStore.currentEditingCellName,
+        zoomPercent: this.viewportStore.zoomPercent,
+        shapeCount: editService.getShapes().length,
+        visibleLayers: this.visibleLayerNumbers().length
+      })
+    };
+  }
+
+  private inspectCurrentWorkbenchUiJson(): string {
+    const scalePxPerNm: number = Math.max(1e-6, this.viewportStore.zoomPercent / 100);
+    const vpW: number = Math.max(1, this.viewportStore.canvasViewportWidth);
+    const vpH: number = Math.max(1, this.viewportStore.canvasViewportHeight);
+    const minWorldX: number = Math.round(-this.viewportStore.viewOffsetX / scalePxPerNm);
+    const maxWorldX: number = Math.round((vpW - this.viewportStore.viewOffsetX) / scalePxPerNm);
+    const maxWorldY: number = Math.round(this.viewportStore.viewOffsetY / scalePxPerNm);
+    const minWorldY: number = Math.round((this.viewportStore.viewOffsetY - vpH) / scalePxPerNm);
+    const pyInfo = nativeHongTuService.getEmbeddedPythonInfo();
+    return JSON.stringify({
+      window: {
+        widthVp: this.panelStore.windowWidthVp,
+        heightVp: this.panelStore.windowHeightVp,
+        deviceType: this.panelStore.currentDevice,
+        desktopMode: this.isDesktopWorkspace(),
+        themeMode: this.themeState.themeMode,
+        isDark: this.themeState.isDark
+      },
+      currentModule: this.viewportStore.currentModule,
+      viewMode: this.viewportStore.currentViewMode === ViewMode.EDIT ? 'edit' : 'viewer',
+      activeTool: this.viewportStore.currentTool,
+      activeLayer: {
+        layer: this.viewportStore.selectedLayerNumber,
+        datatype: this.viewportStore.selectedDatatype
+      },
+      camera: {
+        zoomPercent: this.viewportStore.zoomPercent,
+        viewOffsetX: Math.round(this.viewportStore.viewOffsetX),
+        viewOffsetY: Math.round(this.viewportStore.viewOffsetY),
+        hierarchyDepth: this.docStore.hierarchyDepth,
+        viewportWorldBoundsNm: {
+          minX: Math.min(minWorldX, maxWorldX),
+          minY: Math.min(minWorldY, maxWorldY),
+          maxX: Math.max(minWorldX, maxWorldX),
+          maxY: Math.max(minWorldY, maxWorldY)
+        }
+      },
+      gridAndSnap: {
+        gridVisible: this.viewportStore.gridVisible,
+        gridSizeNm: this.viewportStore.gridSize,
+        snapEnabled: this.viewportStore.snapEnabled,
+        geometrySnapEnabled: this.viewportStore.geometrySnapEnabled,
+        smartGuidesEnabled: this.viewportStore.smartGuidesEnabled,
+        routingMode: this.viewportStore.routingMode
+      },
+      panels: {
+        sidebarVisible: this.panelStore.sidebarVisible,
+        inspectorVisible: this.panelStore.inspectorVisible,
+        drcDockOpen: !this.verifyStore.drcDockCollapsed,
+        aiPanel: this.panelStore.showAiPanel,
+        pythonPanel: this.panelStore.showPythonPanel,
+        verificationPanel: this.panelStore.showVerificationPanel,
+        lvsPanel: this.panelStore.showLvsPanel,
+        macroPanel: this.panelStore.showMacroPanel,
+        libraryPanel: this.panelStore.showLibraryPanel,
+        technologyPanel: this.panelStore.showTechnologyPanel,
+        layerStackPanel: this.panelStore.showLayerStackPanel,
+        comparePanel: this.panelStore.showComparePanel,
+        rdbReviewPanel: this.panelStore.showRdbReviewPanel,
+        searchPanel: this.panelStore.showSearchPanel,
+        projectPanel: this.panelStore.showProjectPanel,
+        viewWorkspacePanel: this.panelStore.showViewWorkspacePanel
+      },
+      rulersCount: this.measureStore.rulers.length,
+      embeddedPython: pyInfo,
+      pythonExecutionMode: pythonBridgeService.getExecutionMode(),
+      statusText: this.panelStore.statusText
+    });
+  }
+
+  private computeCellBoundsForPitch(cellId: number): ShapeBounds {
+    let minX: number = Infinity;
+    let minY: number = Infinity;
+    let maxX: number = -Infinity;
+    let maxY: number = -Infinity;
+    for (const s of editService.getShapes()) {
+      if ((s.ownerCellId ?? editService.getTopCellId()) !== cellId) continue;
+      if (s.type === ShapeType.INSTANCE || s.type === ShapeType.NODE) continue;
+      const b: ShapeBounds = getShapeBounds(s);
+      if (b.minX < minX) minX = b.minX;
+      if (b.minY < minY) minY = b.minY;
+      if (b.maxX > maxX) maxX = b.maxX;
+      if (b.maxY > maxY) maxY = b.maxY;
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+      return { minX: 0, minY: 0, maxX: 1000, maxY: 1000 };
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  private buildRegularOrCurvePoints(op: DshEditOperation): Point[] {
+    const cx: number = op.x ?? 0;
+    const cy: number = op.y ?? 0;
+    if (op.action === 'create_regular_polygon') {
+      const sides: number = Math.max(3, Math.min(128, Math.round(op.sides ?? 6)));
+      const r: number = Math.max(1, op.radiusNm ?? ((op.width ?? 400) / 2));
+      const pts: Point[] = [];
+      for (let i = 0; i < sides; i++) {
+        const ang: number = (2 * Math.PI * i) / sides;
+        pts.push({ x: Math.round(cx + r * Math.cos(ang)), y: Math.round(cy + r * Math.sin(ang)) });
+      }
+      return pts;
+    }
+    const segs: number = Math.max(8, Math.min(512, Math.round(op.segments ?? 32)));
+    if (op.action === 'create_circle' || op.action === 'create_ellipse') {
+      const rx: number = Math.max(1, op.action === 'create_ellipse' ? (op.radiusXNm ?? op.radiusNm ?? 200) : (op.radiusNm ?? 200));
+      const ry: number = Math.max(1, op.action === 'create_ellipse' ? (op.radiusYNm ?? op.radiusNm ?? 120) : rx);
+      const pts: Point[] = [];
+      for (let i = 0; i < segs; i++) {
+        const ang: number = (2 * Math.PI * i) / segs;
+        pts.push({ x: Math.round(cx + rx * Math.cos(ang)), y: Math.round(cy + ry * Math.sin(ang)) });
+      }
+      return pts;
+    }
+    const outerR: number = Math.max(2, op.radiusNm ?? 400);
+    const innerR: number = Math.max(0, Math.min(outerR - 1, op.innerRadiusNm ?? Math.round(outerR * 0.5)));
+    const isArc: boolean = op.action === 'create_arc';
+    const a0Deg: number = isArc ? (op.startAngleDeg ?? 0) : 0;
+    const a1Deg: number = isArc ? (op.endAngleDeg ?? 90) : 360;
+    const a0: number = (a0Deg * Math.PI) / 180;
+    const a1: number = (a1Deg * Math.PI) / 180;
+    const outerPts: Point[] = [];
+    const innerPts: Point[] = [];
+    for (let i = 0; i <= segs; i++) {
+      const t: number = i / segs;
+      const ang: number = a0 + (a1 - a0) * t;
+      outerPts.push({ x: Math.round(cx + outerR * Math.cos(ang)), y: Math.round(cy + outerR * Math.sin(ang)) });
+      if (innerR > 0) {
+        innerPts.push({ x: Math.round(cx + innerR * Math.cos(ang)), y: Math.round(cy + innerR * Math.sin(ang)) });
+      }
+    }
+    if (innerR > 0) {
+      innerPts.reverse();
+      return outerPts.concat(innerPts);
+    }
+    return isArc ? [{ x: Math.round(cx), y: Math.round(cy) }].concat(outerPts) : outerPts.slice(0, segs);
+  }
+
   private buildDshBackendHost(ticket: number): DshLayoutBackendHost {
     const generation: number = this.pageGeneration;
     return {
@@ -9556,28 +10359,40 @@ struct Index {
         const activeLayer: DshLayoutActiveLayer = {
           layer: this.viewportStore.selectedLayerNumber, datatype: this.viewportStore.selectedDatatype
         };
+        const pyInfo = nativeHongTuService.getEmbeddedPythonInfo();
+        const pyBrief: DshEmbeddedPythonBrief = {
+          available: pyInfo.available,
+          tier: pyInfo.tier,
+          version: pyInfo.version,
+          executionMode: pythonBridgeService.getExecutionMode()
+        };
         return JSON.stringify({
           documentId: this.docStore.activeWorkspaceId,
           title: this.currentFileDisplayName() || '未命名版图',
           libraryName: this.docStore.docLibName,
           topCell: this.docStore.docTopCellName,
           currentCell,
+          allCells: this.placeableCells,
           dbuNm: cleanDbuNm(this.docStore.docPhysicalUnits),
           shapeCount: editService.getShapes().length,
+          currentCellShapeCount: editService.getCurrentCellShapes().length,
           selectedCount: ctx.coverage?.selectedTotal ?? 0,
           selectedShapes: (ctx.selectedShapes ?? []).slice(0, 16),
           activeLayer,
-          layers: this.docStore.layers.map((l: UiLayer): DshLayoutLayerSummary => ({
+          layers: this.layersForDisplay().map((l: UiLayer): DshLayoutLayerSummary => ({
             layer: l.layerNumber,
             datatype: l.datatype,
             name: l.englishName,
             chineseName: l.chineseName,
-            visible: l.visible
+            visible: l.visible,
+            locked: l.locked === true,
+            elementCount: l.elementCount
           })),
           portCount: this.docPorts.filter((p: LayoutPort): boolean => p.ownerCellId === editService.getCurrentCellId()).length,
           drcSummary: this.aiDrcResultSummary(),
           openTabs: this.docStore.workspaceTabs.length,
-          maxTabs: MAX_WORKSPACE_TABS
+          maxTabs: MAX_WORKSPACE_TABS,
+          embeddedPython: pyBrief
         });
       },
       queryLayout: async (argsJson: string): Promise<string> => {
@@ -9593,7 +10408,7 @@ struct Index {
           limit: typeof parsed['limit'] === 'number' ? (parsed['limit'] as number) : 32
         };
         const snapshot: AiContext = this.filteredAiContext(this.buildAiContext());
-        const counts: Map<number, number> = new Map<number, number>();
+        const counts: Map<number, number> = new Map<number, Set<number>>().size >= 0 ? new Map<number, number>() : new Map<number, number>();
         const children: Map<number, Set<number>> = new Map<number, Set<number>>();
         if (query.kind === 'cells') {
           for (const shape of editService.getShapes()) {
@@ -9626,6 +10441,595 @@ struct Index {
         });
         return JSON.stringify(reply);
       },
+      inspectWorkbenchUi: (): string => {
+        return this.inspectCurrentWorkbenchUiJson();
+      },
+      captureScreenshot: async (argsJson: string): Promise<DshToolExecutionOutcome> => {
+        let parsed: Record<string, Object> = {};
+        try { parsed = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const target: string = typeof parsed['target'] === 'string' ? (parsed['target'] as string) : 'canvas_viewport';
+        const widthPx: number = typeof parsed['widthPx'] === 'number' ? (parsed['widthPx'] as number) : 1280;
+        const heightPx: number = typeof parsed['heightPx'] === 'number' ? (parsed['heightPx'] as number) : 900;
+        const showInChat: boolean = parsed['showInChat'] !== false;
+        const fitBeforeCapture: boolean = parsed['fitBeforeCapture'] === true;
+        return await this.captureWorkbenchOrCanvasPng(target, widthPx, heightPx, showInChat, fitBeforeCapture);
+      },
+      automateWorkbenchUi: async (argsJson: string, _permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        let parsed: Record<string, Object> = {};
+        try { parsed = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const rawSteps: Object[] = Array.isArray(parsed['steps']) ? (parsed['steps'] as Object[]) : [];
+        const captureAfter: boolean = parsed['captureAfter'] === true;
+        const logs: string[] = [];
+
+        for (let i = 0; i < rawSteps.length; i++) {
+          const item: Object = rawSteps[i];
+          if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+          const step: Record<string, Object> = item as Record<string, Object>;
+          const action: string = typeof step['action'] === 'string' ? (step['action'] as string) : '';
+
+          if (action === 'switch_module') {
+            const mod: string = String(step['module'] ?? 'layout');
+            if (mod === 'verification' || mod === 'verify') this.selectModule(WorkModule.Verify, '验证');
+            else if (mod === 'data') this.selectModule(WorkModule.Data, '数据');
+            else this.selectModule(WorkModule.Layout, '版图');
+            logs.push(`切换模块至 ${mod}`);
+          } else if (action === 'set_view_mode') {
+            const m: string = String(step['mode'] ?? 'edit');
+            this.setViewMode(m === 'viewer' || m === 'view' ? ViewMode.VIEWER : ViewMode.EDIT);
+            logs.push(`切换模式至 ${m}`);
+          } else if (action === 'select_tool') {
+            const toolStr: string = String(step['tool'] ?? 'select');
+            if (toolStr === 'zoom_box') this.viewportStore.currentTool = ActiveTool.BoxZoom;
+            else if (toolStr === 'rect') this.viewportStore.currentTool = ActiveTool.Rect;
+            else if (toolStr === 'polygon') this.viewportStore.currentTool = ActiveTool.Polygon;
+            else if (toolStr === 'path') this.viewportStore.currentTool = ActiveTool.Path;
+            else if (toolStr === 'text') this.viewportStore.currentTool = ActiveTool.Text;
+            else if (toolStr === 'measure') this.viewportStore.currentTool = ActiveTool.Measure;
+            else this.viewportStore.currentTool = ActiveTool.Select;
+            logs.push(`激活工具 ${toolStr}`);
+          } else if (action === 'toggle_panel') {
+            const panel: string = String(step['panel'] ?? '');
+            const openVal: boolean = step['open'] !== false;
+            if (panel === 'sidebar') this.panelStore.sidebarVisible = openVal;
+            else if (panel === 'inspector') this.panelStore.inspectorVisible = openVal;
+            else if (panel === 'drc_dock') this.verifyStore.drcDockCollapsed = !openVal;
+            else if (panel === 'verification') this.panelStore.showVerificationPanel = openVal;
+            else if (panel === 'lvs') this.panelStore.showLvsPanel = openVal;
+            else if (panel === 'python') this.panelStore.showPythonPanel = openVal;
+            else if (panel === 'macro') this.panelStore.showMacroPanel = openVal;
+            else if (panel === 'library') { if (openVal) this.docStore.libraryEntries = componentLibraryService.list(); this.panelStore.showLibraryPanel = openVal; }
+            else if (panel === 'technology') this.panelStore.showTechnologyPanel = openVal;
+            else if (panel === 'layer_stack') this.panelStore.showLayerStackPanel = openVal;
+            else if (panel === 'compare') this.panelStore.showComparePanel = openVal;
+            else if (panel === 'rdb_review') { if (openVal) this.openRdbReview(); else this.panelStore.showRdbReviewPanel = false; }
+            else if (panel === 'search') this.panelStore.showSearchPanel = openVal;
+            else if (panel === 'project') this.panelStore.showProjectPanel = openVal;
+            else if (panel === 'view_workspace') { if (openVal) this.openViewWorkspace(); else this.closeViewWorkspace(); }
+            else if (panel === 'shortcuts') this.panelStore.showShortcutPanel = openVal;
+            else if (panel === 'layer_style') this.panelStore.showLayerStylePanel = openVal;
+            logs.push(`${openVal ? '打开' : '关闭'}面板 ${panel}`);
+          } else if (action === 'camera') {
+            const op: string = String(step['op'] ?? 'fit_all');
+            if (op === 'fit_all') this.fitAllShapes();
+            else if (op === 'reset_view') this.resetView();
+            else if (op === 'zoom_to' && typeof step['zoomPercent'] === 'number') {
+              viewService.setViewZoomPercent(step['zoomPercent'] as number);
+              this.viewportStore.zoomPercent = viewService.getViewZoomPercent();
+            } else if (op === 'pan_by') {
+              this.panCanvas(Number(step['dxPx'] ?? 0), Number(step['dyPx'] ?? 0));
+            } else if (op === 'focus_world_box') {
+              this.focusWorldBounds({
+                minX: Number(step['minX'] ?? 0),
+                minY: Number(step['minY'] ?? 0),
+                maxX: Number(step['maxX'] ?? 1000),
+                maxY: Number(step['maxY'] ?? 1000)
+              });
+            } else if (op === 'focus_shape' && typeof step['shapeId'] === 'number') {
+              const targetShape: Shape | undefined = editService.getShapes().find((s: Shape): boolean => s.id === (step['shapeId'] as number));
+              if (targetShape !== undefined) {
+                editService.selectShape(targetShape.id);
+                this.syncShapesFromEditService();
+                this.focusWorldBounds(getShapeBounds(targetShape));
+              }
+            } else if (op === 'focus_violation' && typeof step['violationIndex'] === 'number') {
+              const idx: number = step['violationIndex'] as number;
+              if (idx >= 0 && idx < this.verifyStore.drcIssues.length) {
+                this.locateIssue(this.verifyStore.drcIssues[idx]);
+              }
+            } else if (op === 'set_hierarchy_depth' && typeof step['depth'] === 'number') {
+              const d: number = Math.max(0, Math.min(32, Math.round(step['depth'] as number)));
+              viewService.setHierarchyDepth(d);
+              this.docStore.hierarchyDepth = d;
+            }
+            logs.push(`相机动作 ${op}`);
+          } else if (action === 'canvas_click_world') {
+            const wx: number = Number(step['x'] ?? 0);
+            const wy: number = Number(step['y'] ?? 0);
+            const additive: boolean = step['additive'] === true;
+            const hitShapes: Shape[] = editService.getCurrentCellShapes().filter((s: Shape): boolean => {
+              const b: ShapeBounds = getShapeBounds(s);
+              return wx >= b.minX && wx <= b.maxX && wy >= b.minY && wy <= b.maxY;
+            });
+            if (hitShapes.length > 0) {
+              const topHit: Shape = hitShapes[hitShapes.length - 1];
+              if (additive) {
+                const nextIds: number[] = editService.getSelectedIds().concat([topHit.id]);
+                editService.selectMultiple(nextIds);
+              } else {
+                editService.selectShape(topHit.id);
+              }
+              this.syncShapesFromEditService();
+              logs.push(`点选 (${wx},${wy}) 命中 #${topHit.id}`);
+            } else {
+              if (!additive) editService.clearSelection();
+              this.syncShapesFromEditService();
+              logs.push(`点选 (${wx},${wy}) 空白区`);
+            }
+          } else if (action === 'canvas_box_select_world') {
+            const bx0: number = Math.min(Number(step['minX'] ?? 0), Number(step['maxX'] ?? 0));
+            const by0: number = Math.min(Number(step['minY'] ?? 0), Number(step['maxY'] ?? 0));
+            const bx1: number = Math.max(Number(step['minX'] ?? 0), Number(step['maxX'] ?? 0));
+            const by1: number = Math.max(Number(step['minY'] ?? 0), Number(step['maxY'] ?? 0));
+            const encloseOnly: boolean = step['encloseOnly'] === true;
+            const matchedIds: number[] = editService.getCurrentCellShapes()
+              .filter((s: Shape): boolean => {
+                const b: ShapeBounds = getShapeBounds(s);
+                return encloseOnly
+                  ? (b.minX >= bx0 && b.maxX <= bx1 && b.minY >= by0 && b.maxY <= by1)
+                  : !(b.maxX < bx0 || b.minX > bx1 || b.maxY < by0 || b.minY > by1);
+              })
+              .map((s: Shape): number => s.id);
+            editService.selectMultiple(matchedIds);
+            this.syncShapesFromEditService();
+            logs.push(`框选命中 ${matchedIds.length} 个对象`);
+          } else if (action === 'ruler') {
+            const op: string = String(step['op'] ?? 'add');
+            if (op === 'clear_all') this.measureStore.restoreRulers([]);
+            else this.measureStore.addRuler(step['vertical'] === true, Number(step['positionNm'] ?? 0));
+            logs.push(`标尺操作 ${op}`);
+          } else if (action === 'set_grid_and_snap') {
+            if (typeof step['gridVisible'] === 'boolean') this.viewportStore.gridVisible = step['gridVisible'] as boolean;
+            if (typeof step['gridSize'] === 'number' && (step['gridSize'] as number) > 0) this.viewportStore.gridSize = step['gridSize'] as number;
+            if (typeof step['snapEnabled'] === 'boolean') this.viewportStore.snapEnabled = step['snapEnabled'] as boolean;
+            if (typeof step['routingMode'] === 'string') {
+              const rm: string = step['routingMode'] as string;
+              this.viewportStore.routingMode = rm === 'free_angle' ? RoutingMode.FREE_ANGLE : (rm === 'octilinear_45' ? RoutingMode.OCTILINEAR_45 : RoutingMode.MANHATTAN_90);
+            }
+            logs.push('更新栅格/磁吸/走线配置');
+          } else if (action === 'set_theme') {
+            const tm: string = String(step['theme'] ?? 'system');
+            const normalizedTheme: ThemeMode = tm === 'dark' ? 'dark' : (tm === 'light' ? 'light' : 'system');
+            this.themeState.setThemeMode(normalizedTheme);
+            logs.push(`切换外观主题为 ${normalizedTheme}`);
+          } else if (action === 'execute_command' && typeof step['commandId'] === 'string') {
+            this.executeWorkbenchCommand(step['commandId'] as string);
+            logs.push(`执行命令 ${step['commandId'] as string}`);
+          }
+        }
+
+        let shotOutcome: DshToolExecutionOutcome | undefined = undefined;
+        if (captureAfter) {
+          shotOutcome = await this.captureWorkbenchOrCanvasPng('canvas_viewport', 1280, 860, true, false);
+        }
+        const summaryStr: string = logs.length > 0 ? logs.join('；') : '未执行任何 UI 步骤';
+        return {
+          success: true,
+          summary: summaryStr,
+          visualAttachment: shotOutcome?.visualAttachment,
+          generatedAttachment: shotOutcome?.generatedAttachment,
+          payloadJson: JSON.stringify({
+            success: true,
+            executedSteps: logs.length,
+            summary: summaryStr,
+            uiStateAfter: JSON.parse(this.inspectCurrentWorkbenchUiJson()) as Object
+          })
+        };
+      },
+      askUser: async (params: DshAskUserPromptParams): Promise<AiAskUserExchange> => {
+        const reqId: string = `ask_${Date.now().toString(36)}`;
+        const req: AiAskUserRequest = {
+          id: reqId,
+          question: params.question,
+          context: params.header.length > 0 ? params.header : undefined,
+          options: params.options,
+          multiSelect: params.allowMultiple,
+          allowCustomInput: true,
+          placeholder: params.placeholder
+        };
+        this.aiStore.aiPendingAskUser = req;
+        this.panelStore.showAiPanel = true;
+        this.flushAiStreamUiNow();
+        return await new Promise<AiAskUserExchange>((resolve: (val: AiAskUserExchange) => void) => {
+          this.pendingAskUserResolve = resolve;
+        });
+      },
+      manageLayers: async (argsJson: string, permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        if (permission === 'readonly') throw new Error('只读问答模式下不可修改图层');
+        let args: Record<string, Object> = {};
+        try { args = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const action: string = String(args['action'] ?? '');
+        const layerNum: number = typeof args['layer'] === 'number' ? Math.round(args['layer'] as number) : this.viewportStore.selectedLayerNumber;
+        const dtNum: number = typeof args['datatype'] === 'number' ? Math.round(args['datatype'] as number) : 0;
+        const beforeMarker: Object | null = editService.getUndoMarker();
+        let summaryStr: string = '';
+        let deletedShapesCount: number = 0;
+        let addedShapesCount: number = 0;
+
+        if (action === 'create') {
+          const cName: string = typeof args['chineseName'] === 'string' && (args['chineseName'] as string).trim().length > 0
+            ? (args['chineseName'] as string).trim() : `图层 ${layerNum}/${dtNum}`;
+          const eName: string = typeof args['englishName'] === 'string' && (args['englishName'] as string).trim().length > 0
+            ? (args['englishName'] as string).trim() : `L${layerNum}_${dtNum}`;
+          const col: string = typeof args['color'] === 'string' && /^#[0-9A-Fa-f]{6}$/.test(args['color'] as string)
+            ? (args['color'] as string) : this.layerColor(this.docStore.layers.length);
+          this.ensureDshLayerExists(layerNum, dtNum, eName, cName, col);
+          this.viewportStore.selectedLayerNumber = layerNum;
+          this.viewportStore.selectedDatatype = dtNum;
+          this.docStore.editorRevision++;
+          summaryStr = `已新建并激活图层 L${layerNum}/D${dtNum} (${eName} ${cName})`;
+        } else if (action === 'delete') {
+          const batchList: Object[] = Array.isArray(args['layers']) ? (args['layers'] as Object[]) : [];
+          if (batchList.length > 0) {
+            let deletedLayers: number = 0;
+            for (let i = 0; i < batchList.length; i++) {
+              const entry: Object = batchList[i];
+              if (entry !== null && typeof entry === 'object' && !Array.isArray(entry)) {
+                const rec: Record<string, Object> = entry as Record<string, Object>;
+                const ln: number = Number(rec['layer'] ?? -1);
+                const dt: number = Number(rec['datatype'] ?? 0);
+                const beforeS: number = editService.getShapes().length;
+                if (ln >= 0 && this.deleteLayerWithUndo(ln, dt, true)) {
+                  deletedLayers++;
+                  deletedShapesCount += Math.max(0, beforeS - editService.getShapes().length);
+                }
+              }
+            }
+            summaryStr = `已批量删除 ${deletedLayers} 个图层（清理 ${deletedShapesCount} 个图形，可撤销）`;
+          } else {
+            const beforeS: number = editService.getShapes().length;
+            const ok: boolean = this.deleteLayerWithUndo(layerNum, dtNum, true);
+            deletedShapesCount = Math.max(0, beforeS - editService.getShapes().length);
+            if (!ok) {
+              return { success: false, summary: this.panelStore.statusText, payloadJson: JSON.stringify({ success: false, error: this.panelStore.statusText }) };
+            }
+            summaryStr = this.panelStore.statusText;
+          }
+        } else if (action === 'delete_empty') {
+          const removed: number = this.deleteAllEmptyLayersWithUndo();
+          summaryStr = removed > 0 ? `已清理 ${removed} 个无图形空图层` : '当前无空图层需要清理';
+        } else if (action === 'clear') {
+          const curOnly: boolean = args['allCells'] === false;
+          deletedShapesCount = this.clearShapesOnLayer(layerNum, dtNum, curOnly);
+          summaryStr = this.panelStore.statusText;
+        } else if (action === 'rename') {
+          const target: UiLayer | undefined = this.docStore.layers.find((l: UiLayer): boolean => l.layerNumber === layerNum && l.datatype === dtNum);
+          if (target === undefined) throw new Error(`图层 L${layerNum}/D${dtNum} 不存在`);
+          const nextLayers: UiLayer[] = this.docStore.layers.map((l: UiLayer): UiLayer => {
+            if (l.layerNumber !== layerNum || l.datatype !== dtNum) return l;
+            const copy: UiLayer = cloneLayerWithVisible(l, l.visible);
+            if (typeof args['chineseName'] === 'string' && (args['chineseName'] as string).trim().length > 0) copy.chineseName = (args['chineseName'] as string).trim();
+            if (typeof args['englishName'] === 'string' && (args['englishName'] as string).trim().length > 0) copy.englishName = (args['englishName'] as string).trim();
+            return copy;
+          });
+          this.docStore.layers = nextLayers;
+          this.docStore.editorRevision++;
+          summaryStr = `已重命名图层 L${layerNum}/D${dtNum}`;
+        } else if (action === 'style') {
+          const target: UiLayer | undefined = this.docStore.layers.find((l: UiLayer): boolean => l.layerNumber === layerNum && l.datatype === dtNum);
+          if (target === undefined) throw new Error(`图层 L${layerNum}/D${dtNum} 不存在`);
+          this.docStore.layers = this.docStore.layers.map((l: UiLayer): UiLayer => {
+            if (l.layerNumber !== layerNum || l.datatype !== dtNum) return l;
+            const copy: UiLayer = cloneLayerWithVisible(l, l.visible);
+            if (typeof args['color'] === 'string' && /^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/.test(args['color'] as string)) copy.color = args['color'] as string;
+            if (typeof args['fillStyle'] === 'string') copy.fillStyle = (args['fillStyle'] as string) === 'stipple' ? 'cross' : (args['fillStyle'] as string);
+            if (typeof args['lineStyle'] === 'string') copy.lineStyle = args['lineStyle'] as string;
+            if (typeof args['transparency'] === 'number') {
+              const rawT: number = args['transparency'] as number;
+              copy.transparency = rawT <= 1 ? Math.round(rawT * 100) : Math.round(Math.min(100, rawT));
+            }
+            if (typeof args['lineWidth'] === 'number') copy.lineWidth = args['lineWidth'] as number;
+            return copy;
+          });
+          this.syncLayerVisibilityMirror();
+          this.docStore.editorRevision++;
+          summaryStr = `已更新图层 L${layerNum}/D${dtNum} 视觉样式`;
+        } else if (action === 'visibility') {
+          this.setLayerVisible(layerNum, args['visible'] !== false, dtNum);
+          summaryStr = `图层 L${layerNum}/D${dtNum} 已设为${args['visible'] !== false ? '可见' : '隐藏'}`;
+        } else if (action === 'lock') {
+          const target: UiLayer | undefined = this.docStore.layers.find((l: UiLayer): boolean => l.layerNumber === layerNum && l.datatype === dtNum);
+          if (target !== undefined && (target.locked === true) !== (args['locked'] === true)) {
+            this.toggleLayerLock(layerNum, dtNum);
+          }
+          summaryStr = `图层 L${layerNum}/D${dtNum} 已${args['locked'] === true ? '锁定' : '解锁'}`;
+        } else if (action === 'selectable') {
+          this.setLayerSelectable(layerNum, dtNum, args['selectable'] !== false);
+          summaryStr = `图层 L${layerNum}/D${dtNum} 可选状态已设为 ${args['selectable'] !== false}`;
+        } else if (action === 'set_active') {
+          this.ensureDshLayerExists(layerNum, dtNum, `L${layerNum}_${dtNum}`, `图层 ${layerNum}/${dtNum}`, this.layerColor(this.docStore.layers.length));
+          this.viewportStore.selectedLayerNumber = layerNum;
+          this.viewportStore.selectedDatatype = dtNum;
+          summaryStr = `已将当前活动绘制层切换至 L${layerNum}/D${dtNum}`;
+        } else if (action === 'reorder') {
+          const idx: number = this.docStore.layers.findIndex((l: UiLayer): boolean => l.layerNumber === layerNum && l.datatype === dtNum);
+          if (idx < 0) throw new Error(`图层 L${layerNum}/D${dtNum} 不存在`);
+          const arr: UiLayer[] = this.docStore.layers.slice();
+          const moved: UiLayer = arr.splice(idx, 1)[0];
+          const dest: number = Math.max(0, Math.min(arr.length, typeof args['targetIndex'] === 'number' ? Math.round(args['targetIndex'] as number) : 0));
+          arr.splice(dest, 0, moved);
+          this.docStore.layers = arr;
+          this.docStore.editorRevision++;
+          summaryStr = `已将图层 L${layerNum}/D${dtNum} 移动至位置 #${dest}`;
+        } else if (action === 'select_shapes_on_layer') {
+          const ids: number[] = editService.getCurrentCellShapes()
+            .filter((s: Shape): boolean => s.layerNumber === layerNum && s.datatype === dtNum)
+            .map((s: Shape): number => s.id);
+          editService.selectMultiple(ids);
+          this.syncShapesFromEditService();
+          summaryStr = `已选中图层 L${layerNum}/D${dtNum} 上的 ${ids.length} 个图形`;
+        } else if (action === 'copy_shapes' || action === 'move_shapes') {
+          const dstLayer: number = Number(args['targetLayer'] ?? layerNum);
+          const dstDt: number = Number(args['targetDatatype'] ?? 0);
+          this.ensureDshLayerExists(dstLayer, dstDt, `L${dstLayer}_${dstDt}`, `图层 ${dstLayer}/${dstDt}`, this.layerColor(this.docStore.layers.length));
+          const curCell: number = editService.getCurrentCellId();
+          const allCells: boolean = args['allCells'] !== false;
+          const matches: Shape[] = editService.getShapes().filter((s: Shape): boolean =>
+            s.type !== ShapeType.INSTANCE && s.type !== ShapeType.NODE &&
+            s.layerNumber === layerNum && s.datatype === dtNum &&
+            (allCells || (s.ownerCellId ?? editService.getTopCellId()) === curCell)
+          );
+          if (action === 'copy_shapes') {
+            const copies: Shape[] = matches.map((s: Shape): Shape => {
+              const cp: Shape = cloneShapeModel(s) as Shape;
+              cp.id = 0;
+              cp.layerNumber = dstLayer;
+              cp.datatype = dstDt;
+              return cp;
+            });
+            const created: Shape[] = editService.createShapeCopies(copies, true, true);
+            addedShapesCount = created.length;
+            summaryStr = `已将 L${layerNum}/D${dtNum} 的 ${created.length} 个图形复制到 L${dstLayer}/D${dstDt}`;
+          } else {
+            editService.beginBatch();
+            try {
+              for (const s of matches) {
+                editService.updateShape(s.id, dstLayer, 0, 0, dstDt);
+              }
+            } finally {
+              editService.endBatch();
+            }
+            summaryStr = `已将 L${layerNum}/D${dtNum} 的 ${matches.length} 个图形迁移至 L${dstLayer}/D${dstDt}`;
+          }
+          this.syncShapesFromEditService();
+        } else if (action === 'batch_state') {
+          const op: string = String(args['op'] ?? 'show_all');
+          this.docStore.layers = this.docStore.layers.map((l: UiLayer): UiLayer => {
+            const cp: UiLayer = cloneLayerWithVisible(l, l.visible);
+            if (op === 'show_all') cp.visible = true;
+            else if (op === 'hide_all') cp.visible = false;
+            else if (op === 'only_layer') cp.visible = (l.layerNumber === layerNum && l.datatype === dtNum);
+            else if (op === 'invert_visibility') cp.visible = !l.visible;
+            else if (op === 'lock_all') cp.locked = true;
+            else if (op === 'unlock_all') cp.locked = false;
+            return cp;
+          });
+          this.syncLayerVisibilityMirror();
+          this.docStore.editorRevision++;
+          summaryStr = `已执行图层批量状态操作：${op}`;
+        } else if (action === 'expression') {
+          const exprRaw: string = String(args['expression'] ?? '').trim();
+          let exprBody: string = exprRaw;
+          let outL: number = typeof args['targetLayer'] === 'number' ? Math.round(args['targetLayer'] as number) : layerNum;
+          let outDt: number = typeof args['targetDatatype'] === 'number' ? Math.round(args['targetDatatype'] as number) : dtNum;
+          const eqIdx: number = exprRaw.indexOf('=');
+          if (eqIdx > 0) {
+            const lhs: string = exprRaw.substring(0, eqIdx).trim();
+            exprBody = exprRaw.substring(eqIdx + 1).trim();
+            const m: RegExpExecArray | null = /^(\d+)(?:\/(\d+))?$/.exec(lhs);
+            if (m !== null) {
+              outL = Number(m[1]);
+              outDt = m[2] !== undefined ? Number(m[2]) : 0;
+            }
+          }
+          const callRes: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('layers.expression', JSON.stringify({
+            expression: exprBody,
+            outputLayer: outL,
+            outputDatatype: outDt,
+            keepSources: true,
+            hierarchyDepth: this.docStore.hierarchyDepth
+          })));
+          this.syncShapesFromEditService();
+          summaryStr = callRes.message;
+        } else {
+          throw new Error(`未知 manage_layers 动作: ${action}`);
+        }
+
+        this.aiUndoMarker = editService.getUndoMarker();
+        this.aiStore.aiCanUndo = this.aiUndoMarker !== beforeMarker;
+        this.scheduleWorkspaceDraft();
+        return {
+          success: true,
+          addedShapes: addedShapesCount,
+          deletedShapes: deletedShapesCount,
+          summary: summaryStr,
+          payloadJson: JSON.stringify({
+            success: true,
+            action,
+            summary: summaryStr,
+            layerCount: this.docStore.layers.length,
+            activeLayer: `${this.viewportStore.selectedLayerNumber}/${this.viewportStore.selectedDatatype}`
+          })
+        };
+      },
+      manageCells: async (argsJson: string, permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        if (permission === 'readonly') throw new Error('只读问答模式下不可修改单元层级');
+        if (!this.assertEditMode()) this.setViewMode(ViewMode.EDIT);
+        let args: Record<string, Object> = {};
+        try { args = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const action: string = String(args['action'] ?? '');
+        const resolveTargetCellId = (): number => {
+          if (typeof args['cellId'] === 'number') return Math.round(args['cellId'] as number);
+          if (typeof args['cellName'] === 'string' && (args['cellName'] as string).trim().length > 0) {
+            const nm: string = (args['cellName'] as string).trim();
+            const found: CellInfo | undefined = this.placeableCells.find((c: CellInfo): boolean => c.name === nm);
+            if (found !== undefined) return found.id;
+          }
+          return editService.getCurrentCellId();
+        };
+
+        const beforeCount: number = editService.getShapes().length;
+        const beforeMarker: Object | null = editService.getUndoMarker();
+        let summaryStr: string = '';
+
+        if (action === 'create') {
+          const nm: string = String(args['cellName'] ?? args['newName'] ?? `CELL_${this.placeableCells.length}`).trim();
+          const ok: boolean = this.createNewCell(nm);
+          if (!ok) return { success: false, summary: this.panelStore.statusText, payloadJson: JSON.stringify({ success: false, error: this.panelStore.statusText }) };
+          const createdCell: CellInfo | undefined = this.placeableCells.find((c: CellInfo): boolean => c.name === nm);
+          if (args['enterAfterCreate'] !== false && createdCell !== undefined) {
+            this.enterCellDefinition(createdCell.id);
+          }
+          summaryStr = `已新建单元 ${nm}${args['enterAfterCreate'] !== false ? ' 并进入编辑' : ''}`;
+        } else if (action === 'delete') {
+          const cid: number = resolveTargetCellId();
+          if (editService.getCurrentCellStack().indexOf(cid) >= 0) {
+            const fallbackId: number = editService.getTopCellId() !== cid
+              ? editService.getTopCellId()
+              : (this.placeableCells.find((c: CellInfo): boolean => c.id !== cid)?.id ?? -1);
+            if (fallbackId >= 0) this.enterCellDefinition(fallbackId);
+          }
+          const instIds: number[] = editService.getShapes()
+            .filter((s: Shape): boolean => s.type === ShapeType.INSTANCE && s.cellId === cid)
+            .map((s: Shape): number => s.id);
+          if (instIds.length > 0) {
+            editService.deleteShapesWithSelectionHistory(instIds);
+            this.syncShapesFromEditService();
+          }
+          const prevCells: number = this.placeableCells.length;
+          this.deleteCellById(cid);
+          if (this.placeableCells.length >= prevCells) {
+            return { success: false, summary: this.panelStore.statusText, payloadJson: JSON.stringify({ success: false, error: this.panelStore.statusText }) };
+          }
+          summaryStr = this.panelStore.statusText;
+        } else if (action === 'rename') {
+          const cid: number = resolveTargetCellId();
+          const newNm: string = String(args['newName'] ?? '').trim();
+          const ok: boolean = this.performRenameCell(cid, newNm);
+          if (!ok) return { success: false, summary: this.panelStore.statusText, payloadJson: JSON.stringify({ success: false, error: this.panelStore.statusText }) };
+          summaryStr = this.panelStore.statusText;
+        } else if (action === 'duplicate') {
+          const cid: number = resolveTargetCellId();
+          const newNm: string = String(args['newName'] ?? `${this.cellName(cid)}_COPY`).trim();
+          const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('cell.duplicate', JSON.stringify({ cellId: cid, newName: newNm })));
+          if (!res.success) return { success: false, summary: res.message, payloadJson: JSON.stringify(res) };
+          summaryStr = res.message;
+        } else if (action === 'clear') {
+          const cid: number = resolveTargetCellId();
+          const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('cell.clear', JSON.stringify({ cellId: cid })));
+          summaryStr = res.message;
+        } else if (action === 'enter') {
+          const cid: number = resolveTargetCellId();
+          this.enterCellDefinition(cid);
+          this.fitAllShapes();
+          summaryStr = `已进入单元 ${this.cellName(cid)} 编辑`;
+        } else if (action === 'exit_parent') {
+          const stack: number[] = editService.getCurrentCellStack();
+          if (stack.length > 1) {
+            this.navigateCellStack(stack.length - 2);
+            summaryStr = `已退回父级单元 ${this.docStore.currentEditingCellName}`;
+          } else {
+            summaryStr = '当前已在顶层单元';
+          }
+        } else if (action === 'exit_top') {
+          editService.exitToTop();
+          this.syncShapesFromEditService();
+          this.fitAllShapes();
+          summaryStr = `已退回顶层单元 ${this.docStore.currentEditingCellName}`;
+        } else if (action === 'set_top') {
+          const cid: number = resolveTargetCellId();
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('cell.set_top', JSON.stringify({ cellId: cid })));
+          summaryStr = res.message;
+        } else if (action === 'make_from_selection') {
+          const nm: string = String(args['newName'] ?? args['cellName'] ?? `SUB_${this.placeableCells.length}`).trim();
+          const ids: number[] = Array.isArray(args['shapeIds'])
+            ? (args['shapeIds'] as Object[]).map((v: Object): number => Number(v))
+            : editService.getSelectedIds();
+          const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('cell.make', JSON.stringify({ shapeIds: ids, name: nm })));
+          this.syncShapesFromEditService();
+          this.rebuildCellTree();
+          summaryStr = res.message;
+        } else if (action === 'place_sref' || action === 'place_aref') {
+          const cid: number = resolveTargetCellId();
+          const px: number = Number(args['x'] ?? 0);
+          const py: number = Number(args['y'] ?? 0);
+          const rot: number = Number(args['rotation'] ?? 0);
+          const mir: number = args['mirror'] === true ? 1 : 0;
+          const cols: number = action === 'place_aref' ? Math.max(1, Math.round(Number(args['cols'] ?? 2))) : 1;
+          const rows: number = action === 'place_aref' ? Math.max(1, Math.round(Number(args['rows'] ?? 2))) : 1;
+          const cb: ShapeBounds = this.computeCellBoundsForPitch(cid);
+          const gapX: number = Number(args['gapX'] ?? 200);
+          const gapY: number = Number(args['gapY'] ?? 200);
+          const pitchX: number = typeof args['pitchX'] === 'number' ? (args['pitchX'] as number) : Math.max(200, (cb.maxX - cb.minX) + gapX);
+          const pitchY: number = typeof args['pitchY'] === 'number' ? (args['pitchY'] as number) : Math.max(200, (cb.maxY - cb.minY) + gapY);
+          this.instanceDialogContext = this.parameterDialogContext();
+          const ok: boolean = this.placeInstance(cid, px, py, rot, mir, cols, rows, pitchX, pitchY);
+          if (!ok) return { success: false, summary: this.panelStore.statusText, payloadJson: JSON.stringify({ success: false, error: this.panelStore.statusText }) };
+          this.fitAllShapes();
+          summaryStr = this.panelStore.statusText;
+        } else if (action === 'flatten') {
+          const ids: number[] = Array.isArray(args['shapeIds']) && (args['shapeIds'] as Object[]).length > 0
+            ? (args['shapeIds'] as Object[]).map((v: Object): number => Number(v))
+            : editService.getCurrentCellShapes().filter((s: Shape): boolean => s.type === ShapeType.INSTANCE).map((s: Shape): number => s.id);
+          if (ids.length === 0) {
+            summaryStr = '当前单元内没有可打平的子实例';
+          } else {
+            const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('instance.flatten', JSON.stringify({ shapeIds: ids })));
+            this.syncShapesFromEditService();
+            this.rebuildCellTree();
+            summaryStr = res.message;
+          }
+        } else if (action === 'maintenance_scan') {
+          const referenced: Set<number> = new Set<number>([editService.getTopCellId()]);
+          for (const s of editService.getShapes()) {
+            if (s.type === ShapeType.INSTANCE && s.cellId !== undefined) referenced.add(s.cellId);
+          }
+          const orphans: CellInfo[] = this.placeableCells.filter((c: CellInfo): boolean => !referenced.has(c.id));
+          summaryStr = `共 ${this.placeableCells.length} 个单元，未被引用的孤立单元 ${orphans.length} 个`;
+          return {
+            success: true,
+            summary: summaryStr,
+            payloadJson: JSON.stringify({ success: true, totalCells: this.placeableCells.length, orphanCells: orphans })
+          };
+        } else if (action === 'prune_orphan_cells') {
+          const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('cell.prune', JSON.stringify({
+            rootCellIds: [editService.getTopCellId()],
+            preserveCellIds: [editService.getCurrentCellId()]
+          })));
+          this.syncShapesFromEditService();
+          this.rebuildCellTree();
+          summaryStr = res.message;
+        } else {
+          throw new Error(`未知 manage_cells 动作: ${action}`);
+        }
+
+        const afterCount: number = editService.getShapes().length;
+        this.aiUndoMarker = editService.getUndoMarker();
+        this.aiStore.aiCanUndo = this.aiUndoMarker !== beforeMarker;
+        this.scheduleWorkspaceDraft();
+        return {
+          success: true,
+          addedShapes: Math.max(0, afterCount - beforeCount),
+          deletedShapes: Math.max(0, beforeCount - afterCount),
+          summary: summaryStr,
+          payloadJson: JSON.stringify({
+            success: true,
+            action,
+            summary: summaryStr,
+            cells: this.placeableCells,
+            currentCell: this.docStore.currentEditingCellName
+          })
+        };
+      },
       createCmosInverter: async (params: DshCmosInverterParams, permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
         return this.executeDshInverterGeometry(params, permission);
       },
@@ -9635,11 +11039,21 @@ struct Index {
           const op: DshEditOperation = operations[i];
           const layer: number = op.layer ?? this.viewportStore.selectedLayerNumber;
           const dt: number = op.datatype ?? this.viewportStore.selectedDatatype;
+          if (op.action === 'create_regular_polygon' || op.action === 'create_circle' || op.action === 'create_ellipse' ||
+            op.action === 'create_donut' || op.action === 'create_arc') {
+            const polyPts: Point[] = this.buildRegularOrCurvePoints(op);
+            commands.push({
+              type: AiCommandType.CREATE_POLYGON,
+              params: { layer, datatype: dt, points: polyPts },
+              description: `${op.action} (L${layer}/D${dt})`
+            });
+            continue;
+          }
           const cmdType: AiCommandType = op.action as AiCommandType;
           const pts: Point[] | undefined = op.points !== undefined
             ? op.points.map((pt: Record<string, number>): Point => ({ x: Number(pt['x'] ?? 0), y: Number(pt['y'] ?? 0) }))
             : undefined;
-          const command: ParsedCommand = {
+          commands.push({
             type: cmdType,
             params: {
               layer,
@@ -9650,7 +11064,7 @@ struct Index {
               height: op.height,
               points: pts,
               text: op.text,
-              shapeIds: op.shapeIds,
+              shapeIds: op.shapeIds ?? (op.shapeId !== undefined ? [op.shapeId] : undefined),
               rows: op.rows,
               cols: op.cols,
               spacingX: op.spacingX,
@@ -9664,8 +11078,7 @@ struct Index {
               centerY: op.centerY
             },
             description: `${op.action} (L${layer}/D${dt})`
-          };
-          commands.push(command);
+          });
         }
 
         if (permission === 'review') {
@@ -9693,7 +11106,11 @@ struct Index {
         for (const op of operations) {
           if (op.layer !== undefined) {
             this.ensureDshLayerExists(op.layer, op.datatype ?? this.viewportStore.selectedDatatype,
-              op.layerName ?? `L${op.layer}`, op.layerName ?? `图层${op.layer}`, '#3B82F6');
+              op.layerName ?? `L${op.layer}`, op.layerName ?? `图层${op.layer}`, this.layerColor(this.docStore.layers.length));
+          }
+          if (op.targetLayer !== undefined) {
+            this.ensureDshLayerExists(op.targetLayer, op.targetDatatype ?? 0,
+              `L${op.targetLayer}`, `图层${op.targetLayer}`, this.layerColor(this.docStore.layers.length));
           }
         }
         const beforeMarker: Object | null = editService.getUndoMarker();
@@ -9703,12 +11120,106 @@ struct Index {
         const messages: string[] = [];
         let allOk: boolean = true;
         try {
-          for (let i = 0; i < commands.length; i++) {
-            const res: CommandResult = aiExecutor.execute(commands[i], execCtx);
-            messages.push(res.message);
-            if (!res.success) {
-              allOk = false;
-              break;
+          for (let i = 0; i < operations.length; i++) {
+            const op: DshEditOperation = operations[i];
+            const ids: number[] = op.shapeIds ?? (op.shapeId !== undefined ? [op.shapeId] : editService.getSelectedIds());
+            if (op.action === 'duplicate_shape') {
+              const dx: number = op.dx ?? 200;
+              const dy: number = op.dy ?? 200;
+              const copies: Shape[] = editService.getShapes()
+                .filter((s: Shape): boolean => ids.indexOf(s.id) >= 0)
+                .map((s: Shape): Shape => {
+                  const cp: Shape = cloneShapeModel(s) as Shape;
+                  cp.id = 0;
+                  cp.points = cp.points.map((pt: Point): Point => ({ x: pt.x + dx, y: pt.y + dy }));
+                  return cp;
+                });
+              const created: Shape[] = editService.createShapeCopies(copies, false, true);
+              messages.push(`复制 ${created.length} 个图元`);
+            } else if (op.action === 'change_layer') {
+              const tl: number = op.targetLayer ?? op.layer ?? this.viewportStore.selectedLayerNumber;
+              const tdt: number = op.targetDatatype ?? op.datatype ?? 0;
+              const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('selection.layer', JSON.stringify({ shapeIds: ids, layer: tl, datatype: tdt })));
+              messages.push(res.message);
+            } else if (op.action === 'set_exact_bounds') {
+              const sid: number = op.shapeId ?? (ids.length > 0 ? ids[0] : -1);
+              const anchor: string = op.anchor ?? 'bottom_left';
+              let minX: number = 0;
+              let minY: number = 0;
+              let maxX: number = 100;
+              let maxY: number = 100;
+              if (anchor === 'corners') {
+                minX = Math.min(op.x ?? 0, op.x2 ?? 100);
+                maxX = Math.max(op.x ?? 0, op.x2 ?? 100);
+                minY = Math.min(op.y ?? 0, op.y2 ?? 100);
+                maxY = Math.max(op.y ?? 0, op.y2 ?? 100);
+              } else if (anchor === 'center') {
+                const w: number = Math.max(1, op.width ?? 100);
+                const h: number = Math.max(1, op.height ?? 100);
+                minX = Math.round((op.x ?? 0) - w / 2);
+                minY = Math.round((op.y ?? 0) - h / 2);
+                maxX = minX + Math.round(w);
+                maxY = minY + Math.round(h);
+              } else {
+                minX = Math.round(op.x ?? 0);
+                minY = Math.round(op.y ?? 0);
+                maxX = minX + Math.max(1, Math.round(op.width ?? 100));
+                maxY = minY + Math.max(1, Math.round(op.height ?? 100));
+              }
+              const targetS: Shape | undefined = editService.getShapes().find((s: Shape): boolean => s.id === sid);
+              if (targetS !== undefined) {
+                if (targetS.type === ShapeType.RECT) {
+                  editService.updateShapePoints(sid, [{ x: minX, y: minY }, { x: maxX, y: maxY }]);
+                } else {
+                  const oldB: ShapeBounds = getShapeBounds(targetS);
+                  const oldW: number = Math.max(1, oldB.maxX - oldB.minX);
+                  const oldH: number = Math.max(1, oldB.maxY - oldB.minY);
+                  const scaledPts: Point[] = targetS.points.map((pt: Point): Point => ({
+                    x: Math.round(minX + ((pt.x - oldB.minX) / oldW) * (maxX - minX)),
+                    y: Math.round(minY + ((pt.y - oldB.minY) / oldH) * (maxY - minY))
+                  }));
+                  editService.updateShapePoints(sid, scaledPts);
+                }
+                messages.push(`按 ${anchor} 锚点设界 [${minX},${minY}]..[${maxX},${maxY}]`);
+              }
+            } else if (op.action === 'update_vertices' && op.points !== undefined) {
+              const sid: number = op.shapeId ?? (ids.length > 0 ? ids[0] : -1);
+              const pts: Point[] = op.points.map((pt: Record<string, number>): Point => ({ x: Number(pt['x'] ?? 0), y: Number(pt['y'] ?? 0) }));
+              editService.updateShapePoints(sid, pts);
+              messages.push(`更新图元 #${sid} 顶点 (${pts.length} 点)`);
+            } else if (op.action === 'size_offset') {
+              const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('selection.offset', JSON.stringify({ shapeIds: ids, offsetNm: op.offsetNm ?? 50 })));
+              messages.push(res.message);
+            } else if (op.action === 'round_corners') {
+              const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('selection.round', JSON.stringify({ shapeIds: ids, radiusNm: op.radiusNm ?? 100, maxErrorNm: 2 })));
+              messages.push(res.message);
+            } else if (op.action === 'align_shapes') {
+              const mStr: string = op.alignMode === 'center_x' ? 'centerH' : (op.alignMode === 'center_y' ? 'centerV' : (op.alignMode ?? 'left'));
+              const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('selection.align', JSON.stringify({ shapeIds: ids, alignment: mStr })));
+              messages.push(res.message);
+            } else if (op.action === 'distribute_shapes') {
+              const dir: string = op.horizontal === false ? 'vertical' : 'horizontal';
+              const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('selection.distribute', JSON.stringify({ shapeIds: ids, direction: dir })));
+              messages.push(res.message);
+            } else if (op.action === 'boolean_op' && ids.length >= 2) {
+              const outL: number = op.targetLayer ?? op.layer ?? this.viewportStore.selectedLayerNumber;
+              const outDt: number = op.targetDatatype ?? op.datatype ?? 0;
+              const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('boolean.apply', JSON.stringify({
+                op: op.booleanOp ?? 'merge',
+                sourceAId: ids[0],
+                sourceBId: ids[1],
+                outputLayer: outL,
+                outputDatatype: outDt,
+                keepSources: op.keepSources === true
+              })));
+              messages.push(res.message);
+            } else {
+              const res: CommandResult = aiExecutor.execute(commands[i], execCtx);
+              messages.push(res.message);
+              if (!res.success) {
+                allOk = false;
+                break;
+              }
             }
           }
         } finally {
@@ -9732,13 +11243,481 @@ struct Index {
           summary: messages.slice(0, 4).join('；'),
           payloadJson: JSON.stringify({
             success: allOk,
-            operations: commands.length,
+            operations: operations.length,
             addedShapes: added,
             deletedShapes: deleted,
             totalShapesNow: afterCount,
             messages: messages.slice(0, 8)
           })
         };
+      },
+      managePortsAndRouting: async (argsJson: string, permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        let args: Record<string, Object> = {};
+        try { args = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const action: string = String(args['action'] ?? 'list_ports');
+        const curCellId: number = editService.getCurrentCellId();
+
+        if (action === 'list_ports') {
+          const ports = this.docPorts.filter((p: LayoutPort): boolean => p.ownerCellId === curCellId);
+          return {
+            success: true,
+            summary: `当前单元共 ${ports.length} 个端口`,
+            payloadJson: JSON.stringify({ success: true, ports })
+          };
+        }
+        if (action === 'list_pcells') {
+          const pcells = nativeHongTuService.listPCells();
+          const libItems = componentLibraryService.list();
+          return {
+            success: true,
+            summary: `内置 PCell ${pcells.length} 项，个人器件库 ${libItems.length} 项`,
+            payloadJson: JSON.stringify({ success: true, pcells, libraryItems: libItems })
+          };
+        }
+        if (permission === 'readonly') throw new Error('只读模式下不可修改端口或自动布线');
+        if (!this.assertEditMode()) this.setViewMode(ViewMode.EDIT);
+
+        if (action === 'add_port' || action === 'update_port') {
+          const pName: string = String(args['name'] ?? `P_${this.docPorts.length + 1}`).trim();
+          const px: number = Number(args['x'] ?? 0);
+          const py: number = Number(args['y'] ?? 0);
+          const wNm: number = Math.max(10, Number(args['widthNm'] ?? 200));
+          const ori: number = Number(args['orientationDeg'] ?? 0);
+          const ln: number = Number(args['layer'] ?? this.viewportStore.selectedLayerNumber);
+          const dt: number = Number(args['datatype'] ?? 0);
+          const pType: string = String(args['portType'] ?? 'electrical');
+          const draft: LayoutPortDraft = {
+            name: pName,
+            centerNm: { x: px, y: py },
+            orientationDeg: ori,
+            widthNm: wNm,
+            layerNumber: ln,
+            datatype: dt,
+            portType: pType,
+            frameMirror: false,
+            frameMagnification: 1,
+            infoJson: '{}'
+          };
+          const callName: string = action === 'update_port' && typeof args['portId'] === 'string' ? 'ports.update' : 'ports.add';
+          const callPayload: string = callName === 'ports.update'
+            ? JSON.stringify({ portId: args['portId'] as string, draft })
+            : JSON.stringify({ ownerCellId: curCellId, draft });
+          const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall(callName, callPayload));
+          this.syncShapesFromEditService();
+          return {
+            success: res.success,
+            addedPorts: res.success ? 1 : 0,
+            summary: res.message,
+            payloadJson: JSON.stringify(res)
+          };
+        }
+        if (action === 'delete_port') {
+          let pid: string = typeof args['portId'] === 'string' ? (args['portId'] as string) : '';
+          if (pid.length === 0 && typeof args['name'] === 'string') {
+            const matchedPort: LayoutPort | undefined = this.docPorts.find((p: LayoutPort): boolean =>
+              p.ownerCellId === curCellId && p.name === (args['name'] as string)
+            );
+            if (matchedPort !== undefined) pid = matchedPort.id;
+          }
+          if (pid.length === 0) throw new Error('未找到指定端口');
+          const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('ports.remove', JSON.stringify({ portId: pid })));
+          this.syncShapesFromEditService();
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'extract_ports_from_labels') {
+          const texts: Shape[] = editService.getCurrentCellShapes().filter((s: Shape): boolean => s.type === ShapeType.TEXT && (s.text ?? '').trim().length > 0);
+          let createdCount: number = 0;
+          for (const t of texts) {
+            const label: string = (t.text ?? '').trim();
+            if (this.docPorts.some((p: LayoutPort): boolean => p.ownerCellId === curCellId && p.name === label)) continue;
+            const pt: Point = t.points.length > 0 ? t.points[0] : { x: 0, y: 0 };
+            const draft: LayoutPortDraft = {
+              name: label,
+              centerNm: { x: pt.x, y: pt.y },
+              orientationDeg: 0,
+              widthNm: 200,
+              layerNumber: t.layerNumber,
+              datatype: t.datatype,
+              portType: 'electrical',
+              frameMirror: false,
+              frameMagnification: 1,
+              infoJson: '{}'
+            };
+            const r: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('ports.add', JSON.stringify({ ownerCellId: curCellId, draft })));
+            if (r.success) createdCount++;
+          }
+          this.syncShapesFromEditService();
+          return {
+            success: true,
+            addedPorts: createdCount,
+            summary: `已从当前单元文本标签提取 ${createdCount} 个端口`,
+            payloadJson: JSON.stringify({ success: true, extractedPorts: createdCount })
+          };
+        }
+        if (action === 'route_auto') {
+          let x1: number = Number(args['x'] ?? 0);
+          let y1: number = Number(args['y'] ?? 0);
+          let x2: number = Number(args['toX'] ?? 1000);
+          let y2: number = Number(args['toY'] ?? 1000);
+          let ln: number = Number(args['layer'] ?? this.viewportStore.selectedLayerNumber);
+          let dt: number = Number(args['datatype'] ?? 0);
+          let wNm: number = Math.max(20, Number(args['widthNm'] ?? 200));
+          if (typeof args['fromPort'] === 'string') {
+            const fp: LayoutPort | undefined = this.docPorts.find((p: LayoutPort): boolean => p.ownerCellId === curCellId && (p.name === args['fromPort'] || p.id === args['fromPort']));
+            if (fp !== undefined) { x1 = fp.centerNm.x; y1 = fp.centerNm.y; ln = fp.layerNumber; dt = fp.datatype; wNm = fp.widthNm; }
+          }
+          if (typeof args['toPort'] === 'string') {
+            const tp: LayoutPort | undefined = this.docPorts.find((p: LayoutPort): boolean => p.ownerCellId === curCellId && (p.name === args['toPort'] || p.id === args['toPort']));
+            if (tp !== undefined) { x2 = tp.centerNm.x; y2 = tp.centerNm.y; }
+          }
+          this.ensureDshLayerExists(ln, dt, `L${ln}`, `互连层 ${ln}`, this.layerColor(this.docStore.layers.length));
+          const midX: number = Math.round((x1 + x2) / 2);
+          const routePts: Point[] = (x1 === x2 || y1 === y2)
+            ? [{ x: x1, y: y1 }, { x: x2, y: y2 }]
+            : [{ x: x1, y: y1 }, { x: midX, y: y1 }, { x: midX, y: y2 }, { x: x2, y: y2 }];
+          const createdPath: Shape = editService.createPath(ln, routePts, wNm, dt, 0);
+          this.syncShapesFromEditService();
+          this.fitAllShapes();
+          this.scheduleWorkspaceDraft();
+          return {
+            success: true,
+            addedShapes: 1,
+            summary: `已在 L${ln}/D${dt} 完成正交自动布线 (#${createdPath.id}, 线宽 ${wNm}nm)`,
+            payloadJson: JSON.stringify({ success: true, shapeId: createdPath.id, points: routePts, widthNm: wNm })
+          };
+        }
+        if (action === 'place_pcell') {
+          const pName: string = String(args['pcellName'] ?? args['name'] ?? 'CIRCLE');
+          const paramsObj: Record<string, number | string | boolean> =
+            (args['parameters'] !== undefined && args['parameters'] !== null && typeof args['parameters'] === 'object')
+              ? (args['parameters'] as Record<string, number | string | boolean>)
+              : {};
+          const res: AiNativeResult = this.runAiNativeEdit(parseAiNativeCall('pcell.place', JSON.stringify({
+            name: pName,
+            parameters: paramsObj,
+            x: Number(args['x'] ?? 0),
+            y: Number(args['y'] ?? 0),
+            outputMode: 'instance',
+            datatype: Number(args['datatype'] ?? 0),
+            maxErrorNm: 2
+          })));
+          this.syncShapesFromEditService();
+          this.rebuildCellTree();
+          return { success: res.success, addedShapes: res.success ? 1 : 0, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'insert_library_item') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('library.insert', JSON.stringify({
+            id: String(args['entryId'] ?? ''),
+            x: Number(args['x'] ?? 0),
+            y: Number(args['y'] ?? 0)
+          })));
+          return { success: res.success, addedShapes: res.success ? 1 : 0, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        throw new Error(`未知 manage_ports_and_routing 动作: ${action}`);
+      },
+      manageVerification: async (argsJson: string, _permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        let args: Record<string, Object> = {};
+        try { args = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const action: string = String(args['action'] ?? 'run_drc');
+        if (action === 'run_drc') {
+          this.runDrc(true);
+          const sum: string = this.aiDrcResultSummary();
+          return { success: true, drcSummary: sum, summary: sum, payloadJson: JSON.stringify({ success: true, summary: sum, issues: this.verifyStore.drcIssues.slice(0, 24) }) };
+        }
+        if (action === 'focus_violation') {
+          const idx: number = Math.max(0, Math.round(Number(args['index'] ?? 0)));
+          if (idx < this.verifyStore.drcIssues.length) {
+            this.locateIssue(this.verifyStore.drcIssues[idx]);
+            return { success: true, summary: `已定位至第 ${idx + 1} 项 DRC 违规`, payloadJson: JSON.stringify({ success: true, issue: this.verifyStore.drcIssues[idx] }) };
+          }
+          return { success: false, summary: 'DRC 违规索引超出范围或当前无违规', payloadJson: JSON.stringify({ success: false }) };
+        }
+        if (action === 'set_drc_rule') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('drc.rule', JSON.stringify({
+            id: String(args['ruleId'] ?? ''),
+            value: Number(args['valueNm'] ?? 100),
+            enabled: args['enabled'] !== false
+          })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'import_drc_rules') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('drc.import_text', JSON.stringify({
+            text: String(args['rulesText'] ?? ''),
+            merge: args['merge'] !== false
+          })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'reset_drc_rules') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('drc.builtin', '{}'));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'trace_nets') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('nets.trace', '{}'));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'extract_netlist') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('lvs.extract', '{}'));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'run_lvs') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('lvs.run', JSON.stringify({
+            schematic: String(args['schematicSpice'] ?? '')
+          })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        throw new Error(`未知 manage_verification 动作: ${action}`);
+      },
+      manageWorkbench: async (argsJson: string, permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        let args: Record<string, Object> = {};
+        try { args = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const action: string = String(args['action'] ?? '');
+        if (action === 'undo' || action === 'redo') {
+          if (permission === 'readonly') throw new Error('只读模式下不可撤销或重做');
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall(action === 'undo' ? 'edit.undo' : 'edit.redo', '{}'));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'select_by_ids') {
+          const ids: number[] = Array.isArray(args['shapeIds']) ? (args['shapeIds'] as Object[]).map((v: Object): number => Number(v)) : [];
+          editService.selectMultiple(ids);
+          this.syncShapesFromEditService();
+          return { success: true, summary: `已选中 ${ids.length} 个图元`, payloadJson: JSON.stringify({ success: true, selectedCount: ids.length }) };
+        }
+        if (action === 'select_all') {
+          this.selectAllShapes();
+          return { success: true, summary: `已全选当前单元 (${editService.getSelectedIds().length} 个图元)`, payloadJson: JSON.stringify({ success: true, selectedCount: editService.getSelectedIds().length }) };
+        }
+        if (action === 'clear_selection') {
+          editService.clearSelection();
+          this.syncShapesFromEditService();
+          return { success: true, summary: '已清空当前选区', payloadJson: JSON.stringify({ success: true }) };
+        }
+        if (action === 'invert_selection') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('selection.invert', '{}'));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'filter_selection') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('selection.filter', JSON.stringify({
+            layer: typeof args['layer'] === 'number' ? args['layer'] : -1,
+            datatype: typeof args['datatype'] === 'number' ? args['datatype'] : -1,
+            shapeType: typeof args['shapeType'] === 'string' ? args['shapeType'] : 'all'
+          })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'new_tab') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('workspace.new', JSON.stringify({
+            library: String(args['library'] ?? 'WORK_LIB'),
+            top: String(args['topCell'] ?? 'TOP'),
+            dbuNm: Number(args['dbuNm'] ?? 1)
+          })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'switch_tab') {
+          let tid: string = String(args['tabId'] ?? '');
+          if (tid.length === 0 && typeof args['title'] === 'string') {
+            const matchedTab: WorkspaceTab | undefined = this.docStore.workspaceTabs.find((t: WorkspaceTab): boolean => t.title.includes(args['title'] as string));
+            if (matchedTab !== undefined) tid = matchedTab.id;
+          }
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('workspace.switch', JSON.stringify({ id: tid })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'close_tab') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('workspace.close', JSON.stringify({ id: String(args['tabId'] ?? this.docStore.activeWorkspaceId) })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'rename_tab') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('workspace.rename', JSON.stringify({ title: String(args['title'] ?? '未命名版图') })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'save_checkpoint') {
+          const ok: boolean = await this.saveWorkspaceDraft(true);
+          return { success: ok, summary: ok ? '已保存工作区恢复检查点' : '保存检查点失败', payloadJson: JSON.stringify({ success: ok }) };
+        }
+        if (action === 'set_precision') {
+          const cur: PrecisionSettings = this.precisionSettings();
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('precision.set', JSON.stringify({
+            dbuNm: Number(args['dbuNm'] ?? cur.dbuNm),
+            displayGridNm: Number(args['displayGridNm'] ?? cur.displayGridNm),
+            drawStepNm: Number(args['drawStepNm'] ?? cur.drawStepNm),
+            geometrySnapEnabled: cur.geometrySnapEnabled,
+            geometrySnapKinds: cur.geometrySnapKinds
+          })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        if (action === 'save_bookmark' || action === 'apply_bookmark') {
+          const nm: string = String(args['name'] ?? 'BM_1');
+          this.prepareViewWorkspace();
+          if (action === 'save_bookmark') {
+            this.handleViewWorkspaceAction('saveBookmark', '', nm);
+            return { success: true, summary: `已保存视图书签 ${nm}`, payloadJson: JSON.stringify({ success: true, name: nm }) };
+          }
+          const bm: ViewBookmark | undefined = this.viewportStore.viewWorkspaceBookmarks.find((b: ViewBookmark): boolean => b.name === nm || b.id === nm);
+          if (bm !== undefined) {
+            this.handleViewWorkspaceAction('locateBookmark', bm.id, bm.name);
+            return { success: true, summary: `已跳转到视图书签 ${bm.name}`, payloadJson: JSON.stringify({ success: true, bookmark: bm }) };
+          }
+          return { success: false, summary: `未找到书签 ${nm}`, payloadJson: JSON.stringify({ success: false }) };
+        }
+        if (action === 'list_macros') {
+          const macros = macroService.getAllMacros();
+          return { success: true, summary: `共 ${macros.length} 个可执行宏`, payloadJson: JSON.stringify({ success: true, macros }) };
+        }
+        if (action === 'run_macro') {
+          const res: AiNativeResult = await this.runAiNativeAction(parseAiNativeCall('macro.run', JSON.stringify({ id: Number(args['macroId'] ?? 0) })));
+          return { success: res.success, summary: res.message, payloadJson: JSON.stringify(res) };
+        }
+        throw new Error(`未知 manage_workbench 动作: ${action}`);
+      },
+      manageAttachmentsAndFiles: async (argsJson: string, _permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        let args: Record<string, Object> = {};
+        try { args = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const action: string = String(args['action'] ?? 'list_attachments');
+        const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+
+        const allKnownAttachments: AiChatAttachment[] = [];
+        for (const m of this.aiStore.aiMessages) {
+          for (const a of (m.attachments ?? [])) allKnownAttachments.push(a);
+        }
+        for (const a of this.aiStore.aiPendingAttachments) allKnownAttachments.push(a);
+
+        const findAtt = (): AiChatAttachment | undefined => {
+          const targetId: string = String(args['attachmentId'] ?? '').trim();
+          const targetName: string = String(args['fileName'] ?? '').trim();
+          if (targetId.length > 0) {
+            const byId: AiChatAttachment | undefined = allKnownAttachments.find((a: AiChatAttachment): boolean => a.id === targetId);
+            if (byId !== undefined) return byId;
+          }
+          if (targetName.length > 0) {
+            const byName: AiChatAttachment | undefined = allKnownAttachments.find((a: AiChatAttachment): boolean => a.name === targetName);
+            if (byName !== undefined) return byName;
+          }
+          return allKnownAttachments.length > 0 ? allKnownAttachments[allKnownAttachments.length - 1] : undefined;
+        };
+
+        if (action === 'list_attachments') {
+          return {
+            success: true,
+            summary: `当前会话共有 ${allKnownAttachments.length} 个附件`,
+            payloadJson: JSON.stringify({
+              success: true,
+              count: allKnownAttachments.length,
+              attachments: allKnownAttachments.map((a: AiChatAttachment): DshAttachmentBriefItem => ({
+                id: a.id, name: a.name, kind: a.kind, mimeType: a.mimeType, sizeBytes: a.sizeBytes, summary: a.summary ?? ''
+              }))
+            })
+          };
+        }
+        if (action === 'read_attachment_text') {
+          const att: AiChatAttachment | undefined = findAtt();
+          if (att === undefined) throw new Error('未找到可读取的附件');
+          const offset: number = Math.max(0, Number(args['offsetChars'] ?? 0));
+          const maxChars: number = Math.min(32000, Math.max(256, Number(args['maxChars'] ?? 12000)));
+          const fullText: string = aiAttachmentService.readAttachmentText(att, offset + maxChars);
+          const slice: string = fullText.substring(offset, offset + maxChars);
+          return {
+            success: true,
+            summary: `已读取附件 ${att.name} (${slice.length} 字符)`,
+            payloadJson: JSON.stringify({ success: true, name: att.name, offsetChars: offset, content: slice })
+          };
+        }
+        if (action === 'inspect_attachment_image') {
+          const att: AiChatAttachment | undefined = findAtt();
+          if (att === undefined || att.kind !== 'image') throw new Error('未找到对应的图片附件');
+          return {
+            success: true,
+            summary: `已载入图片附件 ${att.name} 至多模态视觉上下文`,
+            visualAttachment: att,
+            payloadJson: JSON.stringify({ success: true, id: att.id, name: att.name, width: att.width, height: att.height })
+          };
+        }
+        if (action === 'import_attachment_layout') {
+          const att: AiChatAttachment | undefined = findAtt();
+          if (att === undefined || att.kind !== 'layout') throw new Error('未找到可导入的 GDSII/OASIS 版图附件');
+          const mode: 'new_tab' | 'merge' = String(args['importMode'] ?? 'new_tab') === 'merge' ? 'merge' : 'new_tab';
+          const ok: boolean = await this.openAiLayoutAttachment(att, mode);
+          return {
+            success: ok,
+            summary: ok ? `已将版图附件 ${att.name} 导入工作区 (${mode})` : `导入附件 ${att.name} 未完成`,
+            payloadJson: JSON.stringify({ success: ok, name: att.name, importMode: mode })
+          };
+        }
+        if (action === 'export_deliverable_to_chat') {
+          const fmt: string = String(args['format'] ?? 'png').toLowerCase();
+          const base: string = this.currentShareBaseName();
+          let deliverable: AiChatAttachment;
+          if (fmt === 'png' || fmt === 'svg') {
+            if (!this.synchronizeCurrentDocument()) throw new Error('同步当前版图到渲染器失败');
+            const w: number = Math.min(4096, Math.max(256, Number(args['widthPx'] ?? 1600)));
+            const h: number = Math.min(4096, Math.max(256, Number(args['heightPx'] ?? 1200)));
+            const exported = layoutExportService.exportImageToCacheForShare(
+              fmt === 'svg' ? 'svg' : 'png',
+              context.cacheDir,
+              base,
+              this.buildExportLayerStyles(),
+              w,
+              h
+            );
+            deliverable = aiAttachmentService.adoptSandboxFile(
+              context,
+              exported.sandboxPath,
+              String(args['fileName'] ?? exported.fileName),
+              fmt === 'svg' ? 'image/svg+xml' : 'image/png'
+            );
+          } else if (fmt === 'gds' || fmt === 'oas') {
+            const outPath: string = `${context.cacheDir}/${base}_${Date.now()}.${fmt}`;
+            const docNative = layoutExportService.buildNativeDocument(this.currentExportInput());
+            const writeRes = fmt === 'oas'
+              ? nativeHongTuService.writeDocumentOasis(docNative, outPath)
+              : nativeHongTuService.writeDocumentGdsii(docNative, outPath);
+            if (!writeRes.success) throw new Error(writeRes.errorMessage || '导出二进制版图失败');
+            deliverable = aiAttachmentService.adoptSandboxFile(
+              context,
+              outPath,
+              String(args['fileName'] ?? `${base}.${fmt}`),
+              fmt === 'oas' ? 'application/x-oasis' : 'application/x-gdsii'
+            );
+          } else if (fmt === 'spice') {
+            this.loadExtractedNetlist();
+            const spiceBody: string = String(args['content'] ?? this.verifyStore.lvsNetlistText ?? '* Empty SPICE netlist');
+            deliverable = aiAttachmentService.writeTextDeliverable(
+              context,
+              String(args['fileName'] ?? `${base}.spice`),
+              spiceBody,
+              'text/plain'
+            );
+          } else {
+            const ext: string = fmt === 'json' ? 'json' : 'md';
+            const textBody: string = String(args['content'] ?? this.inspectCurrentWorkbenchUiJson());
+            deliverable = aiAttachmentService.writeTextDeliverable(
+              context,
+              String(args['fileName'] ?? `${base}_report.${ext}`),
+              textBody,
+              fmt === 'json' ? 'application/json' : 'text/markdown'
+            );
+          }
+          return {
+            success: true,
+            summary: `已向对话框交付文件 ${deliverable.name} (${deliverable.summary ?? ''})`,
+            generatedAttachment: deliverable,
+            payloadJson: JSON.stringify({
+              success: true,
+              id: deliverable.id,
+              name: deliverable.name,
+              kind: deliverable.kind,
+              sizeBytes: deliverable.sizeBytes
+            })
+          };
+        }
+        if (action === 'copy_to_clipboard') {
+          if (typeof args['content'] === 'string' && (args['content'] as string).length > 0) {
+            const msg: string = await aiAttachmentService.copyTextToClipboard(args['content'] as string);
+            return { success: true, summary: msg, payloadJson: JSON.stringify({ success: true, message: msg }) };
+          }
+          const att: AiChatAttachment | undefined = findAtt();
+          if (att === undefined) throw new Error('未找到可复制的附件');
+          const msg: string = await aiAttachmentService.copyAttachmentToClipboard(att);
+          return { success: true, summary: msg, payloadJson: JSON.stringify({ success: true, message: msg, name: att.name }) };
+        }
+        throw new Error(`未知 manage_attachments_and_files 动作: ${action}`);
       },
       runDrcCheck: async (): Promise<DshToolExecutionOutcome> => {
         if (!aiService.getContextOptions().includeLayout) throw new Error('用户未发送版图资料');
@@ -9823,32 +11802,38 @@ struct Index {
         const actRes: AiNativeResult = await this.runAiNativeAction(call);
         return { success: actRes.success, summary: actRes.message, payloadJson: JSON.stringify(actRes) };
       },
-      executeKlayoutPython: async (script: string, applyMode: 'replace' | 'merge'): Promise<DshToolExecutionOutcome> => {
-        if (!aiService.getContextOptions().includeLayout) throw new Error('用户未发送版图资料');
+      executeKlayoutPython: async (
+        script: string,
+        applyMode: 'replace' | 'merge' | 'preview',
+        inputMode: 'new' | 'document' | 'selection' = 'new',
+        parametersJson: string = '{}'
+      ): Promise<DshToolExecutionOutcome> => {
+        if (!aiService.getContextOptions().includeLayout && inputMode !== 'new') {
+          throw new Error('用户未发送版图资料');
+        }
         const documentId: string = this.docStore.activeWorkspaceId;
         const revision: number = this.docStore.editorRevision;
-        try {
+        // 仅当用户显式切换到“外部桌面伴随服务”模式时才探测远程 HTTP；默认端侧内置完整 Python 3 直接离线运行！
+        if (pythonBridgeService.getExecutionMode() === 'companion') {
           await pythonBridgeService.checkConnection(false);
-        } catch (_) {
-          return {
-            success: false,
-            summary: '当前设备未连接桌面 Python 伴随服务，请直接改用 create_cmos_inverter / edit_layout / call_native_tool 原生绘制',
-            payloadJson: JSON.stringify({
-              success: false,
-              error: '当前运行在纯鸿蒙原生直连模式（未启动桌面 Python 伴随进程）。请直接使用 create_cmos_inverter、edit_layout 或 call_native_tool 在当前版图中原生完成绘制与 DRC 检查，无需 Python 脚本。'
-            })
-          };
         }
         if (!this.pageAlive || ticket !== this.aiRequestGeneration || generation !== this.pageGeneration ||
           documentId !== this.docStore.activeWorkspaceId || revision !== this.docStore.editorRevision) {
           throw new Error('文档已变化或请求已取消');
         }
+        const beforeCount: number = editService.getShapes().length;
         const pyRes: AiNativeResult = await this.runAiNativePython(
-          parseAiNativeCall('python.run', JSON.stringify({ script, inputMode: 'document', applyMode, parameters: '{}' }))
+          parseAiNativeCall('python.run', JSON.stringify({
+            script,
+            inputMode,
+            applyMode,
+            parameters: parametersJson
+          }))
         );
+        const afterCount: number = editService.getShapes().length;
         return {
           success: pyRes.success,
-          addedShapes: pyRes.success ? 1 : 0,
+          addedShapes: pyRes.success ? Math.max(1, afterCount - beforeCount) : 0,
           summary: pyRes.message,
           payloadJson: JSON.stringify(pyRes)
         };
@@ -9856,45 +11841,109 @@ struct Index {
     };
   }
 
-  private async runDemoDirectInverter(prompt: string, ticket: number): Promise<void> {
+  private async tryRunDemoHarnessShortcut(
+    prompt: string,
+    ticket: number,
+    permission: DshPermissionMode,
+    userAttachments: AiChatAttachment[]
+  ): Promise<boolean> {
+    const trimmed: string = prompt.trim();
     const conversationId: string = aiService.getActiveConversationId();
-    const outcome: DshToolExecutionOutcome = this.executeDshInverterGeometry({
-      cellName: 'INVERTER',
-      gateLengthNm: 200,
-      nmosWidthNm: 600,
-      pmosWidthNm: 1200,
-      target: 'auto'
-    }, 'auto');
-    const toolItem: AiChatToolState = {
-      id: `demo-inv-${Date.now()}`,
-      name: 'create_cmos_inverter',
-      status: outcome.success ? 'completed' : 'failed',
-      arguments: '{"cellName":"INVERTER","gateLengthNm":200,"nmosWidthNm":600,"pmosWidthNm":1200}',
-      result: outcome.payloadJson
-    };
-    const steps: AiProcessStep[] = [{
-      id: 'demo-step-inv',
-      kind: 'tool',
-      title: 'create_cmos_inverter',
-      text: '',
-      status: outcome.success ? 'completed' : 'failed',
-      tool: toolItem
-    }];
-    const replyText: string = outcome.success
-      ? `已在单元 **${this.docStore.currentEditingCellName}** 原生生成完整通用 CMOS 反相器版图（共 **${outcome.addedShapes ?? 0}** 个几何图元、**${outcome.addedPorts ?? 0}** 个电气端口 \`IN / OUT / VSS / VDD\`），并自动完成视图适配。\n\n- **图层结构**：\`1/0 NWELL\`、\`2/0 ACTIVE\`、\`3/0 POLY\`、\`4/0 NPLUS\`、\`5/0 PPLUS\`、\`6/0 CONTACT\`、\`7/0 METAL1\`、\`8/0 PIN_LABEL\`\n- **DRC 状态**：${outcome.drcSummary ?? '已完成检查'}\n- *说明：该版图为通用 CMOS 教学/工程示例，可随时点击下方「撤销」回退。*`
-      : outcome.summary;
-    this.aiStore.aiTurnChangeSummary = outcome.success
-      ? `本轮版图变更：+${outcome.addedShapes ?? 0} 图元 · +${outcome.addedPorts ?? 0} 端口 · ${outcome.drcSummary ?? ''}`
-      : '';
-    this.aiStore.aiLastResult = outcome.summary;
-    this.panelStore.statusText = outcome.summary;
-    const demoTask: AiAgentTask = aiService.createAgentTask(prompt, false, false);
-    aiService.recordHarnessResult(prompt, replyText, '', [toolItem], outcome.success, outcome.success ? 'executed' : 'failed',
-      conversationId, ticket !== this.aiRequestGeneration, demoTask, steps);
-    this.refreshAiConversation();
+    const host: DshLayoutBackendHost = this.buildDshBackendHost(ticket);
+
+    if (permission === 'auto' && /^(?:画|生成|创建|绘制).*(?:cmos\s*)?(?:反相器|inverter)/i.test(trimmed)) {
+      const outcome: DshToolExecutionOutcome = this.executeDshInverterGeometry({
+        cellName: 'INVERTER',
+        gateLengthNm: 200,
+        nmosWidthNm: 600,
+        pmosWidthNm: 1200,
+        target: 'auto'
+      }, 'auto');
+      const toolItem: AiChatToolState = {
+        id: `demo-inv-${Date.now()}`,
+        name: 'create_cmos_inverter',
+        status: outcome.success ? 'completed' : 'failed',
+        arguments: '{"cellName":"INVERTER","gateLengthNm":200,"nmosWidthNm":600,"pmosWidthNm":1200}',
+        result: outcome.payloadJson
+      };
+      const steps: AiProcessStep[] = [{
+        id: 'demo-step-inv',
+        kind: 'tool',
+        title: 'create_cmos_inverter',
+        text: '',
+        status: outcome.success ? 'completed' : 'failed',
+        tool: toolItem
+      }];
+      const replyText: string = outcome.success
+        ? `已在单元 **${this.docStore.currentEditingCellName}** 原生生成完整通用 CMOS 反相器版图（共 **${outcome.addedShapes ?? 0}** 个几何图元、**${outcome.addedPorts ?? 0}** 个电气端口 \`IN / OUT / VSS / VDD\`），并自动完成视图适配。`
+        : outcome.summary;
+      this.aiStore.aiTurnChangeSummary = outcome.success
+        ? `本轮版图变更：+${outcome.addedShapes ?? 0} 图元 · +${outcome.addedPorts ?? 0} 端口 · ${outcome.drcSummary ?? ''}`
+        : '';
+      this.aiStore.aiLastResult = outcome.summary;
+      this.panelStore.statusText = outcome.summary;
+      const demoTask: AiAgentTask = aiService.createAgentTask(prompt, false, false);
+      aiService.recordHarnessResult(prompt, replyText, '', [toolItem], outcome.success, outcome.success ? 'executed' : 'failed',
+        conversationId, false, demoTask, steps, userAttachments);
+      this.refreshAiConversation();
+      return true;
+    }
+
+    if (/截图|查看当前(?:工作|画布|界面)|capture_screenshot/i.test(trimmed)) {
+      const shotArgs: string = JSON.stringify({
+        target: /整窗|窗口/.test(trimmed) ? 'workbench_window' : 'canvas_viewport',
+        showInChat: true
+      });
+      const outcome: DshToolExecutionOutcome = await host.captureScreenshot(shotArgs);
+      const toolItem: AiChatToolState = {
+        id: `demo-shot-${Date.now()}`,
+        name: 'capture_screenshot',
+        status: outcome.success ? 'completed' : 'failed',
+        arguments: shotArgs,
+        result: outcome.payloadJson
+      };
+      const steps: AiProcessStep[] = [{ id: 'demo-step-shot', kind: 'tool', title: 'capture_screenshot', text: '', status: toolItem.status, tool: toolItem }];
+      const generated: AiChatAttachment[] = outcome.generatedAttachment !== undefined ? [outcome.generatedAttachment] : [];
+      const reply: string = outcome.success
+        ? `已完成实时截图自检：当前编辑单元 **${this.docStore.currentEditingCellName}**，缩放 **${Math.round(this.viewportStore.zoomPercent)}%**，共 **${editService.getShapes().length}** 个图形、**${this.visibleLayerNumbers().length}** 个可见图层。截图卡片支持下方一键复制图片或另存。`
+        : outcome.summary;
+      const demoTask: AiAgentTask = aiService.createAgentTask(prompt, false, true);
+      aiService.recordHarnessResult(prompt, reply, '', [toolItem], outcome.success, undefined,
+        conversationId, false, demoTask, steps, userAttachments, generated);
+      this.refreshAiConversation();
+      return true;
+    }
+
+    const delLayerMatch: RegExpExecArray | null = /(?:删除|移除)(?:图层|层)\s*L?(\d+)(?:\s*[/,:D]\s*(\d+))?/i.exec(trimmed);
+    if (permission !== 'readonly' && (delLayerMatch !== null || /清理空(?:图)?层|删除空(?:图)?层/.test(trimmed))) {
+      const layerArgs: string = delLayerMatch !== null
+        ? JSON.stringify({ action: 'delete', layer: Number(delLayerMatch[1]), datatype: delLayerMatch[2] !== undefined ? Number(delLayerMatch[2]) : 0 })
+        : JSON.stringify({ action: 'delete_empty' });
+      const outcome: DshToolExecutionOutcome = await host.manageLayers(layerArgs, permission);
+      const toolItem: AiChatToolState = {
+        id: `demo-layer-${Date.now()}`,
+        name: 'manage_layers',
+        status: outcome.success ? 'completed' : 'failed',
+        arguments: layerArgs,
+        result: outcome.payloadJson
+      };
+      const steps: AiProcessStep[] = [{ id: 'demo-step-layer', kind: 'tool', title: 'manage_layers', text: '', status: toolItem.status, tool: toolItem }];
+      const demoTask: AiAgentTask = aiService.createAgentTask(prompt, false, false);
+      aiService.recordHarnessResult(prompt, outcome.summary, '', [toolItem], outcome.success, outcome.success ? 'executed' : 'failed',
+        conversationId, false, demoTask, steps, userAttachments);
+      this.refreshAiConversation();
+      return true;
+    }
+
+    return false;
   }
 
-  private async runDshNativeAgentPrompt(prompt: string, ticket: number, permission: DshPermissionMode): Promise<void> {
+  private async runDshNativeAgentPrompt(
+    prompt: string,
+    ticket: number,
+    permission: DshPermissionMode,
+    userAttachments: AiChatAttachment[] = []
+  ): Promise<void> {
     const generation: number = this.pageGeneration;
     const isCurrentPage = (): boolean => this.pageAlive && generation === this.pageGeneration;
     const conversationId: string = aiService.getActiveConversationId();
@@ -9906,6 +11955,9 @@ struct Index {
     let capturedTools: AiChatToolState[] = [];
     let capturedReasoning: string = '';
     let capturedAnswer: string = '';
+    let capturedWebSources: DshWebSearchItem[] = [];
+    let capturedGeneratedAttachments: AiChatAttachment[] = [];
+    let capturedAskExchanges: AiAskUserExchange[] = [];
     let succeeded: boolean = false;
     let commandStatus: 'pending' | 'executed' | 'failed' | undefined = undefined;
 
@@ -9936,12 +11988,19 @@ struct Index {
               this.flushAiStreamUiNow();
             }
           }
+        },
+        {
+          userAttachments,
+          webSearchEnabled: this.aiStore.aiWebSearchEnabled
         }
       );
       capturedSteps = result.steps;
       capturedTools = result.tools;
       capturedReasoning = result.fullReasoning;
       capturedAnswer = result.finalAnswer;
+      capturedWebSources = result.webSources;
+      capturedGeneratedAttachments = result.generatedAttachments;
+      capturedAskExchanges = result.askUserExchanges;
       succeeded = true;
       commandStatus = result.stagedPending ? 'pending' : (result.mutatedLayout ? 'executed' : undefined);
       if (isCurrentPage() && ticket === this.aiRequestGeneration) {
@@ -9963,16 +12022,22 @@ struct Index {
         s.status === 'running' ? { id: s.id, kind: s.kind, title: s.title, text: s.text, status: 'failed', tool: s.tool } : s
       );
       if (cancelled) {
-        capturedAnswer = capturedAnswer.length > 0 ? `${capturedAnswer}\n\n*（已手动停止生成）*` : '已停止本次生成。';
+        capturedAnswer = capturedAnswer.length > 0 ? `${capturedAnswer}
+
+*（已手动停止生成）*` : '已停止本次生成。';
       } else {
         if (isCurrentPage()) {
           this.aiStore.aiError = rawErr;
           this.panelStore.statusText = `Agent 提示：${rawErr}`;
         }
-        capturedAnswer = capturedAnswer.length > 0 ? `${capturedAnswer}\n\n${rawErr}` : rawErr;
+        capturedAnswer = capturedAnswer.length > 0 ? `${capturedAnswer}
+
+${rawErr}` : rawErr;
       }
       commandStatus = cancelled ? undefined : 'failed';
     } finally {
+      this.aiStore.aiPendingAskUser = null;
+      this.pendingAskUserResolve = null;
       try {
         aiService.recordHarnessResult(
           prompt,
@@ -9984,7 +12049,11 @@ struct Index {
           conversationId,
           ticket !== this.aiRequestGeneration,
           task,
-          capturedSteps
+          capturedSteps,
+          userAttachments,
+          capturedGeneratedAttachments,
+          capturedWebSources,
+          capturedAskExchanges
         );
         if (isCurrentPage()) {
           this.refreshAiConversation();
@@ -10678,6 +12747,98 @@ struct Index {
         const message: string = this.regenerateSelectedPCell(args['parameters'] as Record<string,number|string|boolean>);
         ok = message.length === 0; if (!ok) this.panelStore.statusText = message; break;
       }
+      case 'layers.clear': {
+        const deletedCount: number = this.clearShapesOnLayer(
+          args['layer'] as number,
+          args['datatype'] as number,
+          args['currentCellOnly'] === true
+        );
+        return aiNativeResult(true, `已清空图层 L${args['layer'] as number}/D${args['datatype'] as number} 上的 ${deletedCount} 个图形`);
+      }
+      case 'layers.copy_shapes': case 'layers.move_shapes': {
+        const srcL: number = args['sourceLayer'] as number;
+        const srcDt: number = args['sourceDatatype'] as number;
+        const dstL: number = args['targetLayer'] as number;
+        const dstDt: number = args['targetDatatype'] as number;
+        const curOnly: boolean = args['currentCellOnly'] === true;
+        const curCell: number = editService.getCurrentCellId();
+        this.ensureDshLayerExists(dstL, dstDt, `L${dstL}_${dstDt}`, `图层 ${dstL}/${dstDt}`, this.layerColor(this.docStore.layers.length));
+        const matched: Shape[] = editService.getShapes().filter((s: Shape): boolean =>
+          s.type !== ShapeType.INSTANCE && s.type !== ShapeType.NODE &&
+          s.layerNumber === srcL && s.datatype === srcDt &&
+          (!curOnly || (s.ownerCellId ?? editService.getTopCellId()) === curCell)
+        );
+        if (call.name === 'layers.copy_shapes') {
+          const copies: Shape[] = matched.map((s: Shape): Shape => {
+            const cp: Shape = cloneShapeModel(s) as Shape;
+            cp.id = 0; cp.layerNumber = dstL; cp.datatype = dstDt;
+            return cp;
+          });
+          const created: Shape[] = editService.createShapeCopies(copies, true, true);
+          return aiNativeResult(true, `已复制 ${created.length} 个图形至 L${dstL}/D${dstDt}`, created.map((s: Shape): number => s.id));
+        }
+        editService.beginBatch();
+        try {
+          for (const s of matched) editService.updateShape(s.id, dstL, 0, 0, dstDt);
+        } finally {
+          editService.endBatch();
+        }
+        return aiNativeResult(true, `已迁移 ${matched.length} 个图形至 L${dstL}/D${dstDt}`);
+      }
+      case 'cell.duplicate': {
+        const srcCellId: number = args['cellId'] as number;
+        const newName: string = String(args['newName'] ?? '').trim();
+        if (!this.hasPlaceableCell(srcCellId)) throw new Error('源 Cell 不存在');
+        if (newName.length === 0 || this.cellNameExists(newName)) throw new Error('新 Cell 名称为空或已存在');
+        const candidate: WorkspaceDocument = workspaceService.cloneValidatedDocument(this.workspaceDocument());
+        const newCellId: number = candidate.cellNames.length;
+        candidate.cellNames.push(newName);
+        candidate.cellProperties.push(cloneStructured(candidate.cellProperties[srcCellId] ?? []) as LayoutPropRecord[]);
+        appendCellSemantics(candidate);
+        let maxId: number = 0;
+        for (const s of candidate.shapes) if (s.id > maxId) maxId = s.id;
+        const clonedShapes: Shape[] = [];
+        for (const s of candidate.shapes) {
+          if ((s.ownerCellId ?? candidate.topCellId) === srcCellId) {
+            const cp: Shape = cloneShapeModel(s) as Shape;
+            cp.id = ++maxId;
+            cp.ownerCellId = newCellId;
+            cp.selected = false;
+            clonedShapes.push(cp);
+          }
+        }
+        candidate.shapes = candidate.shapes.concat(clonedShapes);
+        ok = this.commitCellStructure(candidate);
+        if (ok) this.panelStore.statusText = `已复制 Cell ${this.cellName(srcCellId)} 为 ${newName} (${clonedShapes.length} 个图形)`;
+        break;
+      }
+      case 'cell.clear': {
+        const targetCellId: number = args['cellId'] as number;
+        const ids: number[] = editService.getShapes()
+          .filter((s: Shape): boolean => (s.ownerCellId ?? editService.getTopCellId()) === targetCellId)
+          .map((s: Shape): number => s.id);
+        const removed: number[] = ids.length > 0 ? editService.deleteShapesWithSelectionHistory(ids) : [];
+        return aiNativeResult(true, `已清空 Cell ${this.cellName(targetCellId)} 内的 ${removed.length} 个图形`);
+      }
+      case 'instance.place_aref': {
+        this.instanceDialogContext = this.parameterDialogContext();
+        const cols: number = Math.max(1, Math.round(args['cols'] as number));
+        const rows: number = Math.max(1, Math.round(args['rows'] as number));
+        const rot: number = typeof args['rotation'] === 'number' ? (args['rotation'] as number) : 0;
+        const mir: number = typeof args['mirror'] === 'number' ? (args['mirror'] as number) : 0;
+        ok = this.placeInstance(
+          args['cellId'] as number,
+          args['x'] as number,
+          args['y'] as number,
+          rot,
+          mir,
+          cols,
+          rows,
+          args['colStepX'] as number,
+          args['rowStepY'] as number
+        );
+        break;
+      }
       default: throw new Error(`工具缺少编辑执行器：${call.name}`);
     }
     return aiNativeResult(ok, this.panelStore.statusText);
@@ -10927,6 +13088,154 @@ struct Index {
         if (kind === 'save' && id.length === 0) throw new Error('没有可保存的报告');
         this.observeAiNativeWorkflow(title,this.performRdbWorkspaceFileAction(kind,id,this.rdbReviewWorkspace.contextToken(),id ? this.rdbReviewWorkspace.reportContext(id) : ''),(): string => this.verifyStore.rdbReviewStatus);
         return aiNativeResult(true,'已调用报告工作流，完成或取消回执将写回对话',undefined,'awaiting_user');
+      }
+      case 'layers.create': {
+        const ln: number = args['layer'] as number;
+        const dt: number = args['datatype'] as number;
+        const eName: string = typeof args['englishName'] === 'string' ? (args['englishName'] as string) : `L${ln}_${dt}`;
+        const cName: string = typeof args['chineseName'] === 'string' ? (args['chineseName'] as string) : `图层 ${ln}/${dt}`;
+        const col: string = typeof args['color'] === 'string' ? (args['color'] as string) : this.layerColor(this.docStore.layers.length);
+        this.ensureDshLayerExists(ln, dt, eName, cName, col);
+        if (args['selectAsActive'] !== false) {
+          this.viewportStore.selectedLayerNumber = ln;
+          this.viewportStore.selectedDatatype = dt;
+        }
+        this.docStore.editorRevision++;
+        this.scheduleWorkspaceDraft();
+        break;
+      }
+      case 'layers.delete': {
+        ok = this.deleteLayerWithUndo(args['layer'] as number, args['datatype'] as number, args['deleteShapes'] !== false);
+        break;
+      }
+      case 'layers.delete_empty': {
+        const removed: number = this.deleteAllEmptyLayersWithUndo();
+        return aiNativeResult(true, removed > 0 ? `已删除 ${removed} 个无图形空图层` : '当前没有空图层');
+      }
+      case 'layers.rename': {
+        const ln: number = args['layer'] as number;
+        const dt: number = args['datatype'] as number;
+        if (!this.docStore.layers.some((l: UiLayer): boolean => l.layerNumber === ln && l.datatype === dt)) throw new Error('图层不存在');
+        this.docStore.layers = this.docStore.layers.map((l: UiLayer): UiLayer => {
+          if (l.layerNumber !== ln || l.datatype !== dt) return l;
+          const cp: UiLayer = cloneLayerWithVisible(l, l.visible);
+          if (typeof args['englishName'] === 'string') cp.englishName = args['englishName'] as string;
+          if (typeof args['chineseName'] === 'string') cp.chineseName = args['chineseName'] as string;
+          return cp;
+        });
+        this.docStore.editorRevision++;
+        this.scheduleWorkspaceDraft();
+        break;
+      }
+      case 'layers.reorder': {
+        const ln: number = args['layer'] as number;
+        const dt: number = args['datatype'] as number;
+        const curIdx: number = this.docStore.layers.findIndex((l: UiLayer): boolean => l.layerNumber === ln && l.datatype === dt);
+        if (curIdx < 0) throw new Error('图层不存在');
+        const arr: UiLayer[] = this.docStore.layers.slice();
+        const item: UiLayer = arr.splice(curIdx, 1)[0];
+        let dest: number = curIdx;
+        if (typeof args['targetIndex'] === 'number') dest = Math.max(0, Math.min(arr.length, Math.round(args['targetIndex'] as number)));
+        else if (args['direction'] === 'top') dest = 0;
+        else if (args['direction'] === 'bottom') dest = arr.length;
+        else if (args['direction'] === 'up') dest = Math.max(0, curIdx - 1);
+        else if (args['direction'] === 'down') dest = Math.min(arr.length, curIdx + 1);
+        arr.splice(dest, 0, item);
+        this.docStore.layers = arr;
+        this.docStore.editorRevision++;
+        this.scheduleWorkspaceDraft();
+        break;
+      }
+      case 'layers.batch_state': {
+        const op: string = args['operation'] as string;
+        const ln: number = typeof args['layer'] === 'number' ? (args['layer'] as number) : this.viewportStore.selectedLayerNumber;
+        const dt: number = typeof args['datatype'] === 'number' ? (args['datatype'] as number) : this.viewportStore.selectedDatatype;
+        this.docStore.layers = this.docStore.layers.map((l: UiLayer): UiLayer => {
+          const cp: UiLayer = cloneLayerWithVisible(l, l.visible);
+          if (op === 'show_all') cp.visible = true;
+          else if (op === 'hide_all') cp.visible = false;
+          else if (op === 'solo') cp.visible = (l.layerNumber === ln && l.datatype === dt);
+          else if (op === 'unlock_all') cp.locked = false;
+          else if (op === 'lock_all') cp.locked = true;
+          return cp;
+        });
+        this.syncLayerVisibilityMirror();
+        this.docStore.editorRevision++;
+        this.scheduleWorkspaceDraft();
+        break;
+      }
+      case 'cell.exit_top': {
+        editService.exitToTop();
+        this.syncShapesFromEditService();
+        this.fitAllShapes();
+        break;
+      }
+      case 'cell.exit_parent': {
+        const stack: number[] = editService.getCurrentCellStack();
+        if (stack.length > 1) this.navigateCellStack(stack.length - 2);
+        break;
+      }
+      case 'cell.set_top': {
+        const targetId: number = args['cellId'] as number;
+        if (!this.hasPlaceableCell(targetId)) throw new Error('目标 Cell 不存在');
+        const candidate: WorkspaceDocument = workspaceService.cloneValidatedDocument(this.workspaceDocument());
+        candidate.topCellId = targetId;
+        candidate.topCellName = candidate.cellNames[targetId];
+        candidate.cellStack = [targetId];
+        candidate.navigationPath = [];
+        ok = this.commitCellStructure(candidate);
+        if (ok) {
+          this.docStore.docTopCellName = this.cellName(targetId);
+          this.fitAllShapes();
+        }
+        break;
+      }
+      case 'selection.filter': {
+        const filterL: number = typeof args['layer'] === 'number' ? (args['layer'] as number) : -1;
+        const filterDt: number = typeof args['datatype'] === 'number' ? (args['datatype'] as number) : -1;
+        const st: string = typeof args['shapeType'] === 'string' ? (args['shapeType'] as string) : 'all';
+        const ids: number[] = editService.getCurrentCellShapes()
+          .filter((s: Shape): boolean => {
+            if (filterL >= 0 && s.layerNumber !== filterL) return false;
+            if (filterDt >= 0 && s.datatype !== filterDt) return false;
+            if (st === 'rect' && s.type !== ShapeType.RECT) return false;
+            if (st === 'polygon' && s.type !== ShapeType.POLYGON) return false;
+            if (st === 'path' && s.type !== ShapeType.PATH) return false;
+            if (st === 'text' && s.type !== ShapeType.TEXT) return false;
+            if (st === 'instance' && s.type !== ShapeType.INSTANCE) return false;
+            return true;
+          })
+          .map((s: Shape): number => s.id);
+        editService.selectMultiple(ids);
+        this.syncShapesFromEditService();
+        return aiNativeResult(true, `按条件筛选选中 ${ids.length} 个对象`, ids);
+      }
+      case 'selection.invert': {
+        const curSelected: Set<number> = new Set<number>(editService.getSelectedIds());
+        const inverted: number[] = editService.getCurrentCellShapes()
+          .filter((s: Shape): boolean => !curSelected.has(s.id))
+          .map((s: Shape): number => s.id);
+        editService.selectMultiple(inverted);
+        this.syncShapesFromEditService();
+        return aiNativeResult(true, `反选完成，当前选中 ${inverted.length} 个对象`, inverted);
+      }
+      case 'workspace.close': {
+        const closeId: string = args['id'] as string;
+        await this.closeWorkspaceDocument(closeId);
+        ok = !this.docStore.workspaceTabs.some((t: WorkspaceTab): boolean => t.id === closeId) || this.docStore.workspaceTabs.length === 1;
+        break;
+      }
+      case 'workspace.rename': {
+        const nextTitle: string = String(args['title'] ?? '').trim();
+        if (nextTitle.length === 0) throw new Error('文档标题不能为空');
+        this.docStore.currentDocumentTitle = nextTitle;
+        if (typeof args['libName'] === 'string' && (args['libName'] as string).trim().length > 0) {
+          this.docStore.docLibName = (args['libName'] as string).trim();
+        }
+        this.docStore.documentDirty = true;
+        this.refreshWorkspaceTabs();
+        this.scheduleWorkspaceDraft();
+        break;
       }
       default: throw new Error(`工具缺少应用执行器：${call.name}`);
     }

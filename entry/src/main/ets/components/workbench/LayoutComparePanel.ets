@@ -319,8 +319,14 @@ export struct LayoutComparePanel {
             .enabled(!this.stopping).onClick(() => this.cancelRun())
         }
       }.width('100%').padding({ top: 10 }).border({ width: { top: 1 }, color: COLORS.border }).id('layout-compare-actions')
-    }.width(this.panelWidth).height(this.panelHeight).padding(UI.panelPadding)
-      .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay'))).id('layout-compare-panel')
+    }
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .padding({ left: 18, right: 18, top: 8, bottom: 24 })
+    .backgroundColor(Color.Transparent)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .id('layout-compare-panel')
   }
 }
 

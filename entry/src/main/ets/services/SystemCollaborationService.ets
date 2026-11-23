@@ -41,6 +41,61 @@ export const HONGTU_ALLOWED_DROP_TYPES: Array<utd.UniformDataType> = [
   utd.UniformDataType.PLAIN_TEXT,
 ];
 
+export const HONGTU_AI_CHAT_DROP_TYPES: Array<utd.UniformDataType> = [
+  utd.UniformDataType.IMAGE,
+  utd.UniformDataType.FILE_URI,
+  utd.UniformDataType.FILE,
+  utd.UniformDataType.XML,
+  utd.UniformDataType.PLAIN_TEXT,
+];
+
+export function extractDroppedRawUris(event: DragEvent | undefined): string[] {
+  if (event === undefined) {
+    return [];
+  }
+  const out: string[] = [];
+  const seen: Set<string> = new Set<string>();
+  try {
+    const dragData: unifiedDataChannel.UnifiedData = event.getData();
+    if (dragData === undefined || dragData === null) {
+      return [];
+    }
+    const records: Array<unifiedDataChannel.UnifiedRecord> = dragData.getRecords();
+    for (let i = 0; i < records.length; i++) {
+      const record: unifiedDataChannel.UnifiedRecord = records[i];
+      let candidate: string = '';
+      try {
+        const types: string[] = record.getTypes();
+        if (types.includes(utd.UniformDataType.FILE_URI)) {
+          const entry = record.getEntry(utd.UniformDataType.FILE_URI) as uniformDataStruct.FileUri;
+          if (entry !== undefined && typeof entry.oriUri === 'string') {
+            candidate = entry.oriUri.trim();
+          }
+        }
+        if (candidate.length === 0 && types.includes(utd.UniformDataType.PLAIN_TEXT)) {
+          const textEntry = record.getEntry(utd.UniformDataType.PLAIN_TEXT) as uniformDataStruct.PlainText;
+          if (textEntry !== undefined && typeof textEntry.textContent === 'string' && textEntry.textContent.startsWith('file://')) {
+            candidate = textEntry.textContent.trim();
+          }
+        }
+      } catch (_e) {}
+      if (candidate.length === 0) {
+        const legacy: LegacyFileRecord = record as Object as LegacyFileRecord;
+        if (typeof legacy.oriUri === 'string' && legacy.oriUri.length > 0) {
+          candidate = legacy.oriUri.trim();
+        } else if (typeof legacy.uri === 'string' && legacy.uri.length > 0) {
+          candidate = legacy.uri.trim();
+        }
+      }
+      if (candidate.length > 0 && !seen.has(candidate)) {
+        seen.add(candidate);
+        out.push(candidate);
+      }
+    }
+  } catch (_err) {}
+  return out;
+}
+
 function decodeDisplayFileName(uri: string): string {
   const clean: string = uri.split(/[?#]/)[0];
   const slash: number = clean.lastIndexOf('/');

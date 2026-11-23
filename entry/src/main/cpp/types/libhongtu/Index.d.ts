@@ -572,6 +572,68 @@ export interface NativeLayoutCompareResult {
   structureDifferences: NativeStructureDifference[];
 }
 
+
+export interface NativeEmbeddedPythonInfo {
+  available: boolean;
+  hasCPython: boolean;
+  activeTier: string;
+  version: string;
+  summary: string;
+}
+
+export interface NativeEmbeddedPythonRequest {
+  script: string;
+  inputMode?: string;
+  sourceGdsPath?: string;
+  selectionGdsPath?: string;
+  currentCellName?: string;
+  parametersJson?: string;
+  outputGdsPath?: string;
+  outputSvgPath?: string;
+  cpythonHomeDir?: string;
+  timeoutMs?: number;
+}
+
+export interface NativeEmbeddedPythonLayerDef {
+  layerNumber: number;
+  datatype: number;
+  name: string;
+}
+
+export interface NativeEmbeddedPythonPortDef {
+  id: string;
+  ownerCellId: number;
+  ownerCellKey: string;
+  name: string;
+  xNm: number;
+  yNm: number;
+  orientationDeg: number;
+  widthNm: number;
+  layerNumber: number;
+  datatype: number;
+  portType: string;
+}
+
+export interface NativeEmbeddedPythonResult {
+  success: boolean;
+  engineTier: string;
+  engineVersion: string;
+  errorMessage: string;
+  fileName: string;
+  outputGdsPath: string;
+  outputSvgPath: string;
+  previewSvg: string;
+  stdoutText: string;
+  cellCount: number;
+  shapeCount: number;
+  expandedShapeCount: number;
+  layerCount: number;
+  gdsBytes: number;
+  cellNames: string[];
+  layerDefinitions: NativeEmbeddedPythonLayerDef[];
+  ports: NativeEmbeddedPythonPortDef[];
+}
+
 export interface HongTuNative {
   startParseJob(filePath: string, options: NativeParseJobOptions): NativeParseJob;
   startDrcJob(snapshot: NativeRenderSnapshot, rules: NativeDrcRule[], options: NativeDrcJobOptions): NativeDrcJob;
@@ -776,6 +838,8 @@ export interface HongTuNative {
   // ===== 版本 =====
   /** 获取鸿图核心版本号 */
   version(): string;
+  getEmbeddedPythonInfo(cpythonHomeDir?: string): NativeEmbeddedPythonInfo;
+  runEmbeddedPythonAsync(request: NativeEmbeddedPythonRequest): Promise<NativeEmbeddedPythonResult>;
 
   // ===== OpenGL ES 渲染 =====
   registerXComponent(xComponent?: object): void;

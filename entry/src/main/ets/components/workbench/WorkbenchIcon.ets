@@ -1,33 +1,94 @@
 import { COLORS } from '../../common/constants';
 
-/** Native system symbols for commands; precise geometry keeps its vector silhouette. */
+/**
+ * 鸿图统一原生图标组件（HarmonyOS SymbolGlyph 优先 × 专业 CAD 几何轮廓 HiDPI 精配）
+ *
+ * 1. 凡是鸿蒙系统符号库具备对应语义的动作、导航、对齐、镜像、测量、复制、模型、缩放与面板开关，
+ *    100% 路由至官方 `SymbolGlyph($r('sys.symbol.*'))`（含旋转组合，如垂直镜像复用原生镜像符号旋转 90°）；
+ * 2. 仅保留 5 个芯片版图 CAD 专属几何绘制态图标（指针选区、正多边形、顶点折线、倒圆角、继续走线）使用 `vp2px` 密度自适应矢量轮廓，
+ *    彻底根除旧版硬编码 `'1.7px'` 在 3.25x 高分屏上过细发虚的非原生观感。
+ */
 @Component
 export struct WorkbenchIcon {
   @Prop name: string = 'menu';
   @Prop iconSize: number = 20;
   @Prop color: string = COLORS.ink;
 
-  private isGeometry(): boolean {
-    return this.name === 'select' || this.name === 'pan' || this.name === 'measure' || this.name === 'rect' ||
-      this.name === 'polygon' || this.name === 'path' || this.name === 'instance' || this.name === 'mirror' ||
-      this.name === 'mirrorV' || this.name === 'duplicate' || this.name === 'cornerRound' ||
-      this.name === 'continuePath' || this.name === 'magnet' || this.name === 'ortho' || this.name === 'loupe' ||
-      this.name === 'copy' || this.name === 'slash' || this.name === 'minimize' ||
-      this.name === 'think' || this.name === 'model' || this.name === 'dpi' || this.name === 'screenRotate';
+  private isCadDomainSilhouette(): boolean {
+    return this.name === 'select' || this.name === 'polygon' || this.name === 'path' ||
+      this.name === 'cornerRound' || this.name === 'continuePath' || this.name === 'slash';
+  }
+
+  private symbolRotationDeg(): number {
+    if (this.name === 'mirrorV') {
+      return 90;
+    }
+    return 0;
   }
 
   private symbolResource(): Resource {
     switch (this.name) {
       case 'open': return $r('sys.symbol.folder');
+      case 'new': return $r('sys.symbol.plus_square');
       case 'save': return $r('sys.symbol.save');
+      case 'saveAs': return $r('sys.symbol.doc_plaintext_and_pencil');
+      case 'project': return $r('sys.symbol.doc_plaintext_and_folder');
+      case 'export': return $r('sys.symbol.rectangle_and_arrowshape_turn_up_right');
+      case 'import': return $r('sys.symbol.square_and_arrow_down');
       case 'undo': return $r('sys.symbol.undo');
       case 'redo': return $r('sys.symbol.redo');
       case 'delete': return $r('sys.symbol.trash');
       case 'fit': return $r('sys.symbol.arrow_up_left_and_arrow_down_right');
+      case 'dpi': return $r('sys.symbol.arrow_up_left_and_arrow_down_right');
       case 'plus': return $r('sys.symbol.plus');
       case 'minus': return $r('sys.symbol.minus');
       case 'reset': return $r('sys.symbol.arrow_2_circlepath');
+      case 'screenRotate': return $r('sys.symbol.arrow_2_circlepath');
       case 'rotate': return $r('sys.symbol.arrow_clockwise');
+      case 'mirror':
+      case 'mirrorV':
+        return $r('sys.symbol.arrow_left_arrow_right_and_rectangle_portrait');
+      case 'copy': return $r('sys.symbol.doc_text_on_doc_text');
+      case 'paste': return $r('sys.symbol.text_clipboard');
+      case 'duplicate': return $r('sys.symbol.plus_square');
+      case 'loupe': return $r('sys.symbol.plus_magnifyingglass');
+      case 'zoomOut': return $r('sys.symbol.minus_magnifyingglass');
+      case 'measure': return $r('sys.symbol.ruler_measure');
+      case 'ruler': return $r('sys.symbol.ruler');
+      case 'rect': return $r('sys.symbol.square_square');
+      case 'instance': return $r('sys.symbol.rectangle_on_rectangle');
+      case 'pan':
+      case 'move':
+        return $r('sys.symbol.move');
+      case 'magnet': return $r('sys.symbol.scope');
+      case 'ortho': return $r('sys.symbol.stroke_path');
+      case 'minimize': return $r('sys.symbol.chevron_down');
+      case 'think': return $r('sys.symbol.wand_and_stars');
+      case 'model': return $r('sys.symbol.square_stack_3d');
+      case 'code':
+      case 'python':
+        return $r('sys.symbol.code_square');
+      case 'keyboard': return $r('sys.symbol.keyboard');
+      case 'sidebar': return $r('sys.symbol.rectangle_lefthalf_inset_filled');
+      case 'inspector': return $r('sys.symbol.rectangle_righthalf_inset_filled');
+      case 'compare': return $r('sys.symbol.rectangle_split_2x1');
+      case 'stack':
+      case 'flatten':
+        return $r('sys.symbol.arrow_down_layer');
+      case 'filter': return $r('sys.symbol.funnel');
+      case 'lock': return $r('sys.symbol.lock');
+      case 'unlock': return $r('sys.symbol.lock_open');
+      case 'trace':
+      case 'web':
+        return $r('sys.symbol.square_link_square');
+      case 'union': return $r('sys.symbol.square_and_square');
+      case 'subtract': return $r('sys.symbol.rectangle_and_cut');
+      case 'alignLeft': return $r('sys.symbol.align_left');
+      case 'alignRight': return $r('sys.symbol.align_right');
+      case 'alignTop': return $r('sys.symbol.align_top');
+      case 'alignBottom': return $r('sys.symbol.align_bottom');
+      case 'alignCenter': return $r('sys.symbol.align_center');
+      case 'alignMiddle': return $r('sys.symbol.align_middle');
       case 'ai': return $r('sys.symbol.ai_edit');
       case 'search': return $r('sys.symbol.magnifyingglass');
       case 'eye': return $r('sys.symbol.eye');
@@ -43,7 +104,7 @@ export struct WorkbenchIcon {
       case 'check': return $r('sys.symbol.checkmark');
       case 'text': return $r('sys.symbol.textformat');
       case 'layout': return $r('sys.symbol.square_grid_2x2');
-      case 'grid': return $r('sys.symbol.square_grid_2x2');
+      case 'grid': return $r('sys.symbol.grid');
       case 'cell': return $r('sys.symbol.square_stack_3d');
       case 'verify': return $r('sys.symbol.checkmark_circle');
       case 'data': return $r('sys.symbol.externaldrive_3');
@@ -51,84 +112,60 @@ export struct WorkbenchIcon {
       case 'appearance': return $r('sys.symbol.paintpalette');
       case 'sparkles': return $r('sys.symbol.wand_and_stars');
       case 'settings': return $r('sys.symbol.gearshape');
+      case 'clock': return $r('sys.symbol.clock');
       default: return $r('sys.symbol.line_3_horizontal');
     }
   }
 
-  private commands(): string {
+  private scaledCadCommands(): string {
+    const s: number = vp2px(this.iconSize) / 24.0;
+    const c = (v: number): string => (v * s).toFixed(2);
     switch (this.name) {
       case 'select':
-        return 'M5 2L20 13L13 14L10 21Z';
-      case 'measure':
-        return 'M3 16L16 3L22 9L9 22ZM6 13L9 16M9 10L12 13M12 7L15 10M15 4L18 7';
-      case 'rect':
-        return 'M4 4H20V20H4Z';
+        return `M${c(5)} ${c(2.5)} L${c(19.5)} ${c(13)} L${c(12.6)} ${c(14.2)} L${c(9.8)} ${c(20.8)} Z`;
       case 'polygon':
-        return 'M7 3H17L22 12L17 21H7L2 12Z';
+        return `M${c(7)} ${c(3.5)} H${c(17)} L${c(21.5)} ${c(12)} L${c(17)} ${c(20.5)} H${c(7)} L${c(2.5)} ${c(12)} Z`;
       case 'path':
-        return 'M3 20L9 10L15 14L21 4M2 19H4V21H2ZM8 9H10V11H8ZM14 13H16V15H14ZM20 3H22V5H20Z';
-      case 'instance':
-        return 'M12 2L22 7V17L12 22L2 17V7ZM2 7L12 12L22 7M12 12V22';
-      case 'pan':
-        return 'M9 11V5.5A1.5 1.5 0 0 1 12 5.5V10M12 10V4.5A1.5 1.5 0 0 1 15 4.5V10M15 10V6.5A1.5 1.5 0 0 1 18 6.5V14A6 6 0 0 1 12 20H11A6 6 0 0 1 5.6 16.6L3.9 13.2A1.5 1.5 0 0 1 6.5 11.7L9 14V11';
-      case 'mirror':
-        return 'M12 2V22M9 5L3 12L9 19ZM15 5L21 12L15 19Z';
-      case 'mirrorV':
-        return 'M2 12H22M5 9L12 3L19 9ZM5 15L12 21L19 15Z';
-      case 'duplicate':
-        return 'M8 8H19V19H8ZM5 16H4V4H16V5M13.5 11V16M11 13.5H16';
-      case 'copy':
-        return 'M9 9H19V20H9ZM5 15H4V4H15V5';
-      case 'slash':
-        return 'M16 4L8 20';
-      case 'minimize':
-        return 'M5 12H19M9 16L12 19L15 16';
-      case 'think':
-        return 'M12 3A6 6 0 0 0 8 13.5V16.5A1.5 1.5 0 0 0 9.5 18H14.5A1.5 1.5 0 0 0 16 16.5V13.5A6 6 0 0 0 12 3ZM9.5 21H14.5';
-      case 'model':
-        return 'M12 2L20 6.5V17.5L12 22L4 17.5V6.5ZM12 12L20 6.5M12 12L4 6.5M12 12V22';
-      case 'dpi':
-        return 'M4 9V4H9M20 9V4H15M4 15V20H9M20 15V20H15M9 12H15M12 9V15';
-      case 'screenRotate':
-        return 'M7 4H14A2 2 0 0 1 16 6V18A2 2 0 0 1 14 20H7A2 2 0 0 1 5 18V6A2 2 0 0 1 7 4ZM19 9A5 5 0 0 1 19 16M17 15L19 16.5L21 15';
+        return `M${c(3.5)} ${c(19.5)} L${c(9.2)} ${c(9.8)} L${c(15)} ${c(13.8)} L${c(20.5)} ${c(4.5)} ` +
+          `M${c(2.3)} ${c(18.3)} H${c(4.7)} V${c(20.7)} H${c(2.3)} Z ` +
+          `M${c(8)} ${c(8.6)} H${c(10.4)} V${c(11)} H${c(8)} Z ` +
+          `M${c(13.8)} ${c(12.6)} H${c(16.2)} V${c(15)} H${c(13.8)} Z ` +
+          `M${c(19.3)} ${c(3.3)} H${c(21.7)} V${c(5.7)} H${c(19.3)} Z`;
       case 'cornerRound':
-        return 'M5 19V12A7 7 0 0 1 12 5H19M4 18H6V20H4ZM18 4H20V6H18Z';
+        return `M${c(5)} ${c(19)} V${c(12)} A${c(7)} ${c(7)} 0 0 1 ${c(12)} ${c(5)} H${c(19)}`;
       case 'continuePath':
-        return 'M3 18L9 12L14 15L20 6M16 6H20V10';
-      case 'magnet':
-        return 'M6 4V11A6 6 0 0 0 18 11V4M6 8H10M14 8H18M10 4V11A2 2 0 0 0 14 11V4';
-      case 'ortho':
-        return 'M4 19H19V4M4 14H9V19';
-      case 'loupe':
-        return 'M11 4A7 7 0 1 0 11 18A7 7 0 1 0 11 4ZM16 16L21 21M11 8V14M8 11H14';
+        return `M${c(3.5)} ${c(18)} L${c(9)} ${c(12)} L${c(14)} ${c(15)} L${c(20)} ${c(6)} M${c(15.5)} ${c(6)} H${c(20)} V${c(10.5)}`;
+      case 'slash':
       default:
-        return 'M3 5H21M3 12H21M3 19H21';
+        return `M${c(15.5)} ${c(4.5)} L${c(8.5)} ${c(19.5)}`;
     }
   }
 
   build() {
-    if (this.isGeometry()) {
-      Shape() {
-        Path().commands(this.commands())
+    if (this.isCadDomainSilhouette()) {
+      Stack({ alignContent: Alignment.Center }) {
+        Path()
+          .width(this.iconSize)
+          .height(this.iconSize)
+          .commands(this.scaledCadCommands())
           .fill(this.name === 'select' ? this.color : Color.Transparent)
           .stroke(this.color)
-          .strokeWidth('1.7px')
+          .strokeWidth(1.75)
           .strokeLineCap(LineCapStyle.Round)
           .strokeLineJoin(LineJoinStyle.Round)
       }
-      .viewPort({ x: '0px', y: '0px', width: '24px', height: '24px' })
       .width(this.iconSize)
       .height(this.iconSize)
-      .renderGroup(true)
       .hitTestBehavior(HitTestMode.None)
       .accessibilityLevel('no')
     } else {
       SymbolGlyph(this.symbolResource())
         .fontSize(this.iconSize)
         .fontColor([this.color])
+        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+        .rotate({ angle: this.symbolRotationDeg() })
         .width(this.iconSize)
         .height(this.iconSize)
-        .renderGroup(true)
         .hitTestBehavior(HitTestMode.None)
         .accessibilityLevel('no')
     }

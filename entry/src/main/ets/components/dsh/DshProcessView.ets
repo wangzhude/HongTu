@@ -5,8 +5,20 @@
  * - NativeTaskDock.ets + NativePlanView.ets（底部任务计划进度坞）
  * - NativeTurnChangesView.ets（本轮版图变更回执条：+图元 / +端口 / DRC 状态 / 定位 / 一键撤销）
  */
+import { Chip, ChipSize, SymbolGlyphModifier } from '@kit.ArkUI';
 import { DshDesign, DshIcon } from './DshDesign';
-import type { AiChatToolState, AiProcessStep } from '../../services/AiService';
+import type {
+  AiAskUserExchange,
+  AiAskUserOption,
+  AiAskUserRequest,
+  AiChatAttachment,
+  AiChatToolState,
+  AiProcessStep,
+  DshWebSearchItem
+} from '../../services/AiService';
+import { formatAttachmentSize } from '../../services/AiAttachmentService';
+import { COLORS } from '../../common/constants';
+import { UI } from '../../common/UiTokens';
 import {
   describeAiToolCall,
   extractAiPlan,
@@ -27,17 +39,29 @@ export interface DshTurnChangeSummary {
 }
 
 function resolveDshToolIcon(toolName: string): string {
+  if (toolName === 'capture_screenshot') {
+    return 'camera-outline';
+  }
+  if (toolName === 'inspect_workbench_ui' || toolName === 'automate_workbench_ui' || toolName === 'manage_workbench') {
+    return 'ui-outline';
+  }
+  if (toolName === 'web_search' || toolName === 'web_fetch') {
+    return 'web-outline';
+  }
+  if (toolName === 'ask_user') {
+    return 'ask-outline';
+  }
   if (toolName === 'inspect_layout' || toolName === 'query_layout' || toolName === 'query_editor' ||
-    toolName === 'list_native_tools' || toolName === 'read_native_tool') {
+    toolName === 'list_native_tools' || toolName === 'read_native_tool' || toolName === 'inspect_attachments') {
     return 'search-outline';
   }
   if (toolName === 'todo_write' || toolName === 'write_plan' || toolName === 'update_task_status') {
     return 'plan-outline';
   }
-  if (toolName === 'execute_klayout_python' || toolName === 'execute_layout_python') {
+  if (toolName === 'execute_klayout_python' || toolName === 'execute_layout_python' || toolName === 'call_native_tool') {
     return 'code-outline';
   }
-  if (toolName === 'run_drc') {
+  if (toolName === 'run_drc' || toolName === 'manage_verification') {
     return 'check-outline';
   }
   return 'edit-outline';
@@ -744,4 +768,351 @@ export function extractLatestPlanFromSteps(steps: AiProcessStep[]): AiPlanStepVi
     }
   }
   return extractAiPlan(tools);
+}
+
+
+/**
+ * 鸿蒙原生交互式提问卡（Agent 调用 `ask_user` 时挂起工具循环并原地收集用户单选/多选/补充说明）
+ */
+@Component
+export struct DshAskUserCard {
+  @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
+  private dark(): boolean { return this.effectiveIsDark || DshDesign.isDark(); }
+  @Prop @Watch('onRequestChanged') request: AiAskUserRequest = {
+    id: '',
+    question: '',
+    options: [],
+    multiSelect: false,
+    allowCustomInput: true
+  };
+  onSubmit: (exchange: AiAskUserExchange) => void = (_ex: AiAskUserExchange): void => {};
+
+  @State private selectedLabels: string[] = [];
+  @State private customInput: string = '';
+
+  aboutToAppear(): void {
+    this.onRequestChanged();
+  }
+
+  onRequestChanged(): void {
+    this.selectedLabels = this.request.options.length > 0 && !this.request.multiSelect
+      ? [this.request.options[0].label]
+      : [];
+    this.customInput = '';
+  }
+
+  private isSelected(label: string): boolean {
+    return this.selectedLabels.includes(label);
+  }
+
+  private toggleOption(label: string): void {
+    if (this.request.multiSelect) {
+      if (this.selectedLabels.includes(label)) {
+        this.selectedLabels = this.selectedLabels.filter((x: string): boolean => x !== label);
+      } else {
+        this.selectedLabels = this.selectedLabels.concat([label]);
+      }
+    } else {
+      this.selectedLabels = [label];
+    }
+  }
+
+  private canConfirm(): boolean {
+    return this.selectedLabels.length > 0 || this.customInput.trim().length > 0;
+  }
+
+  private commit(skipped: boolean): void {
+    const exchange: AiAskUserExchange = {
+      id: this.request.id,
+      question: this.request.question,
+      context: this.request.context,
+      options: this.request.options,
+      multiSelect: this.request.multiSelect,
+      selectedLabels: skipped ? [] : this.selectedLabels.slice(),
+      customText: skipped ? '' : this.customInput.trim(),
+      skipped: skipped
+    };
+    this.onSubmit(exchange);
+  }
+
+  build() {
+    Column({ space: 8 }) {
+      Row({ space: 6 }) {
+        DshIcon({
+          glyph: 'ask-outline',
+          glyphSize: 15,
+          color: DshDesign.accent(this.dark())
+        })
+        Text('Agent 需要你的确认')
+          .fontSize(12)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(DshDesign.accent(this.dark()))
+          .layoutWeight(1)
+        Text(this.request.multiSelect ? '可多选' : '单选')
+          .fontSize(10)
+          .fontColor(DshDesign.textTertiary(this.dark()))
+          .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+          .backgroundColor(DshDesign.field(this.dark()))
+          .borderRadius(999)
+      }.width('100%').alignItems(VerticalAlign.Center)
+
+      Text(this.request.question)
+        .fontSize(13)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(DshDesign.textPrimary(this.dark()))
+        .lineHeight(19)
+        .width('100%')
+
+      if (this.request.context !== undefined && this.request.context.trim().length > 0) {
+        Text(this.request.context)
+          .fontSize(11.5)
+          .fontColor(DshDesign.textSecondary(this.dark()))
+          .lineHeight(17)
+          .width('100%')
+      }
+
+      if (this.request.options.length > 0) {
+        Column({ space: 5 }) {
+          ForEach(this.request.options, (opt: AiAskUserOption, idx: number) => {
+            Button({ type: ButtonType.Normal }) {
+              Row({ space: 8 }) {
+                if (this.request.multiSelect) {
+                  Checkbox({ name: `ask_chk_${idx}`, group: `ask_grp_${this.request.id}` })
+                    .select(this.isSelected(opt.label))
+                    .selectedColor(COLORS.primary)
+                    .width(16)
+                    .height(16)
+                    .hitTestBehavior(HitTestMode.None)
+                } else {
+                  Radio({ value: opt.label, group: `ask_rad_${this.request.id}` })
+                    .checked(this.isSelected(opt.label))
+                    .width(16)
+                    .height(16)
+                    .hitTestBehavior(HitTestMode.None)
+                }
+                Column({ space: 2 }) {
+                  Text(opt.label)
+                    .fontSize(12.5)
+                    .fontWeight(this.isSelected(opt.label) ? FontWeight.Medium : FontWeight.Regular)
+                    .fontColor(DshDesign.textPrimary(this.dark()))
+                    .width('100%')
+                    .textAlign(TextAlign.Start)
+                  if (opt.description !== undefined && opt.description.trim().length > 0) {
+                    Text(opt.description)
+                      .fontSize(11)
+                      .fontColor(DshDesign.textTertiary(this.dark()))
+                      .width('100%')
+                      .textAlign(TextAlign.Start)
+                      .maxLines(2)
+                  }
+                }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+              }.width('100%').alignItems(VerticalAlign.Center)
+            }
+            .width('100%')
+            .padding({ left: 10, right: 10, top: 7, bottom: 7 })
+            .backgroundColor(this.isSelected(opt.label) ? DshDesign.selectedSurface(this.dark()) : DshDesign.field(this.dark()))
+            .border({
+              width: 0.8,
+              color: this.isSelected(opt.label) ? COLORS.primary : DshDesign.border(this.dark())
+            })
+            .borderRadius(8)
+            .onClick((): void => {
+              this.toggleOption(opt.label);
+            })
+          }, (opt: AiAskUserOption, idx: number): string => `${this.request.id}_${idx}_${opt.label}_${this.selectedLabels.join('|')}`)
+        }.width('100%')
+      }
+
+      if (this.request.allowCustomInput) {
+        TextInput({
+          text: this.customInput,
+          placeholder: this.request.placeholder && this.request.placeholder.length > 0
+            ? this.request.placeholder
+            : '补充自定义参数或直接输入说明（选填）…'
+        })
+          .width('100%')
+          .height(34)
+          .fontSize(12)
+          .fontColor(DshDesign.textPrimary(this.dark()))
+          .placeholderColor(DshDesign.textTertiary(this.dark()))
+          .backgroundColor(DshDesign.field(this.dark()))
+          .border({ width: 0.8, color: DshDesign.border(this.dark()) })
+          .borderRadius(8)
+          .onKeyEvent((e: KeyEvent) => { e.stopPropagation(); })
+          .onChange((v: string) => { this.customInput = v; })
+          .onSubmit(() => {
+            if (this.canConfirm()) {
+              this.commit(false);
+            }
+          })
+      }
+
+      Row({ space: 8 }) {
+        Blank()
+        Button('跳过由 Agent 决定', { type: ButtonType.Capsule })
+          .height(30)
+          .padding({ left: 12, right: 12 })
+          .fontSize(11.5)
+          .fontColor(DshDesign.textSecondary(this.dark()))
+          .backgroundColor(DshDesign.field(this.dark()))
+          .onClick((): void => { this.commit(true); })
+        Button('确认并继续', { type: ButtonType.Capsule })
+          .height(30)
+          .padding({ left: 14, right: 14 })
+          .fontSize(11.5)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(Color.White)
+          .backgroundColor(COLORS.primary)
+          .enabled(this.canConfirm())
+          .onClick((): void => { this.commit(false); })
+      }.width('100%')
+    }
+    .width('100%')
+    .padding(12)
+    .backgroundColor(DshDesign.raised(this.dark()))
+    .border({ width: 1, color: COLORS.primary })
+    .borderRadius(12)
+  }
+}
+
+/**
+ * 消息气泡多模态附件网格：支持图片缩略图预览、一键复制图片/文件至系统剪贴板、另存为及一键在画布打开版图
+ */
+@Component
+export struct DshAttachmentGrid {
+  @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
+  private dark(): boolean { return this.effectiveIsDark || DshDesign.isDark(); }
+  @Prop attachments: AiChatAttachment[] = [];
+  @Prop alignEnd: boolean = false;
+  onCopy: (att: AiChatAttachment) => void = (_att: AiChatAttachment): void => {};
+  onSaveAs: (att: AiChatAttachment) => void = (_att: AiChatAttachment): void => {};
+  onOpenLayout: (att: AiChatAttachment) => void = (_att: AiChatAttachment): void => {};
+
+  private imageSource(att: AiChatAttachment): string {
+    if (att.sandboxPath.length > 0) {
+      return att.sandboxPath.startsWith('file://') ? att.sandboxPath : `file://${att.sandboxPath}`;
+    }
+    return att.sourceUri;
+  }
+
+  build() {
+    if (this.attachments.length > 0) {
+      Column({ space: 6 }) {
+        ForEach(this.attachments, (att: AiChatAttachment) => {
+          Column({ space: 6 }) {
+            if (att.kind === 'image') {
+              Image(this.imageSource(att))
+                .width('100%')
+                .constraintSize({ maxHeight: 196 })
+                .objectFit(ImageFit.Contain)
+                .backgroundColor(DshDesign.field(this.dark()))
+                .borderRadius(8)
+            }
+
+            Row({ space: 6 }) {
+              SymbolGlyph(
+                att.kind === 'image'
+                  ? $r('sys.symbol.eye')
+                  : (att.kind === 'layout' ? $r('sys.symbol.square_grid_2x2') : $r('sys.symbol.doc_text'))
+              )
+                .fontSize(14)
+                .fontColor([COLORS.primary])
+              Column({ space: 1 }) {
+                Text(att.name)
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(DshDesign.textPrimary(this.dark()))
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(`${att.kind === 'image' ? (att.width && att.height ? `${att.width}×${att.height} · ` : '') : ''}${formatAttachmentSize(att.sizeBytes)}`)
+                  .fontSize(10)
+                  .fontColor(DshDesign.textTertiary(this.dark()))
+              }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            }.width('100%').alignItems(VerticalAlign.Center)
+
+            Row({ space: 6 }) {
+              Button(att.kind === 'image' ? '复制图片' : '复制文件', { type: ButtonType.Normal })
+                .height(24)
+                .padding({ left: 8, right: 8 })
+                .fontSize(10.5)
+                .fontColor(COLORS.primary)
+                .backgroundColor(COLORS.primarySoft)
+                .borderRadius(6)
+                .onClick((): void => { this.onCopy(att); })
+
+              Button('另存为', { type: ButtonType.Normal })
+                .height(24)
+                .padding({ left: 8, right: 8 })
+                .fontSize(10.5)
+                .fontColor(DshDesign.textPrimary(this.dark()))
+                .backgroundColor(DshDesign.field(this.dark()))
+                .borderRadius(6)
+                .onClick((): void => { this.onSaveAs(att); })
+
+              if (att.kind === 'layout') {
+                Button('在画布打开', { type: ButtonType.Normal })
+                  .height(24)
+                  .padding({ left: 8, right: 8 })
+                  .fontSize(10.5)
+                  .fontColor(Color.White)
+                  .backgroundColor(COLORS.primary)
+                  .borderRadius(6)
+                  .onClick((): void => { this.onOpenLayout(att); })
+              }
+            }.width('100%').alignItems(VerticalAlign.Center)
+          }
+          .width(this.alignEnd ? '86%' : '100%')
+          .padding(8)
+          .backgroundColor(DshDesign.subtleSurface(this.dark()))
+          .border({ width: 0.8, color: DshDesign.border(this.dark()) })
+          .borderRadius(10)
+        }, (att: AiChatAttachment): string => `${att.id}:${att.name}:${att.sizeBytes}`)
+      }
+      .width('100%')
+      .alignItems(this.alignEnd ? HorizontalAlign.End : HorizontalAlign.Start)
+      .margin({ top: 4, bottom: 2 })
+    }
+  }
+}
+
+/**
+ * 网页检索引用来源原生 Chip 条（点击复制来源链接并在状态提示中展示）
+ */
+@Component
+export struct DshWebSourcesRow {
+  @Prop sources: DshWebSearchItem[] = [];
+  onSelectSource: (item: DshWebSearchItem) => void = (_item: DshWebSearchItem): void => {};
+
+  build() {
+    if (this.sources.length > 0) {
+      Scroll() {
+        Row({ space: 6 }) {
+          ForEach(this.sources, (src: DshWebSearchItem, idx: number) => {
+            Chip({
+              prefixSymbol: {
+                normal: new SymbolGlyphModifier($r('sys.symbol.square_link_square')).fontSize(12).fontColor([COLORS.primary]),
+                activated: new SymbolGlyphModifier($r('sys.symbol.square_link_square')).fontSize(12).fontColor([COLORS.primary])
+              },
+              label: {
+                text: src.title.length > 22 ? `${src.title.substring(0, 21)}…` : src.title,
+                fontSize: 11,
+                fontColor: COLORS.ink
+              },
+              size: ChipSize.SMALL,
+              allowClose: false,
+              backgroundColor: COLORS.surfaceMuted,
+              borderRadius: UI.controlRadius,
+              onClicked: () => {
+                this.onSelectSource(src);
+              }
+            })
+          }, (src: DshWebSearchItem, idx: number): string => `${idx}:${src.url}`)
+        }.alignItems(VerticalAlign.Center)
+      }
+      .width('100%')
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .margin({ top: 4, bottom: 2 })
+    }
+  }
 }

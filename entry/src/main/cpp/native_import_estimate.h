@@ -6,9 +6,11 @@
 #include <stdexcept>
 namespace hongtu {
 
-constexpr uint64_t kMaxInteractiveStoredShapes = 2000000ULL;
-constexpr uint64_t kMaxInteractiveCoordinates = 25000000ULL;
-constexpr uint64_t kMaxInteractiveExpandedObjects = 10000000ULL;
+constexpr uint64_t kMaxInteractiveStoredShapes = 5000000ULL;
+constexpr uint64_t kMaxInteractiveCoordinates = 50000000ULL;
+// AREF 与多级 SREF 在内存中保持压缩存储，渲染侧通过层级包围盒裁剪与亚像素实例折叠按需展开，
+// 因此将逻辑展开上限提升至 10 亿，彻底消除光子晶体阵列/存储阵列大型版图误触发预算降级。
+constexpr uint64_t kMaxInteractiveExpandedObjects = 1000000000ULL;
 
 struct InteractiveImportEstimate {
     uint64_t storedShapes = 0, coordinates = 0, instanceRecords = 0, arrayMembers = 0;
@@ -68,7 +70,7 @@ inline InteractiveImportEstimate EstimateInteractiveImport(const GdsiiParseResul
                        out.coordinates <= kMaxInteractiveCoordinates &&
                        out.expandedObjects <= kMaxInteractiveExpandedObjects;
     out.message = out.withinBudget ? "几何载荷估算不含文件缓冲、名称/属性、空间索引、JS 对象和运行时开销，不保证峰值内存" :
-        "超过交互预算（存储图形 200 万、坐标 2500 万或最大 Cell 展开 1000 万），请拆分版图；当前文档未更改";
+        "超过交互预算（存储图形 500 万、坐标 5000 万或最大 Cell 展开 10 亿），请拆分版图；当前文档未更改";
     return out;
 }
 }

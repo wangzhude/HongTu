@@ -1,5 +1,6 @@
 import hongtu from 'libhongtu.so';
 import type { NativeParseJobOptions, NativeParseJob, NativeDrcJobOptions, NativeDrcJob, NativeJobProgress } from '../../cpp/types/libhongtu/Index';
+import type { NativeEmbeddedPythonInfo, NativeEmbeddedPythonRequest, NativeEmbeddedPythonResult } from '../../cpp/types/libhongtu/Index';
 import type { NativeSyncResult, NativeLayoutCompareOptions, NativeLayoutCompareResult, NativeCompareJobOptions, NativeCompareJob } from '../../cpp/types/libhongtu/Index';
 import type { GdsiiResult, HongTuNative, ParseOptions, LayoutStats, BooleanOpType, JoinType, NativeShape, RenderBatch, NativeLayerRenderStyle, NativeRenderSnapshot, GdsiiWriteResult, NativeDrcRule, NativeDrcViolation, ExportLayerStyle, ImageExportResult, PCellInfo, PCellGenerateResult, NativeNet, NativeViaLayer, NativeLvsResult } from '../../cpp/types/libhongtu/Index';
 
@@ -90,6 +91,37 @@ export class NativeHongTuService {
       return e.message;
     }
     return String(e);
+  }
+
+
+  getEmbeddedPythonInfo(cpythonHomeDir: string = ''): NativeEmbeddedPythonInfo {
+    if (!this.ensureLoaded()) {
+      return {
+        available: false,
+        hasCPython: false,
+        activeTier: 'unavailable',
+        version: '',
+        summary: 'native 模块未加载'
+      };
+    }
+    try {
+      return this.nativeModule!.getEmbeddedPythonInfo(cpythonHomeDir);
+    } catch (error) {
+      return {
+        available: false,
+        hasCPython: false,
+        activeTier: 'unavailable',
+        version: '',
+        summary: this.toErrorMessage(error)
+      };
+    }
+  }
+
+  async runEmbeddedPythonAsync(request: NativeEmbeddedPythonRequest): Promise<NativeEmbeddedPythonResult> {
+    if (!this.ensureLoaded()) {
+      throw new Error('native 模块未加载，无法执行端侧内置 Python');
+    }
+    return await this.nativeModule!.runEmbeddedPythonAsync(request);
   }
 
   getVersion(): NativeCallResult {

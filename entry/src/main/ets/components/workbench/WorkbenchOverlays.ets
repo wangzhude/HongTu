@@ -3,8 +3,21 @@ import { SettingsToggleRow } from '../SettingsKit';
 import { StableSegmentButton } from '../StableSegmentButton';
 import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 import { HdsColorPicker, HdsColorPickerTabType } from '@kit.UIDesignKit';
-import { CounterComponent, CounterType, SegmentButtonItemTuple, SegmentButtonTextItem } from '@kit.ArkUI';
+import {
+  AccessibilitySelectedType,
+  Chip,
+  ChipSize,
+  CounterComponent,
+  CounterType,
+  SegmentButtonItemTuple,
+  SegmentButtonTextItem,
+  SymbolGlyphModifier
+} from '@kit.ArkUI';
 import { hongTuThemeState } from '../../store/ThemeStore';
+import { SheetGlassHeader } from '../SheetGlassHeader';
+import { buildLuminousMenuOptions } from '../../store/LuminousSurfaceOptions';
+import { menuCheckIcon, menuIcon, menuStyle, MENU_ITEM_STYLE } from '../../common/WorkbenchMenuStyle';
+import { extractDroppedRawUris, HONGTU_AI_CHAT_DROP_TYPES } from '../../services/SystemCollaborationService';
 import { DrawnStatusIcon } from '../DrawnStatusIcon';
 import { showAppSnackBar } from '../AppSnackBar';
 import { UiLayer } from '../../common/types';
@@ -24,10 +37,14 @@ import {
   TestConnectionResult,
   ChatMessage,
   ChatRole,
+  AiAskUserExchange,
+  AiAskUserRequest,
+  AiChatAttachment,
   AiChatToolState,
   AiProcessStep,
   AiConversationSummary,
   AiContextOptions,
+  DshWebSearchItem,
   ParsedCommand,
 } from '../../services/AiService';
 import { Macro, macroService } from '../../services/MacroService';
@@ -40,8 +57,17 @@ import { editService } from '../../services/EditService';
 import { WorkbenchIcon } from './WorkbenchIcon';
 import { PanelHeading } from './PanelHeading';
 import { AiMarkdownBody } from './AiMarkdownBody';
-import { DshDesign, DshIcon, DshPermissionMode, DshPermissionPicker, dshPermissionShortLabel } from '../dsh/DshDesign';
-import { DshProcessView, DshRunningTail, DshTaskDock, DshTurnChangesCard, extractLatestPlanFromSteps } from '../dsh/DshProcessView';
+import { DshDesign, DshIcon, DshPermissionMode, DSH_PERMISSION_OPTIONS, DshPermissionOption, dshPermissionShortLabel } from '../dsh/DshDesign';
+import {
+  DshAskUserCard,
+  DshAttachmentGrid,
+  DshProcessView,
+  DshRunningTail,
+  DshTaskDock,
+  DshTurnChangesCard,
+  DshWebSourcesRow,
+  extractLatestPlanFromSteps
+} from '../dsh/DshProcessView';
 import {
   AiExtractedThinking,
   AiSlashCommandSpec,
@@ -93,6 +119,20 @@ export struct AiAssistantPanel {
   openPythonAction: () => void = () => {};
   openAgentConnectionAction: () => void = () => {};
   promptAction: (prompt: string, resumeTask?: boolean, forceReadOnly?: boolean) => void = () => {};
+  @Prop pendingAttachments: AiChatAttachment[] = [];
+  @Prop webSearchEnabled: boolean = true;
+  @Prop pendingAskUser: AiAskUserRequest | null = null;
+  toggleWebSearchAction: (enabled: boolean) => void = (_enabled: boolean) => {};
+  pickPhotoAttachmentAction: () => void = () => {};
+  pickFileAttachmentAction: () => void = () => {};
+  captureCanvasAttachmentAction: () => void = () => {};
+  pasteClipboardAttachmentAction: () => void = () => {};
+  dropAttachmentUrisAction: (uris: string[]) => void = (_uris: string[]) => {};
+  removePendingAttachmentAction: (id: string) => void = (_id: string) => {};
+  copyAttachmentAction: (att: AiChatAttachment) => void = (_att: AiChatAttachment) => {};
+  saveAttachmentAsAction: (att: AiChatAttachment) => void = (_att: AiChatAttachment) => {};
+  openAttachmentLayoutAction: (att: AiChatAttachment) => void = (_att: AiChatAttachment) => {};
+  submitAskUserAction: (exchange: AiAskUserExchange) => void = (_exchange: AiAskUserExchange) => {};
   @Prop sessionMode: 'agent' | 'readonly' = 'agent';
   @Prop permissionMode: DshPermissionMode = 'auto';
   changePermissionModeAction: (mode: DshPermissionMode) => void = (_m: DshPermissionMode) => {};
@@ -1198,6 +1238,15 @@ export struct AiAssistantPanel {
       if (this.sessionMode !== 'agent') this.toggleSessionModeAction();
       return;
     }
+    if (spec.command === '/screenshot') {
+      this.captureCanvasAttachmentAction();
+      return;
+    }
+    if (spec.command === '/search') {
+      this.toggleWebSearchAction(!this.webSearchEnabled);
+      showAppSnackBar(this.getUIContext(), !this.webSearchEnabled ? '已开启 Agent 联网检索' : '已关闭 Agent 联网检索');
+      return;
+    }
     if (spec.prompt.length > 0 && !this.isLoading && !this.configBusy) {
       this.followsLatest = true;
       this.showConversations = false;
@@ -1217,8 +1266,15 @@ export struct AiAssistantPanel {
     return matchAiSlashCommands(this.inputText);
   }
 
+  private canSendComposer(): boolean {
+    return (this.inputText.trim().length > 0 || this.pendingAttachments.length > 0) && !this.isLoading && !this.configBusy;
+  }
+
   private sendInput(resumeTask: boolean = false): void {
-    const prompt: string = this.inputText.trim();
+    const rawPrompt: string = this.inputText.trim();
+    const prompt: string = rawPrompt.length > 0
+      ? rawPrompt
+      : (this.pendingAttachments.length > 0 ? '请查看并分析我刚添加的附件，给出准确结论或执行相应操作。' : '');
     if (prompt.length === 0 || this.isLoading || this.configBusy) {
       return;
     }
@@ -2496,21 +2552,36 @@ export struct AiAssistantPanel {
   @Builder
   ChatMessageRow(msg: ChatMessage) {
     if (msg.role === ChatRole.USER) {
-      Row() {
-        Text(this.messageText(msg))
-          .fontSize(this.desktopMode ? 13 : 12)
-          .lineHeight(20)
-          .fontColor(COLORS.ink)
-          .backgroundColor(COLORS.primarySoft)
-          .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.24) })
-          .borderRadius({ topLeft: 16, topRight: 4, bottomLeft: 16, bottomRight: 16 })
-          .padding({ left: 13, right: 13, top: 9, bottom: 9 })
-          .constraintSize({ maxWidth: '86%' })
-          .copyOption(CopyOptions.LocalDevice)
-          .textAlign(TextAlign.Start)
+      Column({ space: 4 }) {
+        if (msg.attachments !== undefined && msg.attachments.length > 0) {
+          DshAttachmentGrid({
+            attachments: msg.attachments,
+            alignEnd: true,
+            onCopy: (att: AiChatAttachment) => { this.copyAttachmentAction(att); },
+            onSaveAs: (att: AiChatAttachment) => { this.saveAttachmentAsAction(att); },
+            onOpenLayout: (att: AiChatAttachment) => { this.openAttachmentLayoutAction(att); }
+          })
+        }
+        if (this.messageText(msg).length > 0) {
+          Row() {
+            Text(this.messageText(msg))
+              .fontSize(this.desktopMode ? 13 : 12)
+              .lineHeight(20)
+              .fontColor(COLORS.ink)
+              .backgroundColor(COLORS.primarySoft)
+              .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.24) })
+              .borderRadius({ topLeft: 16, topRight: 4, bottomLeft: 16, bottomRight: 16 })
+              .padding({ left: 13, right: 13, top: 9, bottom: 9 })
+              .constraintSize({ maxWidth: '86%' })
+              .copyOption(CopyOptions.LocalDevice)
+              .textAlign(TextAlign.Start)
+          }
+          .width('100%')
+          .justifyContent(FlexAlign.End)
+        }
       }
       .width('100%')
-      .justifyContent(FlexAlign.End)
+      .alignItems(HorizontalAlign.End)
       .padding({ top: 6, bottom: 6 })
     } else {
       Row() {
@@ -2570,6 +2641,23 @@ export struct AiAssistantPanel {
             }
           }
 
+          if (msg.attachments !== undefined && msg.attachments.length > 0) {
+            DshAttachmentGrid({
+              attachments: msg.attachments,
+              alignEnd: false,
+              onCopy: (att: AiChatAttachment) => { this.copyAttachmentAction(att); },
+              onSaveAs: (att: AiChatAttachment) => { this.saveAttachmentAsAction(att); },
+              onOpenLayout: (att: AiChatAttachment) => { this.openAttachmentLayoutAction(att); }
+            })
+          }
+          if (msg.webSources !== undefined && msg.webSources.length > 0) {
+            DshWebSourcesRow({
+              sources: msg.webSources,
+              onSelectSource: (item: DshWebSearchItem) => {
+                this.copyPlainText(item.url, `已复制网页来源链接：${item.title}`);
+              }
+            })
+          }
           if (msg.role === ChatRole.ASSISTANT && !this.isLoading && this.messageText(msg).length > 0) {
             Row({ space: 6 }) {
               Button({ type: ButtonType.Normal }) {
@@ -4026,19 +4114,73 @@ export struct AiAssistantPanel {
 
   @Builder
   SendArrowGlyph() {
-    Shape() {
-      Path().commands('M12 19V5M6 11L12 5L18 11')
-        .fill(Color.Transparent)
-        .stroke(Color.White)
-        .strokeWidth('2px')
-        .strokeLineCap(LineCapStyle.Round)
-        .strokeLineJoin(LineJoinStyle.Round)
+    SymbolGlyph($r('sys.symbol.chevron_up'))
+      .fontSize(17)
+      .fontColor([Color.White])
+      .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      .hitTestBehavior(HitTestMode.None)
+      .accessibilityLevel('no')
+  }
+
+  private permissionMenuSizing(): MenuItemOptions[] {
+    return DSH_PERMISSION_OPTIONS.map((opt: DshPermissionOption): MenuItemOptions => ({
+      content: opt.label,
+      labelInfo: opt.badge,
+      symbolStartIcon: menuIcon(opt.value === 'readonly' ? 'eye' : (opt.value === 'review' ? 'verify' : 'sparkles')),
+      symbolEndIcon: menuCheckIcon(this.permissionMode === opt.value)
+    }));
+  }
+
+  @Builder
+  PermissionNativeMenu() {
+    Menu() {
+      MenuItemGroup({ header: 'Agent 会话执行权限' }) {
+        ForEach(DSH_PERMISSION_OPTIONS, (opt: DshPermissionOption) => {
+          MenuItem({
+            content: opt.label,
+            labelInfo: opt.badge,
+            symbolStartIcon: menuIcon(opt.value === 'readonly' ? 'eye' : (opt.value === 'review' ? 'verify' : 'sparkles')),
+            symbolEndIcon: menuCheckIcon(this.permissionMode === opt.value)
+          })
+            .attributeModifier(MENU_ITEM_STYLE)
+            .selected(this.permissionMode === opt.value)
+            .onClick(() => {
+              this.changePermissionModeAction(opt.value);
+            })
+        }, (opt: DshPermissionOption): string => `perm_${opt.value}_${this.permissionMode}`)
+      }
     }
-    .viewPort({ x: '0px', y: '0px', width: '24px', height: '24px' })
-    .width(18)
-    .height(18)
-    .hitTestBehavior(HitTestMode.None)
-    .accessibilityLevel('no')
+    .attributeModifier(menuStyle(this.permissionMenuSizing(), this.getUIContext()))
+  }
+
+  private attachmentMenuSizing(): MenuItemOptions[] {
+    return [
+      { content: '从相册选择照片…', symbolStartIcon: menuIcon('eye') },
+      { content: '选择版图 / 脚本 / 文档文件…', symbolStartIcon: menuIcon('open') },
+      { content: '截取当前版图画布快照', symbolStartIcon: menuIcon('select') },
+      { content: '读取剪贴板图片或文件', labelInfo: 'Ctrl+V', symbolStartIcon: menuIcon('paste') }
+    ];
+  }
+
+  @Builder
+  AttachmentAddMenu() {
+    Menu() {
+      MenuItemGroup({ header: '添加多模态附件' }) {
+        MenuItem({ content: '从相册选择照片…', symbolStartIcon: menuIcon('eye') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => { this.pickPhotoAttachmentAction(); })
+        MenuItem({ content: '选择版图 / 脚本 / 文档文件…', symbolStartIcon: menuIcon('open') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => { this.pickFileAttachmentAction(); })
+        MenuItem({ content: '截取当前版图画布快照', symbolStartIcon: menuIcon('select') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => { this.captureCanvasAttachmentAction(); })
+        MenuItem({ content: '读取剪贴板图片或文件', labelInfo: 'Ctrl+V', symbolStartIcon: menuIcon('paste') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => { this.pasteClipboardAttachmentAction(); })
+      }
+    }
+    .attributeModifier(menuStyle(this.attachmentMenuSizing(), this.getUIContext()))
   }
 
   @Builder
@@ -4362,23 +4504,26 @@ export struct AiAssistantPanel {
 
   @Builder
   QuickPrompt(label: string, prompt: string) {
-    Button(label)
-      .type(ButtonType.Normal)
-      .height(28)
-      .fontSize(UI.fontCaption)
-      .fontColor(COLORS.ink)
-      .backgroundColor(COLORS.surfaceMuted)
-      .borderRadius(RADIUS.capsule)
-      .padding({ left: 11, right: 11 })
-      .enabled(!this.isLoading && !this.configBusy)
-      .onClick(() => {
+    Chip({
+      label: {
+        text: label,
+        fontSize: UI.fontCaption,
+        fontColor: COLORS.ink
+      },
+      size: ChipSize.SMALL,
+      allowClose: false,
+      enabled: !this.isLoading && !this.configBusy,
+      backgroundColor: COLORS.surfaceMuted,
+      borderRadius: RADIUS.capsule,
+      onClicked: () => {
         if (this.isLoading || this.configBusy) return;
         this.followsLatest = true;
         this.showConversations = false;
         this.showContext = false;
         this.showSettings = false;
         this.promptAction(prompt, false, this.sessionMode === 'readonly');
-      })
+      }
+    })
   }
 
   @Builder
@@ -4567,6 +4712,20 @@ export struct AiAssistantPanel {
             this.quickModelSearch = '';
             this.showQuickModelPicker = !this.showQuickModelPicker;
           })
+          .bindPopup(this.showQuickModelPicker, {
+            builder: this.QuickModelPickerPopover,
+            placement: Placement.Bottom,
+            enableArrow: true,
+            popupColor: Color.Transparent,
+            backgroundBlurStyle: BlurStyle.NONE,
+            autoCancel: true,
+            mask: false,
+            onStateChange: (e: PopupStateChangeParam) => {
+              if (!e.isVisible && this.showQuickModelPicker) {
+                this.showQuickModelPicker = false;
+              }
+            }
+          })
 
           Button({ type: ButtonType.Normal }) {
             WorkbenchIcon({ name: 'settings', iconSize: 15, color: COLORS.ink })
@@ -4644,13 +4803,23 @@ export struct AiAssistantPanel {
           })
         }.width('100%').padding({ left: 12, right: 12, bottom: 2 })
       }
+      if (!this.showConversations && !this.showContext && !this.showSettings && this.pendingAskUser !== null) {
+        Column() {
+          DshAskUserCard({
+            request: this.pendingAskUser!,
+            onSubmit: (exchange: AiAskUserExchange) => {
+              this.submitAskUserAction(exchange);
+            }
+          })
+        }.width('100%').padding({ left: 12, right: 12, bottom: 4 })
+      }
       if (!this.showConversations && !this.showContext && !this.showSettings && this.pendingSummary.length > 0) {
         Column() {
           this.PendingChangeCard()
         }.width('100%').padding({ left: 12, right: 12, bottom: 4 })
       }
 
-      // Unified Modern Agent Input Dock (Slash Commands + Array Template + Agent/ReadOnly Mode Pill + Enter-to-Send)
+      // Unified Native Multimodal Agent Input Dock (Attachments + PasteButton + WebSearch Chip + Native Menus)
       if (!this.showConversations && !this.showContext && !this.showSettings) {
         Column({ space: 6 }) {
           this.SlashCommandPalette()
@@ -4658,25 +4827,63 @@ export struct AiAssistantPanel {
             this.ArrayTaskTemplate()
           }
 
-          if (this.showQuickActions && !this.showTaskTemplate && this.pendingSummary.length === 0 && this.visibleSlashCommands().length === 0) {
+          if (this.showQuickActions && !this.showTaskTemplate && this.pendingSummary.length === 0 &&
+            this.pendingAskUser === null && this.visibleSlashCommands().length === 0) {
             Scroll() {
               Row({ space: 6 }) {
-                this.QuickPrompt('解释图形', '解释当前选中的图形及其用途')
+                this.QuickPrompt('截图自检', '请先对当前工作台截图并检查视图与图层情况，再给出优化建议')
                 this.QuickPrompt('检查版图', '检查当前版图并说明需要关注的问题')
-                this.QuickPrompt('定位问题', '根据当前 DRC 具体问题，选中并定位第一个问题涉及的图形，不修改几何。')
-                this.QuickPrompt('提出修复', '根据当前选区与 DRC 证据，提出最小修复方案供我预览确认，并在修改后复检；资料不足时先说明，不猜测工艺规则。')
-                this.QuickPrompt('画反相器', '画一个反相器')
-              }
+                this.QuickPrompt('清理空图层', '检查并清理当前版图中所有没有图元的空图层')
+                this.QuickPrompt('画5×5光子晶体阵列', '新建一个子 Cell 画半径 120nm 圆孔，再回到 TOP 排成 5×5 步进 400nm 的 AREF 阵列并截图验收')
+                this.QuickPrompt('画反相器', '使用内置 Python 生成一个标准 CMOS 反相器单元并适配全图')
+              }.alignItems(VerticalAlign.Center)
             }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
               .clip(true)
           }
 
           Column({ space: 4 }) {
+            // 待发送多模态附件预览条（原生 Chip 带关闭按钮）
+            if (this.pendingAttachments.length > 0) {
+              Scroll() {
+                Row({ space: 6 }) {
+                  ForEach(this.pendingAttachments, (att: AiChatAttachment) => {
+                    Chip({
+                      prefixSymbol: {
+                        normal: new SymbolGlyphModifier(
+                          att.kind === 'image'
+                            ? $r('sys.symbol.eye')
+                            : (att.kind === 'layout' ? $r('sys.symbol.square_grid_2x2') : $r('sys.symbol.doc_text'))
+                        ).fontSize(12).fontColor([COLORS.primary])
+                      },
+                      label: {
+                        text: att.name.length > 18 ? `${att.name.substring(0, 17)}…` : att.name,
+                        fontSize: 11,
+                        fontColor: COLORS.ink
+                      },
+                      size: ChipSize.SMALL,
+                      allowClose: true,
+                      backgroundColor: COLORS.primarySoft,
+                      borderRadius: UI.controlRadius,
+                      onClose: () => {
+                        this.removePendingAttachmentAction(att.id);
+                      }
+                    })
+                  }, (att: AiChatAttachment): string => `pend_${att.id}_${att.name}`)
+                }.alignItems(VerticalAlign.Center)
+              }
+              .width('100%')
+              .padding({ left: 10, right: 10, top: 8 })
+              .scrollable(ScrollDirection.Horizontal)
+              .scrollBar(BarState.Off)
+            }
+
             TextArea({
               text: this.inputText,
               placeholder: this.sessionMode === 'readonly'
-                ? '只读问答模式：提问或分析版图（不生成修改方案）…'
-                : (this.pendingSummary.length > 0 ? '继续补充修改要求，或输入 / 唤出快捷指令…' : '描述版图需求（Enter 发送，Shift+Enter 换行，/ 快捷指令）…')
+                ? '只读问答模式：提问、拖入图片/版图或 Ctrl+V 粘贴分析…'
+                : (this.pendingSummary.length > 0
+                  ? '继续补充修改要求，或输入 / 唤出快捷指令…'
+                  : '描述需求，支持粘贴照片/文件 (Ctrl+V)、拖入附件、联网检索与自动操作…')
             })
               .id('ai-composer-textarea')
               .enterKeyType(this.desktopMode ? EnterKeyType.Send : EnterKeyType.NEW_LINE)
@@ -4684,11 +4891,16 @@ export struct AiAssistantPanel {
                 event.stopPropagation();
                 const keyName: string = canvasKeyName(event.keyCode, event.keyText);
                 const modShift: boolean = event.getModifierKeyState?.(['Shift']) === true;
+                const modCtrl: boolean = event.getModifierKeyState?.(['Ctrl']) === true || event.getModifierKeyState?.(['Meta']) === true;
                 if (keyName === 'SHIFT' || event.keyCode === 2047 || event.keyCode === 2048) {
                   this.composerShiftHeld = event.type === KeyType.Down;
                   return;
                 }
                 this.composerShiftHeld = modShift;
+                if (event.type === KeyType.Down && modCtrl && keyName === 'V') {
+                  this.pasteClipboardAttachmentAction();
+                  return;
+                }
                 if (this.desktopMode && event.type === KeyType.Down && keyName === 'ENTER' && !modShift) {
                   this.sendInput();
                 }
@@ -4711,9 +4923,9 @@ export struct AiAssistantPanel {
                   this.sendInput();
                 }
               })
-              .width('100%').height(60)
+              .width('100%').height(58)
               .fontSize(UI.fontBody).fontColor(COLORS.ink).placeholderColor(COLORS.muted)
-              .backgroundColor(Color.Transparent).padding({ left: 12, right: 12, top: 9, bottom: 4 })
+              .backgroundColor(Color.Transparent).padding({ left: 12, right: 12, top: 8, bottom: 4 })
               .onChange((value: string) => {
                 this.inputText = value;
                 if (!value.trimStart().startsWith('/')) {
@@ -4722,8 +4934,64 @@ export struct AiAssistantPanel {
               })
 
             Row({ space: 4 }) {
+              // 1. + 添加多模态附件原生菜单按钮
+              Button({ type: ButtonType.Circle }) {
+                WorkbenchIcon({ name: 'plus', iconSize: 14, color: COLORS.primary })
+              }
+              .id('ai-add-attachment-btn')
+              .width(26).height(26).padding(0)
+              .backgroundColor(COLORS.primarySoft)
+              .enabled(!this.isLoading && !this.configBusy)
+              .accessibilityText('添加照片、文件或画布截图')
+              .bindTips('添加照片、版图/代码文件或截取当前画布')
+              .bindMenu(
+                this.AttachmentAddMenu,
+                buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius)
+              )
+
+              // 2. 鸿蒙官方合规安全控件 PasteButton（不挂载自定义 attributeModifier，实心高对比前景与背景）
+              PasteButton({ icon: PasteIconStyle.LINES })
+                .width(26)
+                .height(26)
+                .iconSize(13)
+                .iconColor('#FFFFFF')
+                .backgroundColor('#0A73F6')
+                .borderRadius(13)
+                .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
+                  if (result === PasteButtonOnClickResult.SUCCESS) {
+                    this.pasteClipboardAttachmentAction();
+                  }
+                })
+
+              // 3. 联网搜索原生 Chip 开关
+              Row() {
+                Chip({
+                  prefixSymbol: {
+                    normal: new SymbolGlyphModifier($r('sys.symbol.square_link_square')).fontSize(12).fontColor([COLORS.muted]),
+                    activated: new SymbolGlyphModifier($r('sys.symbol.square_link_square')).fontSize(12).fontColor([COLORS.primary])
+                  },
+                  label: {
+                    text: '联网',
+                    fontSize: 10.5,
+                    fontColor: COLORS.muted,
+                    activatedFontColor: COLORS.primary
+                  },
+                  size: ChipSize.SMALL,
+                  allowClose: false,
+                  activated: this.webSearchEnabled,
+                  backgroundColor: COLORS.surfaceMuted,
+                  activatedBackgroundColor: COLORS.primarySoft,
+                  borderRadius: RADIUS.capsule,
+                  accessibilitySelectedType: AccessibilitySelectedType.CHECKED,
+                  onClicked: () => {
+                    this.toggleWebSearchAction(!this.webSearchEnabled);
+                  }
+                })
+              }
+
+              // 4. 会话执行权限原生菜单胶囊（替代旧版手写全屏遮罩浮层）
               Button({ type: ButtonType.Normal }) {
-                Row({ space: 4 }) {
+                Row({ space: 3 }) {
                   DshIcon({
                     glyph: this.permissionMode === 'readonly'
                       ? 'permission-read-only'
@@ -4732,48 +5000,28 @@ export struct AiAssistantPanel {
                     color: this.permissionMode === 'readonly' ? COLORS.warning : COLORS.primary
                   })
                   Text(dshPermissionShortLabel(this.permissionMode))
-                    .fontSize(11)
+                    .fontSize(10.5)
                     .fontWeight(FontWeight.Medium)
                     .fontColor(this.permissionMode === 'readonly' ? COLORS.warning : COLORS.primary)
                 }.alignItems(VerticalAlign.Center)
               }
               .id('ai-mode-toggle-btn')
               .height(26)
-              .padding({ left: 8, right: 8 })
+              .padding({ left: 7, right: 7 })
               .backgroundColor(this.permissionMode === 'readonly' ? withAlpha(COLORS.warning, 0.14) : COLORS.primarySoft)
               .borderRadius(RADIUS.capsule)
               .enabled(!this.isLoading && !this.configBusy)
               .accessibilityText('选择 Agent 执行权限')
-              .onClick(() => {
-                this.showQuickModelPicker = false;
-                this.showPermissionPicker = !this.showPermissionPicker;
-              })
+              .bindMenu(
+                this.PermissionNativeMenu,
+                buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius)
+              )
 
               Button({ type: ButtonType.Normal }) {
-                Row({ space: 3 }) {
-                  WorkbenchIcon({ name: 'think', iconSize: 12, color: (aiService.getConfig().reasoningEffort ?? 'auto') === 'none' ? COLORS.muted : COLORS.primary })
-                  Text(this.isCompact ? reasoningEffortLabel(aiService.getConfig().reasoningEffort) : `思考·${reasoningEffortLabel(aiService.getConfig().reasoningEffort)}`)
-                    .fontSize(11)
-                    .fontColor((aiService.getConfig().reasoningEffort ?? 'auto') === 'none' ? COLORS.muted : COLORS.ink)
-                }.alignItems(VerticalAlign.Center)
-              }
-              .id('ai-thinking-effort-pill')
-              .height(26)
-              .padding({ left: 7, right: 7 })
-              .backgroundColor(COLORS.surfaceMuted)
-              .borderRadius(RADIUS.capsule)
-              .enabled(!this.isLoading && !this.configBusy)
-              .accessibilityText('切换模型与思考强度')
-              .onClick(() => {
-                this.quickModelSearch = '';
-                this.showQuickModelPicker = !this.showQuickModelPicker;
-              })
-
-              Button({ type: ButtonType.Normal }) {
-                WorkbenchIcon({ name: 'slash', iconSize: 13, color: this.visibleSlashCommands().length > 0 ? COLORS.primary : COLORS.muted })
+                WorkbenchIcon({ name: 'slash', iconSize: 12, color: this.visibleSlashCommands().length > 0 ? COLORS.primary : COLORS.muted })
               }
               .id('ai-slash-menu-btn')
-              .width(26).height(26).padding(0)
+              .width(24).height(26).padding(0)
               .backgroundColor(this.visibleSlashCommands().length > 0 ? COLORS.primarySoft : COLORS.surfaceMuted)
               .borderRadius(RADIUS.capsule)
               .enabled(!this.isLoading && !this.configBusy)
@@ -4781,19 +5029,8 @@ export struct AiAssistantPanel {
               .onClick(() => { this.slashMenuForced = !this.slashMenuForced; })
 
               if (!this.isCompact) {
-                Button('阵列', { type: ButtonType.Normal })
-                  .id('ai-array-toggle-btn')
-                  .height(26).padding({ left: 7, right: 7 }).fontSize(11)
-                  .fontColor(this.showTaskTemplate ? COLORS.primary : COLORS.muted)
-                  .backgroundColor(this.showTaskTemplate ? COLORS.primarySoft : COLORS.surfaceMuted)
-                  .borderRadius(RADIUS.capsule)
-                  .enabled(!this.isLoading && !this.configBusy)
-                  .onClick(() => { this.showTaskTemplate = !this.showTaskTemplate; })
-              }
-
-              if (!this.isCompact) {
                 Button('Python', { type: ButtonType.Normal })
-                  .height(26).padding({ left: 7, right: 7 }).fontSize(11)
+                  .height(26).padding({ left: 7, right: 7 }).fontSize(10.5)
                   .fontColor(COLORS.muted).backgroundColor(COLORS.surfaceMuted).borderRadius(RADIUS.capsule)
                   .enabled(!this.isLoading && !this.configBusy)
                   .onClick(this.openPythonAction)
@@ -4801,24 +5038,24 @@ export struct AiAssistantPanel {
 
               Blank()
 
-              // DSH Inline Context Usage Ring (live updates with draft text; click opens Context Workbench)
+              // DSH Inline Context Usage Ring
               Button({ type: ButtonType.Normal }) {
-                Row({ space: 4 }) {
+                Row({ space: 3 }) {
                   Progress({ value: this.tokenMeterState().percent, total: 100, type: ProgressType.Ring })
-                    .width(13)
-                    .height(13)
+                    .width(12)
+                    .height(12)
                     .color(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.primary)
                     .backgroundColor(COLORS.border)
                     .style({ strokeWidth: 2 })
                   Text(`${this.tokenMeterState().percent}%`)
-                    .fontSize(10)
+                    .fontSize(9.5)
                     .fontFamily('monospace')
                     .fontColor(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.muted)
                 }.alignItems(VerticalAlign.Center)
               }
               .id('ai-composer-context-ring')
               .height(26)
-              .padding({ left: 6, right: 6 })
+              .padding({ left: 4, right: 4 })
               .backgroundColor(Color.Transparent)
               .borderRadius(RADIUS.capsule)
               .enabled(!this.isLoading && !this.configBusy)
@@ -4827,7 +5064,7 @@ export struct AiAssistantPanel {
 
               if (this.isLoading && this.canCancel) {
                 Button('停止', { type: ButtonType.Normal })
-                  .height(36).padding({ left: 12, right: 12 }).fontSize(12)
+                  .height(34).padding({ left: 11, right: 11 }).fontSize(12)
                   .fontColor(Color.White).backgroundColor(COLORS.danger).borderRadius(RADIUS.capsule)
                   .accessibilityText('取消生成')
                   .onClick(this.cancelGenerationAction)
@@ -4836,13 +5073,13 @@ export struct AiAssistantPanel {
                   this.SendArrowGlyph()
                 }
                   .id('ai-send-btn')
-                  .width(36).height(36).padding(0)
+                  .width(34).height(34).padding(0)
                   .focusable(false)
                   .focusOnTouch(false)
-                  .responseRegion({ x: -6, y: -6, width: 48, height: 48 })
-                  .backgroundColor(this.inputText.trim().length > 0 ? COLORS.primary : COLORS.surfaceMuted)
+                  .responseRegion({ x: -6, y: -6, width: 46, height: 46 })
+                  .backgroundColor(this.canSendComposer() ? COLORS.primary : COLORS.surfaceMuted)
                   .borderRadius(RADIUS.capsule)
-                  .enabled(this.inputText.trim().length > 0 && !this.isLoading && !this.configBusy)
+                  .enabled(this.canSendComposer())
                   .accessibilityText('发送消息')
                   .onClick(() => this.sendInput())
               }
@@ -4864,53 +5101,16 @@ export struct AiAssistantPanel {
     }
     .width('100%')
     .height('100%')
-
-    if (this.showPermissionPicker && !this.showConversations && !this.showContext && !this.showSettings) {
-      Stack({ alignContent: Alignment.BottomStart }) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('#00000000')
-          .onClick(() => { this.showPermissionPicker = false; })
-        Column() {
-          DshPermissionPicker({
-            currentMode: this.permissionMode,
-            pickerWidth: Math.min(316, Math.max(256, (this.desktopMode ? this.panelWidth : Math.min(this.panelWidth, 440)) - 24)),
-            onSelect: (mode: DshPermissionMode) => {
-              this.changePermissionModeAction(mode);
-              this.showPermissionPicker = false;
-            },
-            onClose: () => { this.showPermissionPicker = false; }
-          })
-            .shadow(hongTuThemeState.elevation('overlay'))
-        }
-        .margin({ left: 12, bottom: 54 })
-      }
-      .width('100%')
-      .height('100%')
-      .zIndex(32)
-    }
-
-    if (this.showQuickModelPicker && !this.showConversations && !this.showContext && !this.showSettings) {
-      Stack({ alignContent: Alignment.Top }) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('#00000000')
-          .onClick(() => { this.showQuickModelPicker = false; })
-        Column() {
-          this.QuickModelPickerPopover()
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Center)
-        .margin({ top: 48 })
-      }
-      .width('100%')
-      .height('100%')
-      .zIndex(30)
-    }
     }.width(this.panelWidth)
       .height(this.desktopMode ? this.panelHeight : Math.min(this.panelHeight, 680))
+      .allowDrop(HONGTU_AI_CHAT_DROP_TYPES)
+      .onDrop((event: DragEvent) => {
+        event.useCustomDropAnimation = false;
+        const uris: string[] = extractDroppedRawUris(event);
+        if (uris.length > 0) {
+          this.dropAttachmentUrisAction(uris);
+        }
+      })
       .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay'))).clip(true)
   }
 
@@ -4965,8 +5165,7 @@ export struct MacroPanel {
 
   build() {
     Column() {
-      PanelHeading({ title: '宏 / 批处理', closeAction: this.closeAction }).padding({ top: 16, bottom: 12 })
-        .border({ width: { bottom: 1 }, color: COLORS.border })
+      SheetGlassHeader({ title: '宏录制与批处理', showClose: true, onClose: () => this.closeAction() })
       Column({ space: 8 }) {
         Text('录制自定义宏').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).width('100%')
         if (!this.isRecording) {
@@ -5067,9 +5266,13 @@ export struct MacroPanel {
           Text(this.lastStatus).fontSize(UI.fontCaption).fontColor(COLORS.ink).lineHeight(18).maxLines(3).layoutWeight(1)
         }.width('100%').padding(12).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius).margin({ top: 8 })
       }
-    }.width(this.panelWidth()).height(this.panelHeight()).padding({ left: 16, right: 16, bottom: 16 })
-      .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay'))).clip(true)
-      .position({ x: this.panelOffsetX(), y: this.panelOffsetY() })
+    }
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .padding({ left: 16, right: 16, bottom: 20 })
+    .backgroundColor(Color.Transparent)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
 
@@ -5144,23 +5347,24 @@ export struct FileOpenPanel {
 
   build() {
     Column() {
-      OverlayHeader({ title: '打开版图文件', closeAction: this.closeAction })
-      Text('最近打开').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.muted).width('100%')
-        .padding({ left: 16, right: 16, top: 16, bottom: 8 })
+      SheetGlassHeader({ title: '最近打开的版图', showClose: true, onClose: () => this.closeAction() })
       Scroll() {
-        Column() {
+        Column({ space: 8 }) {
           if (this.files.length === 0) {
-            Text('暂无最近文件').fontSize(UI.fontBody).fontColor(COLORS.muted).width('100%').height(120).textAlign(TextAlign.Center)
+            Text('暂无最近打开记录').fontSize(UI.fontBody).fontColor(COLORS.muted).width('100%').height(140).textAlign(TextAlign.Center)
           } else {
             ForEach(this.files, (file: RecentFile) => {
               FileChoiceRow({ file: file, chooseFileAction: this.chooseFileAction })
             }, (file: RecentFile) => file.key())
           }
-        }.width('100%').padding({ left: 16, right: 16, bottom: 16 })
-      }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Auto).clip(true)
-    }.width(this.isCompact ? 296 : 420).height(320)
-      .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay'))).clip(true)
-      .position({ x: this.isCompact ? 12 : 260, y: this.isCompact ? 60 : 92 })
+        }.width('100%').padding({ left: 20, right: 20, top: 8, bottom: 28 })
+      }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Auto).edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true }).clip(true)
+    }
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .backgroundColor(Color.Transparent)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
 
@@ -5287,7 +5491,7 @@ export struct ShortcutPanel {
 
   build() {
     Column() {
-      OverlayHeader({ title: '快捷键', closeAction: this.closeAction })
+      SheetGlassHeader({ title: '键盘快捷键与助记码', showClose: true, onClose: () => this.closeAction() })
 
       Text('Space + 助记码执行命令 · 单键 B / P / L / S / M / F 切换工具')
         .fontSize(UI.fontCaption).fontColor(COLORS.muted).lineHeight(16)
@@ -5375,11 +5579,11 @@ export struct ShortcutPanel {
       .align(Alignment.Top)
       .clip(true)
     }
-    .width(this.isCompact ? 296 : 420)
-    .height(560)
-    .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay')))
-    .clip(true)
-    .position({ x: this.isCompact ? 12 : 208, y: this.isCompact ? 60 : 92 })
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .backgroundColor(Color.Transparent)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
 
@@ -5544,7 +5748,7 @@ export struct LayerStylePanel {
 
   build() {
     Column() {
-      OverlayHeader({ title: '图层样式', closeAction: this.closeAction })
+      SheetGlassHeader({ title: '图层颜色与填充样式', showClose: true, onClose: () => this.closeAction() })
       Scroll() {
         Column({ space: 16 }) {
           Row({ space: 12 }) {
@@ -5716,9 +5920,12 @@ export struct LayerStylePanel {
           .attributeModifier(hongTuThemeState.luminousPointLightModifier())
           .onClick(() => this.setCurrentLayerAction(this.selectedLayerNumber, this.selectedDatatype))
       }.width('100%').padding(UI.panelPadding).border({ width: { top: 1 }, color: COLORS.border })
-    }.width(this.isCompact ? 296 : 420).height(this.panelHeight())
-      .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay'))).clip(true)
-      .position({ x: this.panelOffsetX(), y: this.panelOffsetY() })
+    }
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .backgroundColor(Color.Transparent)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
 

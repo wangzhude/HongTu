@@ -124,9 +124,23 @@ export const AI_SLASH_COMMANDS: AiSlashCommandSpec[] = [
     prompt: ''
   },
   {
+    command: '/screenshot',
+    title: '自主截图视觉自检',
+    subtitle: '让 Agent 截取当前画布或软件窗口并汇报视觉巡检结论',
+    kind: 'prompt',
+    prompt: '请调用 capture_screenshot 截取当前画布视口，查看当前版图绘制情况、图层可见性与布局结构并向我汇报。'
+  },
+  {
+    command: '/search',
+    title: '联网检索技术资料',
+    subtitle: '实时调用 web_search 查询工艺设计规则、论文或开发文档',
+    kind: 'prompt',
+    prompt: '请使用 web_search 联网检索：'
+  },
+  {
     command: '/python',
-    title: '打开 Python 版图工作台',
-    subtitle: '进入参数化脚本生成、扫参与隔离预览面板',
+    title: '打开端侧 Python 3 工作台',
+    subtitle: '免伴随服务离线运行 KLayout / HongTu 参数化脚本与扫参',
     kind: 'python',
     prompt: ''
   },
@@ -523,6 +537,9 @@ function recordBool(rec: Record<string, Object> | null, raw: string, key: string
 export function mapAiToolDisplayTitle(name: string): string {
   switch (name) {
     case 'inspect_layout': return '读取当前版图';
+    case 'inspect_workbench_ui': return '读取工作台界面状态';
+    case 'capture_screenshot': return '自主截图视觉巡检';
+    case 'automate_workbench_ui': return '自动化操控软件界面';
     case 'query_layout':
     case 'query_editor': return '查询版图明细';
     case 'list_native_tools': return '查询软件工具目录';
@@ -543,6 +560,15 @@ export function mapAiToolDisplayTitle(name: string): string {
     case 'update_plan': return '更新执行计划';
     case 'update_task_status':
     case 'update_task_statuses': return '更新计划步骤';
+    case 'ask_user': return '向您确认细节';
+    case 'web_search': return '联网搜索资料';
+    case 'web_fetch': return '读取网页正文';
+    case 'manage_layers': return '管理版图图层';
+    case 'manage_cells': return '管理单元与层级';
+    case 'manage_ports_and_routing': return '端口与自动布线';
+    case 'manage_verification': return '物理验证与网表';
+    case 'manage_workbench': return '工作台与视图控制';
+    case 'manage_attachments_and_files': return '附件与文件导出';
     default: return name;
   }
 }
@@ -622,6 +648,39 @@ export function describeAiToolCall(tool: AiChatToolState, isLiveRunning: boolean
         value: `${total} 项${truncated === true ? '（已分页截断）' : ''}`,
         accent: total > 0
       });
+    }
+  } else if (tool.name === 'inspect_workbench_ui') {
+    const mod: string = recordStr(resRec, tool.result, 'currentModule');
+    const modeStr: string = recordStr(resRec, tool.result, 'viewMode');
+    const zoomNum: number | undefined = recordNum(resRec, tool.result, 'zoomPercent');
+    if (mod.length > 0) {
+      summaryParts.push(mod);
+      fields.push({ label: '当前模块', value: `${mod} (${modeStr || 'edit'})`, accent: false });
+    }
+    if (zoomNum !== undefined) {
+      summaryParts.push(`${Math.round(zoomNum)}%`);
+      fields.push({ label: '视口缩放', value: `${zoomNum}%`, accent: true });
+    }
+  } else if (tool.name === 'capture_screenshot') {
+    const target: string = recordStr(argsRec, tool.arguments, 'target') || recordStr(resRec, tool.result, 'target') || 'canvas_viewport';
+    const wPx: number | undefined = recordNum(resRec, tool.result, 'width');
+    const hPx: number | undefined = recordNum(resRec, tool.result, 'height');
+    const targetLabel: string = target === 'workbench_window' ? '软件整窗' : (target === 'layout_render' ? '版图光栅化' : '画布视口');
+    summaryParts.push(targetLabel);
+    fields.push({ label: '截图范围', value: targetLabel, accent: true });
+    if (wPx !== undefined && hPx !== undefined && wPx > 0 && hPx > 0) {
+      summaryParts.push(`${wPx}×${hPx}`);
+      fields.push({ label: '图像尺寸', value: `${wPx} × ${hPx} px (已注入视觉上下文)`, accent: true });
+    }
+  } else if (tool.name === 'automate_workbench_ui') {
+    const stepArrCount: number = argsRec !== null && Array.isArray(argsRec['steps']) ? (argsRec['steps'] as Object[]).length : 0;
+    const summaryStr: string = recordStr(resRec, tool.result, 'summary');
+    if (stepArrCount > 0) {
+      summaryParts.push(`${stepArrCount} 步界面动作`);
+      fields.push({ label: '自动化步骤', value: `${stepArrCount} 项 UI 操作`, accent: true });
+    }
+    if (summaryStr.length > 0) {
+      fields.push({ label: '执行回执', value: summaryStr, accent: false });
     }
   } else if (tool.name === 'inspect_layout') {
     const cellObj: Object | undefined = resRec !== null ? resRec['currentCell'] : undefined;
@@ -707,7 +766,62 @@ export function describeAiToolCall(tool: AiChatToolState, isLiveRunning: boolean
       summaryParts.push(drcSummary.length > 28 ? `${drcSummary.substring(0, 27)}…` : drcSummary);
       fields.push({ label: '检查结论', value: drcSummary, accent: true });
     }
-  } else if (tool.name === 'call_native_tool') {
+  } else if (tool.name === 'ask_user') {
+    const q: string = recordStr(argsRec, tool.arguments, 'question');
+    const ans: string = recordStr(resRec, tool.result, 'answerSummary');
+    if (q.length > 0) {
+      summaryParts.push(q.length > 24 ? `${q.substring(0, 23)}…` : q);
+      fields.push({ label: '提问内容', value: q, accent: true });
+    }
+    if (ans.length > 0) {
+      fields.push({ label: '用户答复', value: ans, accent: true });
+    }
+  } else if (tool.name === 'web_search') {
+    const q: string = recordStr(argsRec, tool.arguments, 'query');
+    const count: number | undefined = recordNum(resRec, tool.result, 'count');
+    if (q.length > 0) {
+      summaryParts.push(q.length > 24 ? `${q.substring(0, 23)}…` : q);
+      fields.push({ label: '检索关键词', value: q, accent: true });
+    }
+    if (count !== undefined) {
+      summaryParts.push(`${count} 条结果`);
+      fields.push({ label: '命中来源', value: `${count} 条网页摘要`, accent: count > 0 });
+    }
+  } else if (tool.name === 'web_fetch') {
+    const targetUrl: string = recordStr(argsRec, tool.arguments, 'url');
+    const pageTitle: string = recordStr(resRec, tool.result, 'title');
+    if (pageTitle.length > 0) {
+      summaryParts.push(pageTitle.length > 24 ? `${pageTitle.substring(0, 23)}…` : pageTitle);
+      fields.push({ label: '网页标题', value: pageTitle, accent: true });
+    } else if (targetUrl.length > 0) {
+      summaryParts.push(targetUrl.length > 28 ? `${targetUrl.substring(0, 27)}…` : targetUrl);
+    }
+    if (targetUrl.length > 0) {
+      fields.push({ label: '网页地址', value: targetUrl, accent: false });
+    }
+  } else if (tool.name === 'manage_layers' || tool.name === 'manage_cells' || tool.name === 'manage_ports_and_routing' ||
+    tool.name === 'manage_verification' || tool.name === 'manage_workbench' || tool.name === 'manage_attachments_and_files') {
+    const action: string = recordStr(argsRec, tool.arguments, 'action');
+    const layerNum: number | undefined = recordNum(argsRec, tool.arguments, 'layer');
+    const dtNum: number | undefined = recordNum(argsRec, tool.arguments, 'datatype');
+    const cName: string = recordStr(argsRec, tool.arguments, 'name') || recordStr(argsRec, tool.arguments, 'cellName') || recordStr(argsRec, tool.arguments, 'fileName');
+    const summaryStr: string = recordStr(resRec, tool.result, 'summary') || recordStr(resRec, tool.result, 'message');
+    if (action.length > 0) {
+      summaryParts.push(action);
+      fields.push({ label: '执行动作', value: action, accent: true });
+    }
+    if (layerNum !== undefined) {
+      const lStr: string = `L${layerNum}/${dtNum ?? 0}`;
+      summaryParts.push(lStr);
+      fields.push({ label: '目标图层', value: lStr, accent: true });
+    }
+    if (cName.length > 0) {
+      summaryParts.push(cName);
+      fields.push({ label: '目标对象', value: cName, accent: false });
+    }
+    if (summaryStr.length > 0) {
+      fields.push({ label: '执行结果', value: summaryStr, accent: false });
+    }  } else if (tool.name === 'call_native_tool') {
     const subName: string = recordStr(argsRec, tool.arguments, 'name');
     const resMsg: string = recordStr(resRec, tool.result, 'message') || recordStr(resRec, tool.result, 'summary');
     if (subName.length > 0) {

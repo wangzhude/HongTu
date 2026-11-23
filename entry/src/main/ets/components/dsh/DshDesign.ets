@@ -1,6 +1,6 @@
 /**
- * DSH-Harmony 原生视觉规范、矢量图标与会话权限选择器移植模块
- * 源自 DSH-Harmony (NativeDesign.ets / DSHIcon.ets / NativePermissionPicker.ets)
+ * DSH-Harmony 原生视觉规范、鸿蒙官方 SymbolGlyph 图标与会话权限选择器模块
+ * 全面采用 HarmonyOS 官方 SymbolGlyph 系统符号与 Radio 原生单选控件，零自绘 Path、零 Emoji。
  */
 import { hongTuThemeState } from '../../store/ThemeStore';
 
@@ -48,6 +48,54 @@ export function dshPermissionShortLabel(mode: DshPermissionMode): string {
   if (mode === 'auto') return '自动执行';
   if (mode === 'review') return '审阅确认';
   return '只读';
+}
+
+export function resolveDshSymbolResource(glyph: string): Resource {
+  switch (glyph) {
+    case 'chevron-down':
+      return $r('sys.symbol.chevron_down');
+    case 'chevron-up':
+      return $r('sys.symbol.chevron_up');
+    case 'chevron-right':
+      return $r('sys.symbol.chevron_right');
+    case 'check-outline':
+      return $r('sys.symbol.checkmark');
+    case 'close-outline':
+      return $r('sys.symbol.xmark');
+    case 'warning-outline':
+      return $r('sys.symbol.exclamationmark_triangle');
+    case 'code-outline':
+      return $r('sys.symbol.code_square');
+    case 'edit-outline':
+      return $r('sys.symbol.pencil_line');
+    case 'search-outline':
+      return $r('sys.symbol.magnifyingglass');
+    case 'plan-outline':
+      return $r('sys.symbol.doc_text_badge_checkmark');
+    case 'permission-full-access':
+      return $r('sys.symbol.wand_and_stars');
+    case 'permission-workspace-write':
+      return $r('sys.symbol.checkmark_circle');
+    case 'permission-read-only':
+      return $r('sys.symbol.eye');
+    case 'undo-outline':
+      return $r('sys.symbol.undo');
+    case 'focus-outline':
+      return $r('sys.symbol.arrow_up_left_and_arrow_down_right');
+    case 'camera-outline':
+      return $r('sys.symbol.scope');
+    case 'ui-outline':
+      return $r('sys.symbol.slider_horizontal_2_square');
+    case 'web-outline':
+      return $r('sys.symbol.square_link_square');
+    case 'ask-outline':
+      return $r('sys.symbol.info_circle');
+    case 'sparkle':
+      return $r('sys.symbol.wand_and_stars');
+    case 'think-outline':
+    default:
+      return $r('sys.symbol.ai_edit');
+  }
 }
 
 export class DshDesign {
@@ -152,7 +200,7 @@ export class DshDesign {
 }
 
 /**
- * 纯矢量 DSH 图标（24x24 坐标系按 glyphSize 缩放，零 Emoji、零外部位图依赖）
+ * 鸿蒙官方原生 SymbolGlyph 图标封装（替代旧版手写 Path 线条，支持系统级多倍率矢量抗锯齿渲染）
  */
 @Component
 export struct DshIcon {
@@ -160,70 +208,20 @@ export struct DshIcon {
   @Prop glyphSize: number = 14;
   @Prop color: string = '#61666B';
 
-  private scaledCommands(): string {
-    // 使用 HarmonyOS Path 标准 vp2px 换算绘制精锐矢量线条
-    const s: number = vp2px(this.glyphSize) / 24.0;
-    const p = (x: number, y: number): string => `${(x * s).toFixed(2)} ${(y * s).toFixed(2)}`;
-    switch (this.glyph) {
-      case 'chevron-down':
-        return `M ${p(6, 9)} L ${p(12, 15)} L ${p(18, 9)}`;
-      case 'chevron-up':
-        return `M ${p(6, 15)} L ${p(12, 9)} L ${p(18, 15)}`;
-      case 'chevron-right':
-        return `M ${p(9, 6)} L ${p(15, 12)} L ${p(9, 18)}`;
-      case 'check-outline':
-        return `M ${p(5, 12.5)} L ${p(9.8, 17.2)} L ${p(19.2, 7.2)}`;
-      case 'close-outline':
-        return `M ${p(6.5, 6.5)} L ${p(17.5, 17.5)} M ${p(17.5, 6.5)} L ${p(6.5, 17.5)}`;
-      case 'warning-outline':
-        return `M ${p(12, 3.5)} L ${p(21, 19.5)} L ${p(3, 19.5)} Z M ${p(12, 9.5)} L ${p(12, 14)} M ${p(12, 16.8)} L ${p(12, 17.3)}`;
-      case 'code-outline':
-        return `M ${p(8.5, 7)} L ${p(3.5, 12)} L ${p(8.5, 17)} M ${p(15.5, 7)} L ${p(20.5, 12)} L ${p(15.5, 17)} M ${p(13.5, 5)} L ${p(10.5, 19)}`;
-      case 'edit-outline':
-        return `M ${p(4, 20)} L ${p(8.5, 19)} L ${p(19, 8.5)} L ${p(15.5, 5)} L ${p(5, 15.5)} Z M ${p(13.5, 7)} L ${p(17, 10.5)}`;
-      case 'search-outline':
-        return `M ${p(10.5, 4.5)} L ${p(15.5, 6.5)} L ${p(16.5, 11.5)} L ${p(13.5, 15.5)} L ${p(8.5, 16.5)} L ${p(4.5, 13.5)} L ${p(5.5, 7.5)} Z M ${p(15, 15)} L ${p(20, 20)}`;
-      case 'plan-outline':
-        return `M ${p(4, 6.5)} L ${p(7, 9.5)} L ${p(11, 5.5)} M ${p(13, 7.5)} L ${p(20, 7.5)} M ${p(4, 15.5)} L ${p(7, 18.5)} L ${p(11, 14.5)} M ${p(13, 16.5)} L ${p(20, 16.5)}`;
-      case 'permission-full-access':
-        return `M ${p(13, 2.5)} L ${p(5, 13.5)} L ${p(11.5, 13.5)} L ${p(10.5, 21.5)} L ${p(19, 10.5)} L ${p(12.5, 10.5)} Z`;
-      case 'permission-workspace-write':
-        return `M ${p(12, 3)} L ${p(19.5, 6.5)} L ${p(19.5, 12.5)} L ${p(12, 20.5)} L ${p(4.5, 12.5)} L ${p(4.5, 6.5)} Z M ${p(8.8, 12.2)} L ${p(11.2, 14.6)} L ${p(15.6, 9.8)}`;
-      case 'permission-read-only':
-        return `M ${p(2.5, 12)} L ${p(7, 6.5)} L ${p(12, 5.5)} L ${p(17, 6.5)} L ${p(21.5, 12)} L ${p(17, 17.5)} L ${p(12, 18.5)} L ${p(7, 17.5)} Z M ${p(12, 9.5)} L ${p(14.5, 12)} L ${p(12, 14.5)} L ${p(9.5, 12)} Z`;
-      case 'undo-outline':
-        return `M ${p(8.5, 7)} L ${p(4, 11.5)} L ${p(8.5, 16)} M ${p(4.5, 11.5)} L ${p(15.5, 11.5)} L ${p(19.5, 14.5)} L ${p(18.5, 18.5)} L ${p(14, 19.5)}`;
-      case 'focus-outline':
-        return `M ${p(4, 9)} L ${p(4, 4)} L ${p(9, 4)} M ${p(15, 4)} L ${p(20, 4)} L ${p(20, 9)} M ${p(20, 15)} L ${p(20, 20)} L ${p(15, 20)} M ${p(9, 20)} L ${p(4, 20)} L ${p(4, 15)}`;
-      case 'sparkle':
-        return `M ${p(12, 3)} L ${p(14.3, 9.7)} L ${p(21, 12)} L ${p(14.3, 14.3)} L ${p(12, 21)} L ${p(9.7, 14.3)} L ${p(3, 12)} L ${p(9.7, 9.7)} Z`;
-      case 'think-outline':
-      default:
-        return `M ${p(12, 3.5)} L ${p(16.8, 5.5)} L ${p(18.5, 10)} L ${p(15.2, 14.8)} L ${p(14.8, 17.5)} L ${p(9.2, 17.5)} L ${p(8.8, 14.8)} L ${p(5.5, 10)} L ${p(7.2, 5.5)} Z M ${p(9.5, 20.5)} L ${p(14.5, 20.5)}`;
-    }
-  }
-
   build() {
-    Stack({ alignContent: Alignment.Center }) {
-      Path()
-        .width(this.glyphSize)
-        .height(this.glyphSize)
-        .commands(this.scaledCommands())
-        .fill(Color.Transparent)
-        .stroke(this.color)
-        .strokeWidth(1.65)
-        .strokeLineCap(LineCapStyle.Round)
-        .strokeLineJoin(LineJoinStyle.Round)
-    }
-    .width(this.glyphSize)
-    .height(this.glyphSize)
-    .hitTestBehavior(HitTestMode.None)
+    SymbolGlyph(resolveDshSymbolResource(this.glyph))
+      .fontSize(this.glyphSize)
+      .fontColor([this.color])
+      .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      .width(this.glyphSize)
+      .height(this.glyphSize)
+      .hitTestBehavior(HitTestMode.None)
+      .accessibilityLevel('no')
   }
 }
 
 /**
- * 移植自 DSH-Harmony NativePermissionPicker.ets：
- * 会话级 3 档执行权限浮层（自动执行 / 审阅确认 / 只读问答）
+ * 原生会话级 3 档执行权限选择器（采用官方 SymbolGlyph + Radio 原生单选器）
  */
 @Component
 export struct DshPermissionPicker {
@@ -289,13 +287,11 @@ export struct DshPermissionPicker {
             .width('100%')
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
 
-        if (opt.value === this.currentMode) {
-          DshIcon({
-            glyph: 'check-outline',
-            glyphSize: DshDesign.glyphCompact,
-            color: DshDesign.accent(this.dark())
-          })
-        }
+        Radio({ value: opt.value, group: 'dshPermissionRadioGroup' })
+          .checked(opt.value === this.currentMode)
+          .width(18)
+          .height(18)
+          .hitTestBehavior(HitTestMode.None)
       }.width('100%').alignItems(VerticalAlign.Center)
     }
     .width('100%')
@@ -322,31 +318,28 @@ export struct DshPermissionPicker {
             .fontColor(DshDesign.textTertiary(this.dark()))
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
 
-        Button({ type: ButtonType.Normal }) {
-          DshIcon({
-            glyph: 'close-outline',
-            glyphSize: DshDesign.glyphCompact,
-            color: DshDesign.textSecondary(this.dark())
-          })
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.xmark'))
+            .fontSize(13)
+            .fontColor([DshDesign.textSecondary(this.dark())])
         }
         .width(28)
         .height(28)
         .padding(0)
-        .backgroundColor(Color.Transparent)
-        .borderRadius(DshDesign.radiusCompact)
+        .backgroundColor(DshDesign.field(this.dark()))
         .onClick((): void => { this.onClose(); })
       }.width('100%').padding({ left: 4, right: 2 })
 
       Column({ space: 2 }) {
         ForEach(DSH_PERMISSION_OPTIONS, (opt: DshPermissionOption) => {
           this.optionRow(opt)
-        }, (opt: DshPermissionOption): string => `${opt.value}-${this.currentMode}`)
+        }, (opt: DshPermissionOption): string => `${opt.value}:${this.currentMode}`)
       }.width('100%')
     }
     .width(this.pickerWidth)
     .padding(10)
-    .borderRadius(DshDesign.radiusGroup)
     .backgroundColor(DshDesign.overlay(this.dark()))
     .border({ width: 0.8, color: DshDesign.border(this.dark()) })
+    .borderRadius(DshDesign.radiusGroup)
   }
 }

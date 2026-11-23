@@ -7,8 +7,11 @@ import type { LayoutPort, LayoutCrossSection, LayoutSemanticState } from '../mod
 import { validateLayoutSemantics, layoutUtf8Bytes } from '../models/LayoutPort';
 import type { LayoutContextRecord } from '../../cpp/types/libhongtu/Index';
 import { cloneStructured } from '../common/CloneUtils';
+import { nativeHongTuService } from './NativeHongTuService';
+import type { NativeEmbeddedPythonInfo, NativeEmbeddedPythonResult } from '../../cpp/types/libhongtu/Index';
 
-export interface PythonBridgeConfig { endpoint: string; token: string; caPath?: string; }
+export type PythonExecutionMode = 'embedded' | 'remote';
+export interface PythonBridgeConfig { endpoint: string; token: string; caPath?: string; executionMode?: PythonExecutionMode; }
 export const PYTHON_BRIDGE_DEFAULT_ENDPOINT: string = 'http://127.0.0.1:7865';
 export const PYTHON_VERIFY_MAX_RESPONSE_BYTES: number = 16 * 1024 * 1024;
 export const PYTHON_ARTIFACT_ID_REGEX: RegExp =
@@ -22,6 +25,7 @@ export const PYTHON_CACHE_INPUT_MAX_TOTAL_BYTES: number = 64 * 1024 * 1024;
 
 const PYTHON_ENDPOINT_STORAGE_KEY: string = 'hongtu_python_endpoint';
 const PYTHON_CA_PATH_STORAGE_KEY: string = 'hongtu_python_ca_path';
+const PYTHON_EXEC_MODE_STORAGE_KEY: string = 'hongtu_python_execution_mode';
 const PYTHON_TOKEN_ALIAS: string = 'hongtu-python-bridge-token';
 
 /**
@@ -628,12 +632,36 @@ export class PythonBridgeService {
     return this.readStoredConfig();
   }
 
+  getEmbeddedRuntimeInfo(): NativeEmbeddedPythonInfo {
+    return nativeHongTuService.getEmbeddedPythonInfo();
+  }
+
+  getExecutionMode(): PythonExecutionMode {
+    try {
+      PersistentStorage.persistProp(PYTHON_EXEC_MODE_STORAGE_KEY, 'embedded');
+      const raw: string = AppStorage.get<string>(PYTHON_EXEC_MODE_STORAGE_KEY) ?? 'embedded';
+      return raw === 'remote' ? 'remote' : 'embedded';
+    } catch (_) {
+      return 'embedded';
+    }
+  }
+
+  setExecutionMode(mode: PythonExecutionMode): void {
+    PersistentStorage.persistProp(PYTHON_EXEC_MODE_STORAGE_KEY, 'embedded');
+    AppStorage.setOrCreate<string>(PYTHON_EXEC_MODE_STORAGE_KEY, mode === 'remote' ? 'remote' : 'embedded');
+  }
+
+  isEmbeddedActive(): boolean {
+    return this.getExecutionMode() === 'embedded' && this.getEmbeddedRuntimeInfo().available;
+  }
+
   private async readStoredConfig(): Promise<PythonBridgeConfig> {
     PersistentStorage.persistProp(PYTHON_ENDPOINT_STORAGE_KEY, PYTHON_BRIDGE_DEFAULT_ENDPOINT);
     PersistentStorage.persistProp(PYTHON_CA_PATH_STORAGE_KEY, '');
     const config: PythonBridgeConfig = {
       endpoint: AppStorage.get<string>(PYTHON_ENDPOINT_STORAGE_KEY) ?? PYTHON_BRIDGE_DEFAULT_ENDPOINT,
-      token: await credentialStore.get(PYTHON_TOKEN_ALIAS)
+      token: await credentialStore.get(PYTHON_TOKEN_ALIAS),
+      executionMode: this.getExecutionMode()
     };
     const storedCaPath: string = (AppStorage.get<string>(PYTHON_CA_PATH_STORAGE_KEY) ?? '').trim();
     if (storedCaPath.length > 0) {
@@ -706,6 +734,9 @@ export class PythonBridgeService {
   }
 
   async checkConnection(requireAssistant: boolean = false): Promise<void> {
+    if (!requireAssistant && this.isEmbeddedActive()) {
+      return;
+    }
     this.beginConnectionUse();
     let request: http.HttpRequest | null = null;
     try {
@@ -1013,11 +1044,135 @@ export class PythonBridgeService {
     return cloneStructured(value) as PythonPortMetadata;
   }
 
+  private async generateEmbeddedArtifact(script: string, context: common.UIAbilityContext, ticket: number,
+    options: PythonRunOptions, owned?: PythonOwnedOperation): Promise<PythonLayoutArtifact> {
+    this.assertCurrent(ticket);
+    const parameters: Record<string, number | string | boolean> = {};
+    for (const item of options.parameters ?? []) {
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(item.name)) throw new Error('参数名称须为字母开头的标识符');
+      if (typeof item.value === 'number' && (!Number.isFinite(item.value) || Math.abs(item.value) > 1e12)) {
+        throw new Error('参数数值超出范围');
+      }
+      parameters[item.name] = item.value;
+    }
+    let sourceGdsPath: string = '';
+    let selectionGdsPath: string = '';
+    let currentCellName: string = '';
+    if (options.inputMode !== 'new') {
+      if (options.document === undefined) throw new Error('当前版图快照不可用');
+      if (options.inputMode === 'document') {
+        sourceGdsPath = options.document.path;
+      } else {
+        if (!options.document.selectionPath) throw new Error('请先选中图形，或改为当前文档范围');
+        selectionGdsPath = options.document.selectionPath;
+      }
+      currentCellName = options.document.currentCellName ?? '';
+    }
+    const prefix: string = `${context.filesDir}/python-${Date.now()}-${++this.serial}`;
+    const stagingGds: string = `${prefix}-embedded.gds`;
+    const previewPathCandidate: string = `${prefix}.svg`;
+    if (owned !== undefined) owned.dispatched = true;
+    const nativeRes: NativeEmbeddedPythonResult = await nativeHongTuService.runEmbeddedPythonAsync({
+      script,
+      inputMode: options.inputMode,
+      sourceGdsPath,
+      selectionGdsPath,
+      currentCellName,
+      parametersJson: JSON.stringify(parameters),
+      outputGdsPath: stagingGds,
+      outputSvgPath: previewPathCandidate,
+      cpythonHomeDir: `${context.filesDir}/cpython312`,
+      timeoutMs: 20000
+    });
+    this.assertCurrent(ticket);
+    if (!nativeRes.success) {
+      try { if (fs.accessSync(stagingGds)) fs.unlinkSync(stagingGds); } catch (_) {}
+      try { if (fs.accessSync(previewPathCandidate)) fs.unlinkSync(previewPathCandidate); } catch (_) {}
+      throw new Error(nativeRes.errorMessage || '端侧内置 Python 执行失败');
+    }
+    const cleanFileName: string = (nativeRes.fileName || 'python-layout.gds').replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 100) || 'python-layout.gds';
+    const diskSuffix: string = cleanFileName.toLowerCase().endsWith('.gds') ? cleanFileName : `${cleanFileName}.gds`;
+    const finalPath: string = `${prefix}-${diskSuffix}`;
+    try {
+      fs.renameSync(stagingGds, finalPath);
+    } catch (_) {
+      fs.copyFileSync(stagingGds, finalPath);
+      try { fs.unlinkSync(stagingGds); } catch (_2) {}
+    }
+    const finalPreviewPath: string = (nativeRes.previewSvg && nativeRes.previewSvg.length > 0 && fs.accessSync(previewPathCandidate))
+      ? previewPathCandidate
+      : '';
+    const layerDefs: PythonLayerDefinition[] = (nativeRes.layerDefinitions ?? []).map((ld): PythonLayerDefinition => ({
+      layerNumber: ld.layerNumber,
+      datatype: ld.datatype,
+      name: ld.name
+    }));
+    let portMeta: PythonPortMetadata | undefined = undefined;
+    if ((nativeRes.ports ?? []).length > 0 && (nativeRes.cellNames ?? []).length > 0) {
+      const cNames: string[] = nativeRes.cellNames;
+      const cKeys: string[] = cNames.map((n: string, idx: number): string => `py_cell_${idx}_${n}`);
+      const mappedPorts: LayoutPort[] = nativeRes.ports.map((p): LayoutPort => ({
+        id: p.id,
+        ownerCellId: p.ownerCellId,
+        ownerCellKey: cKeys[p.ownerCellId] ?? cKeys[0],
+        name: p.name,
+        centerNm: { x: p.xNm, y: p.yNm },
+        orientationDeg: p.orientationDeg,
+        widthNm: p.widthNm,
+        layerNumber: p.layerNumber,
+        datatype: p.datatype,
+        portType: p.portType === 'optical' ? 'optical' : 'electrical',
+        frameMirror: false,
+        frameMagnification: 1,
+        infoJson: '{}'
+      }));
+      portMeta = {
+        schemaVersion: 1,
+        cellNames: cNames,
+        cellKeys: cKeys,
+        ports: mappedPorts,
+        crossSections: [],
+        layoutContextRecords: [],
+        cellContextRecords: cNames.map((): LayoutContextRecord[] => []),
+        diagnostics: []
+      };
+    }
+    const protectedPaths: string[] = [finalPath];
+    if (finalPreviewPath.length > 0) protectedPaths.push(finalPreviewPath);
+    if (options.document?.path) protectedPaths.push(options.document.path);
+    if (options.document?.selectionPath) protectedPaths.push(options.document.selectionPath);
+    try { this.cleanupTemporaryFiles(context, Date.now(), protectedPaths); } catch (_) {}
+    if (owned !== undefined) {
+      owned.result = { jobId: owned.handle.jobId, state: 'succeeded', terminal: true, workerStopped: true };
+    }
+    return {
+      path: finalPath,
+      name: cleanFileName,
+      previewPath: finalPreviewPath,
+      layerDefinitions: layerDefs,
+      portMetadata: portMeta,
+      sourceRevision: options.document?.revision,
+      sourceDocumentId: options.document?.documentId,
+      inputMode: options.inputMode,
+      stdout: (nativeRes.stdoutText ?? '').substring(0, 16000),
+      summary: `[端侧内置 Python] ${nativeRes.cellCount} 个 Cell · ${nativeRes.shapeCount} 个定义图元 · 展开 ${nativeRes.expandedShapeCount} 个 · ${nativeRes.layerCount} 个图层` +
+        (portMeta !== undefined ? ` · ${portMeta.ports.length} 个端口` : '')
+    };
+  }
+
   private async generateArtifact(script: string, context: common.UIAbilityContext, ticket: number,
     options: PythonRunOptions, owned?: PythonOwnedOperation): Promise<PythonLayoutArtifact> {
     const config: PythonBridgeConfig = await this.loadConfig();
     this.assertCurrent(ticket);
-    if (config.token.length === 0) throw new Error('请先配置 Python 执行服务');
+    if ((config.executionMode ?? 'embedded') === 'embedded' && this.getEmbeddedRuntimeInfo().available) {
+      return await this.generateEmbeddedArtifact(script, context, ticket, options, owned);
+    }
+    if (config.token.length === 0) {
+      if (this.getEmbeddedRuntimeInfo().available) {
+        return await this.generateEmbeddedArtifact(script, context, ticket, options, owned);
+      }
+      throw new Error('请先配置远程 Python 执行服务，或切换回端侧内置 Python 引擎');
+    }
     await this.discoverCancellation(owned, config, ticket);
     this.assertCurrent(ticket);
     const baseEndpoint: string = this.endpoint(config.endpoint);

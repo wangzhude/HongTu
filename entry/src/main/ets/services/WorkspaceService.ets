@@ -551,7 +551,7 @@ export class WorkspaceService {
       }
       ids.add(shape.id);
       pointCount += shape.points.length;
-      if (pointCount > 25000000) throw new Error('工程顶点超过恢复预算');
+      if (pointCount > 50000000) throw new Error('工程顶点超过恢复预算');
       const stamp: ValidatedShapeStamp | undefined = reuseShapeValidation ? VALIDATED_SHAPE_STAMPS.get(shape) : undefined;
       if (stamp !== undefined && matchesValidatedStamp(shape, stamp)) {
         if (shape.ownerCellId !== undefined && (shape.ownerCellId < 0 || shape.ownerCellId >= cellNameCount)) {
@@ -771,7 +771,7 @@ export class WorkspaceService {
     let maximum: number = 0;
     for (let cursor = 0; cursor < ready.length; cursor++) {
       const child: number = ready[cursor]; seen++;
-      if (sizes[child] > 10000000) throw new Error('工程 AREF 或嵌套实例展开超过恢复预算');
+      if (sizes[child] > 1000000000) throw new Error('工程 AREF 或嵌套实例展开超过恢复预算');
       if (depths[child] > 256) throw new Error('工程层级超过 256 层恢复预算');
       maximum = Math.max(maximum, sizes[child]);
       const list: WorkspaceReferenceBudget[] = parents.get(child) ?? [];

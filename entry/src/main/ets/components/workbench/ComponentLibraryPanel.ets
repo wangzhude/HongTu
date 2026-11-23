@@ -128,8 +128,13 @@ export struct ComponentLibraryPanel {
           }.width('100%')
         }.layoutWeight(1).width('100%').align(Alignment.Top).scrollBar(BarState.Auto).edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true }).clip(true)
       }.layoutWeight(1).width('100%').border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius).clip(true)
-    }.width(this.panelWidth).height('85%').constraintSize({ maxWidth: '94%', maxHeight: 740 }).padding(UI.panelPadding)
-      .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay')))
+    }
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .padding({ left: 18, right: 18, top: 8, bottom: 24 })
+    .backgroundColor(Color.Transparent)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
 

@@ -25,6 +25,8 @@ import { emptyRdbReviewUiState, RdbReviewUiState } from '../models/RdbReviewUi';
 import type { ViewOverlayDiagnostic, ViewOverlayDocumentChoice } from '../models/ViewOverlayUi';
 import type { ViewBookmark, ViewRecord } from '../models/ViewWorkspace';
 import {
+  AiAskUserRequest,
+  AiChatAttachment,
   AiChatToolState,
   AiContext,
   AiContextOptions,
@@ -299,6 +301,9 @@ export class AiAssistantStore {
   @Trace aiPermissionMode: 'auto' | 'review' | 'readonly' = 'auto';
   @Trace aiTurnChangeSummary: string = '';
   @Trace aiMinimizedNotice: string = '';
+  @Trace aiPendingAttachments: AiChatAttachment[] = [];
+  @Trace aiWebSearchEnabled: boolean = true;
+  @Trace aiPendingAskUser: AiAskUserRequest | null = null;
 }
 
 export function connectDocumentDomainStore(): DocumentDomainStore {

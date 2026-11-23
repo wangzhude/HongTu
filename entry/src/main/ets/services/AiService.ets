@@ -25,6 +25,10 @@ import { util } from '@kit.ArkTS';
 import { AiConversationStore } from './AiConversationStore';
 import { cloneStructured } from '../common/CloneUtils';
 import type { AiConversationSummary, AiContextOptions, AiConversationCompression } from './AiConversationStore';
+import type { AiChatAttachment } from './AiAttachmentService';
+import type { DshWebSearchItem } from './DshWebSearchService';
+export type { AiChatAttachment } from './AiAttachmentService';
+export type { DshWebSearchItem } from './DshWebSearchService';
 export type { AiConversationSummary, AiContextOptions, AiConversationCompression } from './AiConversationStore';
 
 /** AI 模型提供商类型 */
@@ -449,6 +453,32 @@ export interface AiProcessStep {
   tool?: AiChatToolState;
 }
 
+export interface AiAskUserOption {
+  label: string;
+  description?: string;
+}
+
+export interface AiAskUserRequest {
+  id: string;
+  question: string;
+  context?: string;
+  options: AiAskUserOption[];
+  multiSelect: boolean;
+  allowCustomInput: boolean;
+  placeholder?: string;
+}
+
+export interface AiAskUserExchange {
+  id: string;
+  question: string;
+  context?: string;
+  options: AiAskUserOption[];
+  multiSelect: boolean;
+  selectedLabels: string[];
+  customText: string;
+  skipped: boolean;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
@@ -462,6 +492,9 @@ export interface ChatMessage {
   steps?: AiProcessStep[];
   runStatus?: 'completed' | 'failed' | 'cancelled';
   task?: AiAgentTask;
+  attachments?: AiChatAttachment[];
+  webSources?: DshWebSearchItem[];
+  askUserExchanges?: AiAskUserExchange[];
   /** 时间戳 */
   timestamp: number;
 }
@@ -1271,7 +1304,11 @@ export class AiService {
   /** Persists the official harness output and tool evidence together with the original user request. */
   recordHarnessResult(request: string, text: string, reasoning: string, tools: AiChatToolState[], success: boolean,
                       commandStatus?: 'pending' | 'executed' | 'failed', conversationId: string = this.getActiveConversationId(), cancelled: boolean = false,
-                      task?: AiAgentTask, steps?: AiProcessStep[]): void {
+                      task?: AiAgentTask, steps?: AiProcessStep[],
+                      userAttachments?: AiChatAttachment[],
+                      assistantAttachments?: AiChatAttachment[],
+                      webSources?: DshWebSearchItem[],
+                      askUserExchanges?: AiAskUserExchange[]): void {
     const timestamp: number = Date.now();
     const toolHistory: AiChatToolState[] = tools.map((tool: AiChatToolState): AiChatToolState => ({
       id: tool.id, name: tool.name, status: tool.status,
@@ -1294,11 +1331,15 @@ export class AiService {
         }))
       : undefined;
     this.conversations.append(conversationId, [{ role: ChatRole.USER, content: this.redactConversationText(request), timestamp,
+      attachments: (userAttachments !== undefined && userAttachments.length > 0) ? userAttachments.slice(0, 24) : undefined,
       task: task === undefined ? undefined : { originalRequest: this.redactConversationText(task.originalRequest),
         readOnly: task.readOnly, artifactGenerationAllowed: task.artifactGenerationAllowed,
         requiredValidationProfile: task.requiredValidationProfile } },
       { role: ChatRole.ASSISTANT, content: this.redactConversationText(text), timestamp,
       reasoning: this.redactConversationText(reasoning), tools: toolHistory, steps: stepHistory,
+      attachments: (assistantAttachments !== undefined && assistantAttachments.length > 0) ? assistantAttachments.slice(0, 24) : undefined,
+      webSources: (webSources !== undefined && webSources.length > 0) ? webSources.slice(0, 32) : undefined,
+      askUserExchanges: (askUserExchanges !== undefined && askUserExchanges.length > 0) ? askUserExchanges.slice(0, 16) : undefined,
       isCommand: commandStatus !== undefined || !success,
       runStatus: cancelled ? 'cancelled' : (success ? 'completed' : 'failed'),
       commandStatus: success ? commandStatus : 'failed' }]);

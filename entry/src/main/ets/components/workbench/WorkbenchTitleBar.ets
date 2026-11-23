@@ -1,12 +1,14 @@
 import { COLORS } from '../../common/constants';
 import { ColorMetrics, LengthMetrics } from '@kit.ArkUI';
 import { WorkModule } from '../../workbench/WorkbenchModels';
+import { WorkspaceTab } from '../../services/WorkspaceService';
 import { FONT_MONO } from '../../common/Fonts';
 import { UI } from '../../common/UiTokens';
 import { menuIcon, menuSubmenuArrow, menuCheckIcon, menuStyle, MENU_ITEM_STYLE } from '../../common/WorkbenchMenuStyle';
 import { feedbackCurve, MOTION, motionDuration, MotionSettings, USER_REDUCE_MOTION_KEY } from '../../common/Motion';
 import { buildLuminousMenuOptions } from '../../store/LuminousSurfaceOptions';
 import { hongTuThemeState, LuminousLightLevel } from '../../store/ThemeStore';
+import { DrawnStatusIcon } from '../DrawnStatusIcon';
 import { WorkbenchIcon } from './WorkbenchIcon';
 import {
   DpiScalePreset,
@@ -23,7 +25,12 @@ import {
 } from '../../common/WorkspaceAdaptation';
 
 /**
- * 鸿图主界面标题栏（四层沉浸光感材质 × 按模块收敛控件 × 原生菜单收口）
+ * 鸿图主界面一体化高密度原生顶栏（v8 上侧空间全面利用版）
+ *
+ * 1. 桌面/平板横屏模式下将多文档标签栏（`tabs`）直接内联进顶栏左侧，省去原先整整一行 40vp 空白标签条；
+ * 2. 将原先 600vp+ 闲置空白区升级为高频工程快操带：打开、保存（带未保存脏标记）、器件库、端侧 Python、一键 DRC（带违规计数徽章）、全局命令搜索（Ctrl+K）；
+ * 3. 左右侧边栏开关统一采用鸿蒙原生分栏符号（`rectangle_lefthalf_inset_filled` / `rectangle_righthalf_inset_filled`）；
+ * 4. 竖屏触控模式下直显当前文档与编辑 Cell 身份胶囊及打开/保存/Python/DRC 一键入口。
  *
  * This file is part of HongTu, licensed under GPLv3.
  */
@@ -39,6 +46,7 @@ export struct WorkbenchTitleBar {
   @Prop aiRunning: boolean = false;
   @Prop aiPending: boolean = false;
   @Prop showMacroPanel: boolean = false;
+  @Prop showPythonPanel: boolean = false;
   @Prop currentModule: WorkModule = WorkModule.Layout;
   @Prop drcIssueCount: number = 0;
   @Prop viewMode: string = '编辑';
@@ -53,6 +61,9 @@ export struct WorkbenchTitleBar {
   @Prop zoomPercent: number = 100;
   @Prop canUndo: boolean = false;
   @Prop canRedo: boolean = false;
+  @Prop tabs: WorkspaceTab[] = [];
+  @Prop activeTabId: string = '';
+
   undoAction: () => void = () => {};
   redoAction: () => void = () => {};
   zoomAction: (delta: number) => void = () => {};
@@ -72,6 +83,7 @@ export struct WorkbenchTitleBar {
   fitAction: () => void = () => {};
   runDrcAction: () => void = () => {};
   toggleMacroAction: () => void = () => {};
+  openPythonAction: () => void = () => {};
   toggleAiAction: () => void = () => {};
   openAppearanceAction: () => void = () => {};
   selectModuleAction: (module: WorkModule, label: string) => void = () => {};
@@ -82,6 +94,8 @@ export struct WorkbenchTitleBar {
   rdbReviewAction: () => void = () => {};
   toggleSidebarAction: () => void = () => {};
   toggleInspectorAction: () => void = () => {};
+  selectTabAction: (id: string) => void = (_id: string) => {};
+  closeTabAction: (id: string) => void = (_id: string) => {};
 
   private touchModuleTitle(): string {
     if (this.currentModule === WorkModule.Verify) {
@@ -190,7 +204,7 @@ export struct WorkbenchTitleBar {
         .attributeModifier(MENU_ITEM_STYLE)
       MenuItem({ content: '工艺与验证', symbolStartIcon: menuIcon('verify'), builder: this.verificationMenu, symbolEndIcon: menuSubmenuArrow() })
         .attributeModifier(MENU_ITEM_STYLE)
-      MenuItem({ content: '辅助与外观', symbolStartIcon: menuIcon('appearance'), builder: this.assistantMenu, symbolEndIcon: menuSubmenuArrow() })
+      MenuItem({ content: '脚本与辅助', symbolStartIcon: menuIcon('appearance'), builder: this.assistantMenu, symbolEndIcon: menuSubmenuArrow() })
         .attributeModifier(MENU_ITEM_STYLE)
       if (this.currentModule !== WorkModule.Data) {
         MenuItem({ content: '视图与面板', symbolStartIcon: menuIcon('view'), builder: this.viewMenu, symbolEndIcon: menuSubmenuArrow() })
@@ -205,7 +219,7 @@ export struct WorkbenchTitleBar {
       { content: '文档与工程', symbolStartIcon: menuIcon('document'), builder: this.documentMenu, symbolEndIcon: menuSubmenuArrow() },
       { content: '查找与器件', symbolStartIcon: menuIcon('search'), builder: this.searchMenu, symbolEndIcon: menuSubmenuArrow() },
       { content: '工艺与验证', symbolStartIcon: menuIcon('verify'), builder: this.verificationMenu, symbolEndIcon: menuSubmenuArrow() },
-      { content: '辅助与外观', symbolStartIcon: menuIcon('appearance'), builder: this.assistantMenu, symbolEndIcon: menuSubmenuArrow() }
+      { content: '脚本与辅助', symbolStartIcon: menuIcon('appearance'), builder: this.assistantMenu, symbolEndIcon: menuSubmenuArrow() }
     ];
     if (this.currentModule !== WorkModule.Data) {
       items.push({ content: '视图与面板', symbolStartIcon: menuIcon('view'), builder: this.viewMenu, symbolEndIcon: menuSubmenuArrow() });
@@ -320,10 +334,12 @@ export struct WorkbenchTitleBar {
   @Builder
   private assistantMenu() {
     Menu() {
-      MenuItemGroup({ header: '辅助面板' }) {
-        MenuItem({ content: 'AI 助手', symbolStartIcon: menuIcon('ai'), symbolEndIcon: menuCheckIcon(this.showAiPanel) })
+      MenuItemGroup({ header: '智能与脚本工作台' }) {
+        MenuItem({ content: 'AI 视觉助手', symbolStartIcon: menuIcon('ai'), symbolEndIcon: menuCheckIcon(this.showAiPanel) })
           .attributeModifier(MENU_ITEM_STYLE).selected(this.showAiPanel).onClick(() => this.toggleAiAction())
-        MenuItem({ content: '宏面板', symbolStartIcon: menuIcon('macro'), symbolEndIcon: menuCheckIcon(this.showMacroPanel) })
+        MenuItem({ content: '端侧 Python 3 脚本台', symbolStartIcon: menuIcon('macro'), symbolEndIcon: menuCheckIcon(this.showPythonPanel) })
+          .attributeModifier(MENU_ITEM_STYLE).selected(this.showPythonPanel).onClick(() => this.openPythonAction())
+        MenuItem({ content: '宏录制与批处理', symbolStartIcon: menuIcon('library'), symbolEndIcon: menuCheckIcon(this.showMacroPanel) })
           .attributeModifier(MENU_ITEM_STYLE).selected(this.showMacroPanel).onClick(() => this.toggleMacroAction())
       }
       MenuItemGroup({ header: '外观与光感' }) {
@@ -340,8 +356,9 @@ export struct WorkbenchTitleBar {
 
   private assistantMenuSizing(): MenuItemOptions[] {
     return [
-      { content: 'AI 助手', symbolStartIcon: menuIcon('ai'), symbolEndIcon: menuCheckIcon(this.showAiPanel) },
-      { content: '宏面板', symbolStartIcon: menuIcon('macro'), symbolEndIcon: menuCheckIcon(this.showMacroPanel) },
+      { content: 'AI 视觉助手', symbolStartIcon: menuIcon('ai'), symbolEndIcon: menuCheckIcon(this.showAiPanel) },
+      { content: '端侧 Python 3 脚本台', symbolStartIcon: menuIcon('macro'), symbolEndIcon: menuCheckIcon(this.showPythonPanel) },
+      { content: '宏录制与批处理', symbolStartIcon: menuIcon('library'), symbolEndIcon: menuCheckIcon(this.showMacroPanel) },
       { content: '外观与沉浸光感…', symbolStartIcon: menuIcon('sparkles') },
       { content: '减少动态效果', symbolStartIcon: menuIcon('view'), symbolEndIcon: menuCheckIcon(this.userReduceMotion) }
     ];
@@ -364,10 +381,10 @@ export struct WorkbenchTitleBar {
           .attributeModifier(MENU_ITEM_STYLE).onClick(() => this.viewWorkspaceAction())
       }
       MenuItemGroup({ header: '面板' }) {
-        MenuItem({ content: '图层 / Cell 面板',
+        MenuItem({ content: '左侧图层 / Cell 面板',
           symbolStartIcon: menuIcon('sidebar'), symbolEndIcon: menuCheckIcon(this.sidebarVisible) })
           .attributeModifier(MENU_ITEM_STYLE).selected(this.sidebarVisible).onClick(() => this.toggleSidebarAction())
-        MenuItem({ content: '属性面板',
+        MenuItem({ content: '右侧属性面板',
           symbolStartIcon: menuIcon('inspector'), symbolEndIcon: menuCheckIcon(this.inspectorVisible) })
           .attributeModifier(MENU_ITEM_STYLE).selected(this.inspectorVisible).onClick(() => this.toggleInspectorAction())
       }
@@ -382,68 +399,220 @@ export struct WorkbenchTitleBar {
       { content: '重置视图', symbolStartIcon: menuIcon('reset') },
       { content: '保存视图预设…', symbolStartIcon: menuIcon('preset') },
       { content: '视图与书签…', symbolStartIcon: menuIcon('view') },
-      { content: '图层 / Cell 面板', symbolStartIcon: menuIcon('sidebar'), symbolEndIcon: menuCheckIcon(this.sidebarVisible) },
-      { content: '属性面板', symbolStartIcon: menuIcon('inspector'), symbolEndIcon: menuCheckIcon(this.inspectorVisible) }
+      { content: '左侧图层 / Cell 面板', symbolStartIcon: menuIcon('sidebar'), symbolEndIcon: menuCheckIcon(this.sidebarVisible) },
+      { content: '右侧属性面板', symbolStartIcon: menuIcon('inspector'), symbolEndIcon: menuCheckIcon(this.inspectorVisible) }
     ];
   }
 
   @Builder
-  private desktopBar() {
-    Row() {
-      Row({ space: 9 }) {
-        Row() {
-          WorkbenchIcon({ name: 'layout', iconSize: 20, color: '#FFFFFF' })
+  private inlineDocumentTabs() {
+    Scroll() {
+      Row({ space: 4 }) {
+        ForEach(this.tabs, (tab: WorkspaceTab) => {
+          Row({ space: 2 }) {
+            Button({ type: ButtonType.Normal }) {
+              Row({ space: 5 }) {
+                WorkbenchIcon({
+                  name: 'layout',
+                  iconSize: 13,
+                  color: tab.id === this.activeTabId ? COLORS.primary : COLORS.muted
+                })
+                Text(tab.title)
+                  .fontSize(12)
+                  .fontWeight(tab.id === this.activeTabId ? FontWeight.Bold : FontWeight.Medium)
+                  .fontColor(tab.id === this.activeTabId ? COLORS.primary : COLORS.ink)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .constraintSize({ maxWidth: 148 })
+                if (tab.dirty) {
+                  DrawnStatusIcon({ kind: 'dirty', iconSize: 8, strokeColor: COLORS.warning, showSoftPlate: false })
+                }
+              }.alignItems(VerticalAlign.Center)
+            }
+            .height(30)
+            .padding({ left: 9, right: 4 })
+            .backgroundColor(Color.Transparent)
+            .focusable(false)
+            .accessibilityText(`切换文档 ${tab.title}`)
+            .onClick(() => this.selectTabAction(tab.id))
+
+            if (this.tabs.length > 1) {
+              Button({ type: ButtonType.Normal }) {
+                WorkbenchIcon({ name: 'close', iconSize: 11, color: COLORS.muted })
+              }
+              .width(22)
+              .height(22)
+              .padding(0)
+              .margin({ right: 3 })
+              .backgroundColor(Color.Transparent)
+              .borderRadius(5)
+              .focusable(false)
+              .accessibilityText(`关闭 ${tab.title}`)
+              .onClick(() => this.closeTabAction(tab.id))
+            } else {
+              Row().width(4)
+            }
+          }
+          .height(32)
+          .alignItems(VerticalAlign.Center)
+          .backgroundColor(tab.id === this.activeTabId ? COLORS.primarySoft : COLORS.surfaceMuted)
+          .border({
+            width: 0.8,
+            color: tab.id === this.activeTabId ? COLORS.primary : COLORS.border
+          })
+          .borderRadius(UI.controlRadius)
+        }, (tab: WorkspaceTab): string => `${tab.id}:${tab.title}:${tab.dirty}:${this.activeTabId}:${this.tabs.length}`)
+
+        Button({ type: ButtonType.Normal }) {
+          WorkbenchIcon({ name: 'plus', iconSize: 15, color: COLORS.muted })
         }
-        .width(32)
-        .height(32)
+        .width(30)
+        .height(30)
+        .padding(0)
+        .backgroundColor(COLORS.surfaceMuted)
+        .border({ width: 0.8, color: COLORS.border })
+        .borderRadius(UI.controlRadius)
+        .focusable(false)
+        .accessibilityText('新建或切换工程版图')
+        .bindTips('新建版图 / 工程与历史')
+        .onClick(() => this.newFileAction())
+      }
+      .alignItems(VerticalAlign.Center)
+    }
+    .scrollable(ScrollDirection.Horizontal)
+    .scrollBar(BarState.Off)
+    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+    .layoutWeight(1)
+    .align(Alignment.Start)
+    .margin({ left: 10, right: 8 })
+  }
+
+  @Builder
+  private quickHeaderPill(icon: string, label: string, active: boolean, showLabel: boolean, badgeText: string, onTap: () => void) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 4 }) {
+        WorkbenchIcon({ name: icon, iconSize: 15, color: active ? COLORS.primary : COLORS.ink })
+        if (showLabel) {
+          Text(label)
+            .fontSize(12)
+            .fontWeight(active ? FontWeight.Bold : FontWeight.Medium)
+            .fontColor(active ? COLORS.primary : COLORS.ink)
+            .maxLines(1)
+        }
+        if (badgeText.length > 0) {
+          Text(badgeText)
+            .fontSize(9.5)
+            .fontFamily(FONT_MONO)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Color.White)
+            .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+            .backgroundColor(COLORS.danger)
+            .borderRadius(999)
+        }
+      }.alignItems(VerticalAlign.Center)
+    }
+    .height(32)
+    .padding({ left: 8, right: 8 })
+    .backgroundColor(active ? COLORS.primarySoft : COLORS.surfaceMuted)
+    .border({ width: 0.8, color: active ? COLORS.primary : COLORS.border })
+    .borderRadius(UI.controlRadius)
+    .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+    .focusable(false)
+    .hoverEffect(HoverEffect.Highlight)
+    .accessibilityText(label)
+    .bindTips(label)
+    .onClick(() => onTap())
+  }
+
+  @Builder
+  private desktopBar() {
+    Row({ space: 6 }) {
+      // 1. 紧凑品牌徽标
+      Row({ space: 7 }) {
+        Row() {
+          WorkbenchIcon({ name: 'layout', iconSize: 17, color: '#FFFFFF' })
+        }
+        .width(28)
+        .height(28)
         .justifyContent(FlexAlign.Center)
         .alignItems(VerticalAlign.Center)
         .linearGradient({ angle: 135, colors: [['#0A73F6', 0.0], ['#2984FF', 1.0]] })
-        .borderRadius(UI.controlRadius)
-        Text('鸿图').fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLORS.ink)
-        if (!this.narrowWindow) {
-          Text('HongTu EDA').fontSize(15).fontWeight(FontWeight.Medium).fontColor(COLORS.muted)
+        .borderRadius(7)
+        Text('鸿图')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(COLORS.ink)
+      }
+      .alignItems(VerticalAlign.Center)
+
+      // 2. 内联多文档标签栏（彻底吃掉原先空白横条，释放整行 40vp 垂直高度）
+      if (this.currentModule !== WorkModule.Data && this.tabs.length > 0) {
+        this.inlineDocumentTabs()
+      } else {
+        Blank()
+      }
+
+      // 3. 上侧高频工程快操组（填补原先顶栏中部大面积空白）
+      Row({ space: 5 }) {
+        this.quickHeaderPill('open', '打开', false, !this.narrowWindow, '', () => { this.openFileAction(); })
+        this.quickHeaderPill('save', this.documentDirty ? '保存*' : '保存', this.documentDirty, !this.narrowWindow, '', () => { this.saveAction(); })
+        if (this.currentModule !== WorkModule.Data) {
+          this.quickHeaderPill('cell', '器件库', false, !this.narrowWindow, '', () => { this.libraryAction(); })
+          this.quickHeaderPill('python', 'Python', this.showPythonPanel, !this.narrowWindow, '', () => { this.openPythonAction(); })
+          this.quickHeaderPill(
+            'verify',
+            'DRC',
+            this.drcIssueCount > 0,
+            !this.narrowWindow,
+            this.drcIssueCount > 0 ? String(Math.min(99, this.drcIssueCount)) : '',
+            () => { this.runDrcAction(); }
+          )
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 5 }) {
+              WorkbenchIcon({ name: 'search', iconSize: 15, color: COLORS.muted })
+              if (!this.narrowWindow) {
+                Text('命令')
+                  .fontSize(12)
+                  .fontColor(COLORS.muted)
+                Text('Ctrl+K')
+                  .fontSize(9.5)
+                  .fontFamily(FONT_MONO)
+                  .fontColor(COLORS.muted)
+              }
+            }.alignItems(VerticalAlign.Center)
+          }
+          .height(32)
+          .padding({ left: 9, right: 9 })
+          .backgroundColor(COLORS.surfaceMuted)
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(UI.controlRadius)
+          .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+          .focusable(false)
+          .hoverEffect(HoverEffect.Highlight)
+          .accessibilityText('搜索命令 Ctrl+K')
+          .bindTips('全局命令面板 (Ctrl+K)')
+          .onClick(() => this.commandSearchAction())
         }
       }
       .alignItems(VerticalAlign.Center)
 
-      Blank()
+      Divider().vertical(true).height(18).color(COLORS.border).margin({ left: 2, right: 2 })
 
+      // 4. 左右侧栏原生显隐开关 + AI 视觉助手 + DPI + 外观 + 全量菜单
       if (this.currentModule !== WorkModule.Data) {
         PanelToggle({ active: this.sidebarVisible, flip: false, activateAction: this.toggleSidebarAction })
-          .margin({ right: 6 })
         PanelToggle({ active: this.inspectorVisible, flip: true, activateAction: this.toggleInspectorAction })
-          .margin({ right: 12 })
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 8 }) {
-            WorkbenchIcon({ name: 'search', iconSize: 16, color: COLORS.muted })
-            if (!this.narrowWindow) {
-              Text('搜索命令（层、选择、测量…）').fontSize(UI.fontBody).fontColor(COLORS.muted)
-              Text('Ctrl+K').fontSize(10).fontFamily(FONT_MONO).fontColor(COLORS.muted)
-            }
-          }
-        }
-        .height(UI.controlHeight)
-        .padding({ left: 12, right: 12 })
-        .margin({ right: 12 })
-        .backgroundColor(COLORS.surfaceMuted)
-        .border({ width: 1, color: COLORS.border })
-        .borderRadius(UI.controlRadius)
-        .attributeModifier(hongTuThemeState.luminousPointLightModifier())
-        .hoverEffect(HoverEffect.Highlight)
-        .accessibilityText('搜索命令 Ctrl+K')
-        .onClick(() => this.commandSearchAction())
       }
 
       Button({ type: ButtonType.Normal }) {
-        Row({ space: 7 }) {
+        Row({ space: 6 }) {
           if (this.aiRunning) {
-            LoadingProgress().width(15).height(15).color(COLORS.primary)
+            LoadingProgress().width(14).height(14).color(COLORS.primary)
           } else {
-            WorkbenchIcon({ name: 'ai', iconSize: 18, color: (this.showAiPanel || this.aiPending) ? COLORS.primary : COLORS.ink })
+            WorkbenchIcon({ name: 'ai', iconSize: 16, color: (this.showAiPanel || this.aiPending) ? COLORS.primary : COLORS.ink })
           }
-          Text(this.aiRunning ? 'AI 绘图中' : (this.aiPending ? 'AI 待确认' : 'AI 助手'))
-            .fontSize(UI.fontBody)
+          Text(this.aiRunning ? 'AI 运行中' : (this.aiPending ? 'AI 待确认' : 'AI 助手'))
+            .fontSize(12)
             .fontWeight(FontWeight.Medium)
             .fontColor((this.showAiPanel || this.aiRunning || this.aiPending) ? COLORS.primary : COLORS.ink)
           if (this.aiPending && !this.aiRunning) {
@@ -452,81 +621,77 @@ export struct WorkbenchTitleBar {
         }
         .alignItems(VerticalAlign.Center)
       }
-      .height(UI.controlHeight)
-      .padding({ left: 14, right: 14 })
+      .height(32)
+      .padding({ left: 11, right: 11 })
       .borderRadius(UI.controlRadius)
       .animation(null)
       .backgroundColor((this.showAiPanel || this.aiRunning || this.aiPending) ? COLORS.primarySoft : COLORS.surfaceMuted)
       .animation({ duration: motionDuration(MOTION.feedback), curve: feedbackCurve() })
       .animation(null)
-      .border({ width: 1, color: (this.showAiPanel || this.aiRunning) ? COLORS.primary : (this.aiPending ? '#14B8A6' : COLORS.border) })
-      .borderRadius(UI.controlRadius)
+      .border({ width: 0.9, color: (this.showAiPanel || this.aiRunning) ? COLORS.primary : (this.aiPending ? '#14B8A6' : COLORS.border) })
       .attributeModifier(hongTuThemeState.luminousPointLightModifier(LuminousLightLevel.EMPHASIS))
       .stateEffect(true)
       .hoverEffect(HoverEffect.Highlight)
-      .focusable(true)
-      .focusBox({ strokeColor: ColorMetrics.resourceColor(COLORS.primary), strokeWidth: LengthMetrics.vp(2) })
+      .focusable(false)
       .accessibilityText('AI 助手')
       .accessibilitySelected(this.showAiPanel)
-      .bindTips('AI 助手')
+      .bindTips('AI 视觉助手（支持截图自检、自动化与内置 Python）')
       .onClick(() => this.toggleAiAction())
 
       Button({ type: ButtonType.Normal }) {
-        Row({ space: 5 }) {
-          WorkbenchIcon({ name: 'dpi', iconSize: 15, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.ink })
-          Text(`DPI ${this.dpiBadgeLabel()}`)
-            .fontSize(11)
+        Row({ space: 4 }) {
+          WorkbenchIcon({ name: 'dpi', iconSize: 14, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.ink })
+          Text(this.dpiBadgeLabel())
+            .fontSize(10.5)
             .fontFamily(FONT_MONO)
             .fontWeight(FontWeight.Medium)
             .fontColor(this.customDpiScale > 0 ? COLORS.primary : COLORS.ink)
         }.alignItems(VerticalAlign.Center)
       }
       .id('titlebar-dpi-quick-btn')
-      .height(UI.controlHeight)
-      .padding({ left: 10, right: 10 })
-      .margin({ left: 8 })
+      .height(32)
+      .padding({ left: 8, right: 8 })
       .backgroundColor(this.customDpiScale > 0 ? COLORS.primarySoft : COLORS.surfaceMuted)
-      .border({ width: 1, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.border })
+      .border({ width: 0.8, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.border })
       .borderRadius(UI.controlRadius)
       .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+      .focusable(false)
       .accessibilityText('快捷调节界面 DPI 缩放与横竖屏布局')
       .bindTips('快捷调节界面 DPI 缩放与横屏桌面布局')
       .bindMenu(this.dpiQuickMenu, buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius))
 
       Button({ type: ButtonType.Circle }) {
-        WorkbenchIcon({ name: 'appearance', iconSize: 18, color: COLORS.ink })
+        WorkbenchIcon({ name: 'appearance', iconSize: 16, color: COLORS.ink })
       }
-      .width(UI.controlHeight)
-      .height(UI.controlHeight)
+      .width(32)
+      .height(32)
       .padding(0)
-      .margin({ left: 8 })
       .backgroundColor(COLORS.surfaceMuted)
-      .border({ width: 1, color: COLORS.border })
+      .border({ width: 0.8, color: COLORS.border })
       .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+      .focusable(false)
       .accessibilityText('外观与沉浸光感')
       .bindTips('外观与沉浸光感')
       .onClick(() => this.openAppearanceAction())
 
       Button({ type: ButtonType.Circle }) {
-        WorkbenchIcon({ name: 'menu', iconSize: 20, color: COLORS.ink })
+        WorkbenchIcon({ name: 'menu', iconSize: 18, color: COLORS.ink })
       }
-      .width(UI.controlHeight)
-      .height(UI.controlHeight)
+      .width(32)
+      .height(32)
       .padding(0)
-      .margin({ left: 8 })
       .backgroundColor(COLORS.surfaceMuted)
-      .border({ width: 1, color: COLORS.border })
+      .border({ width: 0.8, color: COLORS.border })
+      .focusable(false)
       .accessibilityText('更多功能')
       .bindTips('更多功能')
       .stateEffect(true)
       .hoverEffect(HoverEffect.Highlight)
-      .focusable(true)
-      .focusBox({ strokeColor: ColorMetrics.resourceColor(COLORS.primary), strokeWidth: LengthMetrics.vp(2) })
       .bindMenu(this.desktopMenu, buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius))
     }
-    .height(UI.titleBarHeight)
+    .height(46)
     .width('100%')
-    .padding({ left: 18, right: 16 })
+    .padding({ left: 12, right: 12 })
     .alignItems(VerticalAlign.Center)
     .backgroundColor(hongTuThemeState.isLuminousBackgroundEnabled()
       ? hongTuThemeState.luminous.translucentCardColor
@@ -536,76 +701,100 @@ export struct WorkbenchTitleBar {
 
   @Builder
   private touchBar() {
-    Row({ space: 8 }) {
-      Text(this.touchModuleTitle())
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(COLORS.ink)
-        .layoutWeight(1)
-        .maxLines(1)
-      GhostCommand({ icon: 'open', label: '打开', showLabel: !this.isCompact, activateAction: this.openFileAction })
-      if (this.currentModule !== WorkModule.Data && !this.isCompact) {
-        GhostCommand({ icon: 'search', label: '搜索命令', showLabel: false, activateAction: this.commandSearchAction })
+    Row({ space: 6 }) {
+      // 左侧紧凑展示当前模块 + 当前文档/编辑 Cell 身份胶囊（点击切换工程/最近文件）
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 5 }) {
+          Text(this.touchModuleTitle())
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(COLORS.ink)
+          if (this.currentModule !== WorkModule.Data) {
+            Text('·')
+              .fontSize(13)
+              .fontColor(COLORS.muted)
+            Text(this.cellName.length > 0 ? this.cellName : (this.fileName.length > 0 ? this.fileName : 'TOP'))
+              .fontSize(12)
+              .fontFamily(FONT_MONO)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.primary)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            if (this.documentDirty) {
+              DrawnStatusIcon({ kind: 'dirty', iconSize: 8, strokeColor: COLORS.warning, showSoftPlate: false })
+            }
+          }
+        }.alignItems(VerticalAlign.Center)
       }
+      .height(34)
+      .padding({ left: 4, right: 6 })
+      .backgroundColor(Color.Transparent)
+      .borderRadius(UI.controlRadius)
+      .layoutWeight(1)
+      .focusable(false)
+      .onClick(() => this.projectAction())
+
+      if (this.currentModule !== WorkModule.Data) {
+        PanelToggle({ active: this.sidebarVisible, flip: false, activateAction: this.toggleSidebarAction })
+      }
+      GhostCommand({ icon: 'open', label: '打开', showLabel: false, activateAction: this.openFileAction })
       if (this.currentModule !== WorkModule.Data) {
         GhostCommand({ icon: 'save', label: '保存', showLabel: false, activateAction: this.saveAction })
+        GhostCommand({ icon: 'python', label: 'Python', showLabel: false, activateAction: this.openPythonAction })
       }
+
       Button({ type: ButtonType.Normal }) {
-        Row({ space: 3 }) {
-          WorkbenchIcon({ name: 'dpi', iconSize: 15, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.ink })
+        Row({ space: 2 }) {
+          WorkbenchIcon({ name: 'dpi', iconSize: 13, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.ink })
           Text(this.dpiBadgeLabel())
-            .fontSize(10)
+            .fontSize(9.5)
             .fontFamily(FONT_MONO)
             .fontWeight(FontWeight.Medium)
             .fontColor(this.customDpiScale > 0 ? COLORS.primary : COLORS.ink)
         }.alignItems(VerticalAlign.Center)
       }
       .id('touchbar-dpi-quick-btn')
-      .height(UI.controlHeight)
-      .padding({ left: 8, right: 8 })
+      .height(32)
+      .padding({ left: 7, right: 7 })
       .backgroundColor(this.customDpiScale > 0 ? COLORS.primarySoft : COLORS.surfaceMuted)
-      .border({ width: 1, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.border })
+      .border({ width: 0.8, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.border })
       .borderRadius(999)
+      .focusable(false)
       .accessibilityText('DPI 缩放与横屏桌面布局')
       .bindMenu(this.dpiQuickMenu, buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius))
+
       Button({ type: ButtonType.Circle }) {
         if (this.aiRunning) {
-          LoadingProgress().width(16).height(16).color(COLORS.primary)
+          LoadingProgress().width(15).height(15).color(COLORS.primary)
         } else {
-          WorkbenchIcon({ name: 'ai', iconSize: 18, color: (this.showAiPanel || this.aiPending) ? COLORS.primary : COLORS.ink })
+          WorkbenchIcon({ name: 'ai', iconSize: 17, color: (this.showAiPanel || this.aiPending) ? COLORS.primary : COLORS.ink })
         }
       }
-      .width(UI.controlHeight)
-      .height(UI.controlHeight)
+      .width(34)
+      .height(34)
       .padding(0)
       .backgroundColor((this.showAiPanel || this.aiRunning || this.aiPending) ? COLORS.primarySoft : COLORS.surfaceMuted)
-      .border({ width: 1, color: (this.showAiPanel || this.aiRunning) ? COLORS.primary : (this.aiPending ? '#14B8A6' : COLORS.border) })
+      .border({ width: 0.8, color: (this.showAiPanel || this.aiRunning) ? COLORS.primary : (this.aiPending ? '#14B8A6' : COLORS.border) })
+      .focusable(false)
       .accessibilityText('AI 助手')
       .onClick(() => this.toggleAiAction())
+
       Button({ type: ButtonType.Circle }) {
-        WorkbenchIcon({ name: 'appearance', iconSize: 18, color: COLORS.ink })
+        WorkbenchIcon({ name: 'menu', iconSize: 18, color: COLORS.ink })
       }
-      .width(UI.controlHeight)
-      .height(UI.controlHeight)
+      .width(34)
+      .height(34)
       .padding(0)
       .backgroundColor(COLORS.surfaceMuted)
-      .border({ width: 1, color: COLORS.border })
-      .accessibilityText('外观与沉浸光感')
-      .onClick(() => this.openAppearanceAction())
-      Button({ type: ButtonType.Circle }) {
-        WorkbenchIcon({ name: 'menu', iconSize: 20, color: COLORS.ink })
-      }
-      .width(UI.controlHeight)
-      .height(UI.controlHeight)
-      .padding(0)
-      .backgroundColor(COLORS.surfaceMuted)
-      .border({ width: 1, color: COLORS.border })
+      .border({ width: 0.8, color: COLORS.border })
+      .focusable(false)
       .accessibilityText('更多功能')
       .bindMenu(this.desktopMenu, buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius))
     }
     .width('100%')
-    .height(56)
-    .padding({ left: 16, right: 16 })
+    .height(50)
+    .padding({ left: 10, right: 10 })
+    .alignItems(VerticalAlign.Center)
     .backgroundColor(hongTuThemeState.isLuminousBackgroundEnabled()
       ? hongTuThemeState.luminous.translucentCardColor
       : COLORS.surface)
@@ -630,26 +819,26 @@ struct PanelToggle {
   build() {
     Button({ type: ButtonType.Normal }) {
       WorkbenchIcon({
-        name: this.flip ? (this.active ? 'chevronLeft' : 'chevronRight') : 'menu',
-        iconSize: 18,
+        name: this.flip ? 'inspector' : 'sidebar',
+        iconSize: 17,
         color: this.active ? COLORS.primary : COLORS.muted
       })
     }
-    .width(UI.compactControlHeight)
-    .height(UI.compactControlHeight)
+    .width(32)
+    .height(32)
     .padding(0)
     .borderRadius(UI.controlRadius)
     .animation(null)
-    .backgroundColor(this.active ? COLORS.primarySoft : Color.Transparent)
+    .backgroundColor(this.active ? COLORS.primarySoft : COLORS.surfaceMuted)
+    .border({ width: 0.8, color: this.active ? COLORS.primary : COLORS.border })
     .animation({ duration: motionDuration(MOTION.feedback), curve: feedbackCurve() })
     .animation(null)
     .stateEffect(true)
     .hoverEffect(HoverEffect.Highlight)
-    .focusable(true)
-    .focusBox({ strokeColor: ColorMetrics.resourceColor(COLORS.primary), strokeWidth: LengthMetrics.vp(2) })
-    .accessibilityText(this.flip ? '属性面板' : '图层与 Cell 面板')
+    .focusable(false)
+    .accessibilityText(this.flip ? '右侧属性面板' : '左侧图层与 Cell 面板')
     .accessibilitySelected(this.active)
-    .bindTips(this.flip ? '显示或收起属性面板' : '显示或收起图层与 Cell 面板')
+    .bindTips(this.flip ? '显示或收起右侧属性面板' : '显示或收起左侧图层与 Cell 面板')
     .onClick(() => this.activateAction())
   }
 }
@@ -664,26 +853,26 @@ struct GhostCommand {
   build() {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 4 }) {
-        WorkbenchIcon({ name: this.icon, iconSize: 18, color: COLORS.ink })
+        WorkbenchIcon({ name: this.icon, iconSize: 16, color: COLORS.ink })
         if (this.showLabel) {
           Text(this.label)
-            .fontSize(UI.fontBody)
+            .fontSize(12)
             .fontColor(COLORS.ink)
             .fontWeight(FontWeight.Medium)
         }
       }
       .alignItems(VerticalAlign.Center)
     }
-    .height(UI.compactControlHeight)
-    .constraintSize({ minWidth: UI.compactControlHeight })
-    .padding({ left: 9, right: 9 })
+    .height(32)
+    .constraintSize({ minWidth: 32 })
+    .padding({ left: 7, right: 7 })
     .borderRadius(UI.controlRadius)
-    .backgroundColor(Color.Transparent)
+    .backgroundColor(COLORS.surfaceMuted)
+    .border({ width: 0.8, color: COLORS.border })
     .attributeModifier(hongTuThemeState.luminousPointLightModifier())
     .stateEffect(true)
     .hoverEffect(HoverEffect.Highlight)
-    .focusable(true)
-    .focusBox({ strokeColor: ColorMetrics.resourceColor(COLORS.primary), strokeWidth: LengthMetrics.vp(2) })
+    .focusable(false)
     .accessibilityText(this.label)
     .bindTips(this.label)
     .onClick(() => this.activateAction())

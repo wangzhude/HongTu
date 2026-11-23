@@ -783,16 +783,16 @@ export struct DrawingToolbar {
     Stack({ alignContent: Alignment.BottomEnd }) {
       Button({ type: ButtonType.Normal }) {
         if (this.vertical) {
-          Shape() {
-            Path().commands(this.activeCurveCommands()).fill(Color.Transparent)
-              .stroke(this.isCurveActive() ? COLORS.primary : COLORS.ink).strokeWidth('1.6px')
-          }.width(21).height(21).viewPort({ x: '0px', y: '0px', width: '24px', height: '24px' })
+          SymbolGlyph($r('sys.symbol.circle_lefthalf_inset_filled'))
+            .fontSize(19)
+            .fontColor([this.isCurveActive() ? COLORS.primary : COLORS.ink])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
         } else {
           Row({ space: 4 }) {
-            Shape() {
-              Path().commands(this.activeCurveCommands()).fill(Color.Transparent)
-                .stroke(this.isCurveActive() ? COLORS.primary : COLORS.ink).strokeWidth('1.6px')
-            }.width(16).height(16).viewPort({ x: '0px', y: '0px', width: '24px', height: '24px' })
+            SymbolGlyph($r('sys.symbol.circle_lefthalf_inset_filled'))
+              .fontSize(15)
+              .fontColor([this.isCurveActive() ? COLORS.primary : COLORS.ink])
+              .renderingStrategy(SymbolRenderingStrategy.SINGLE)
             Text(this.activeCurveButtonLabel())
               .fontSize(12)
               .fontColor(this.isCurveActive() ? COLORS.primary : COLORS.ink)
@@ -973,8 +973,35 @@ export struct DrawingToolbar {
           ForEach(DRAWING_TOOLS, (item: DrawingToolDef) => {
             this.renderToolItem(item)
           }, (item: DrawingToolDef) => item.id)
-          Row().width(26).height(1).backgroundColor(COLORS.border).margin({ top: 2, bottom: 2 })
+          Divider().width(26).color(COLORS.border).margin({ top: 2, bottom: 2 })
           this.curveToolItem()
+          Divider().width(26).color(COLORS.border).margin({ top: 2, bottom: 2 })
+          Button({ type: ButtonType.Normal }) {
+            WorkbenchIcon({ name: 'loupe', iconSize: 18, color: this.currentTool === ActiveTool.BoxZoom ? COLORS.primary : COLORS.ink })
+          }
+          .width(40).height(34).padding(0)
+          .backgroundColor(this.currentTool === ActiveTool.BoxZoom ? COLORS.primarySoft : Color.Transparent)
+          .borderRadius(UI.controlRadius).focusable(false)
+          .bindTips('拉框放大视口 (Z)')
+          .onClick(() => this.selectToolAction(ActiveTool.BoxZoom, '框选放大'))
+          Button({ type: ButtonType.Normal }) {
+            WorkbenchIcon({ name: 'fit', iconSize: 18, color: COLORS.ink })
+          }
+          .width(40).height(34).padding(0)
+          .backgroundColor(Color.Transparent)
+          .borderRadius(UI.controlRadius).focusable(false)
+          .bindTips('全图适配 (F)')
+          .onClick(() => this.fitAllAction())
+          if (this.measureStore.rulers.length > 0 || this.measureStore.active) {
+            Button({ type: ButtonType.Normal }) {
+              WorkbenchIcon({ name: 'delete', iconSize: 16, color: COLORS.danger })
+            }
+            .width(40).height(32).padding(0)
+            .backgroundColor(COLORS.dangerSoft)
+            .borderRadius(UI.controlRadius).focusable(false)
+            .bindTips('清空全部测量与标尺 (Shift+K)')
+            .onClick(() => { this.measureStore.clearAll(); })
+          }
         }
       }
       .scrollable(ScrollDirection.Vertical)
@@ -982,7 +1009,7 @@ export struct DrawingToolbar {
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
       .width(48)
-      .height(Math.min(378, Math.max(80, this.availableHeight)))
+      .constraintSize({ maxHeight: Math.max(120, this.availableHeight) })
       .padding(4)
       .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'regular', hongTuThemeState.elevation('md')))
     } else {

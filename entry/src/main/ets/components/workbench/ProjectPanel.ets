@@ -194,10 +194,14 @@ export struct ProjectPanel {
           }.utilitySection()
         }.width('100%').padding({ bottom: 4 })
       }.layoutWeight(1).width('100%').align(Alignment.Top).scrollBar(BarState.Auto).edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true }).clip(true)
-    }.padding(UI.panelPadding).width(this.panelWidth).height('85%').constraintSize({ maxHeight: 800, maxWidth: '94%' })
-      .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay')))
-      .clip(true)
-      .onKeyEvent((event: KeyEvent) => event.stopPropagation())
+    }
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .padding({ left: 18, right: 18, top: 8, bottom: 24 })
+    .backgroundColor(Color.Transparent)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onKeyEvent((event: KeyEvent) => event.stopPropagation())
   }
 }
 

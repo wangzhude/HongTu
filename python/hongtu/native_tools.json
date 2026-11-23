@@ -7161,6 +7161,613 @@
         "required": [],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "layers.create",
+      "title": "新建图层",
+      "category": "layers",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "datatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "englishName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "chineseName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "color": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 9
+          },
+          "selectAsActive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "layer",
+          "datatype"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.delete",
+      "title": "删除图层（可选同步删除该层图元）",
+      "category": "layers",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "datatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "deleteShapes": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "layer",
+          "datatype"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.delete_empty",
+      "title": "一键清理所有无图形空图层",
+      "category": "layers",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.clear",
+      "title": "清空指定图层上的几何图形（保留图层定义）",
+      "category": "layers",
+      "mode": "edit",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "datatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "currentCellOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "layer",
+          "datatype"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.rename",
+      "title": "重命名图层中英文名",
+      "category": "layers",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "datatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "englishName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "chineseName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "layer",
+          "datatype"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.reorder",
+      "title": "调整图层排列顺序",
+      "category": "layers",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "datatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "top",
+              "bottom"
+            ]
+          },
+          "targetIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4096
+          }
+        },
+        "required": [
+          "layer",
+          "datatype"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.copy_shapes",
+      "title": "复制源图层全部图形到目标图层",
+      "category": "layers",
+      "mode": "edit",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sourceLayer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "sourceDatatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "targetLayer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "targetDatatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "currentCellOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sourceLayer",
+          "sourceDatatype",
+          "targetLayer",
+          "targetDatatype"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.move_shapes",
+      "title": "迁移源图层全部图形到目标图层",
+      "category": "layers",
+      "mode": "edit",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sourceLayer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "sourceDatatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "targetLayer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "targetDatatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "currentCellOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sourceLayer",
+          "sourceDatatype",
+          "targetLayer",
+          "targetDatatype"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.batch_state",
+      "title": "批量切换图层显隐与锁定状态（全显/全隐/独显/全解锁）",
+      "category": "layers",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "show_all",
+              "hide_all",
+              "solo",
+              "unlock_all",
+              "lock_all"
+            ]
+          },
+          "layer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "datatype": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cell.exit_top",
+      "title": "退出子单元回到顶层 Cell",
+      "category": "hierarchy",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cell.exit_parent",
+      "title": "退出当前子单元回到上一级父 Cell",
+      "category": "hierarchy",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cell.set_top",
+      "title": "将指定 Cell 设为当前文档顶层 Cell",
+      "category": "hierarchy",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cellId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          }
+        },
+        "required": [
+          "cellId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cell.duplicate",
+      "title": "复制 Cell 定义及内部全部几何与子实例",
+      "category": "hierarchy",
+      "mode": "edit",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cellId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "newName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "cellId",
+          "newName"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cell.clear",
+      "title": "清空指定 Cell 内直接归属的全部图形",
+      "category": "hierarchy",
+      "mode": "edit",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cellId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          }
+        },
+        "required": [
+          "cellId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "instance.place_aref",
+      "title": "放置 GDSII AREF 二维行列阵列实例",
+      "category": "hierarchy",
+      "mode": "edit",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cellId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "x": {
+            "type": "number",
+            "minimum": -1000000000.0,
+            "maximum": 1000000000.0
+          },
+          "y": {
+            "type": "number",
+            "minimum": -1000000000.0,
+            "maximum": 1000000000.0
+          },
+          "cols": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "colStepX": {
+            "type": "number",
+            "minimum": -1000000000.0,
+            "maximum": 1000000000.0
+          },
+          "colStepY": {
+            "type": "number",
+            "minimum": -1000000000.0,
+            "maximum": 1000000000.0
+          },
+          "rowStepX": {
+            "type": "number",
+            "minimum": -1000000000.0,
+            "maximum": 1000000000.0
+          },
+          "rowStepY": {
+            "type": "number",
+            "minimum": -1000000000.0,
+            "maximum": 1000000000.0
+          },
+          "rotation": {
+            "type": "number",
+            "minimum": -360000.0,
+            "maximum": 360000.0
+          },
+          "mirror": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "magnification": {
+            "type": "number",
+            "minimum": 1e-09,
+            "maximum": 1000000.0
+          }
+        },
+        "required": [
+          "cellId",
+          "x",
+          "y",
+          "cols",
+          "rows",
+          "colStepX",
+          "rowStepY"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "selection.filter",
+      "title": "按图层/数据类型/图元种类精确筛选选中当前 Cell 图形",
+      "category": "edit",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 32767
+          },
+          "datatype": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 32767
+          },
+          "shapeType": {
+            "type": "string",
+            "enum": [
+              "all",
+              "rect",
+              "polygon",
+              "path",
+              "text",
+              "instance"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "selection.invert",
+      "title": "反选当前 Cell 内的图形",
+      "category": "edit",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "workspace.close",
+      "title": "关闭指定工作区标签页",
+      "category": "workspace",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "workspace.rename",
+      "title": "重命名当前版图文档标题与库名",
+      "category": "workspace",
+      "mode": "action",
+      "requiresLayout": true,
+      "owner": "Index",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "libName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }

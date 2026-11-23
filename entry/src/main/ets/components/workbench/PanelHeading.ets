@@ -1,9 +1,10 @@
 import { COLORS } from '../../common/constants';
 import { UI } from '../../common/UiTokens';
 import { hongTuThemeState, Radius } from '../../store/ThemeStore';
-import { WorkbenchIcon } from './WorkbenchIcon';
 
-/** Shared compact title, optional primary action, and system-styled circular close affordance for utility panels. */
+/**
+ * 统一原生半模态/面板透明玻璃头部（对齐 SheetGlassHeader 规范：透明背景、无冗余重分割线、原生 SymbolGlyph 关闭圆钮）
+ */
 @Component
 export struct PanelHeading {
   @Prop title: string = '';
@@ -24,7 +25,7 @@ export struct PanelHeading {
 
   build() {
     Row({ space: 10 }) {
-      Column({ space: this.hasSubtitle() ? 4 : 0 }) {
+      Column({ space: this.hasSubtitle() ? 3 : 0 }) {
         Text(this.title)
           .fontSize(UI.titleSize)
           .fontWeight(FontWeight.Bold)
@@ -35,7 +36,7 @@ export struct PanelHeading {
           Text(this.subtitle)
             .fontSize(UI.fontCaption)
             .fontColor(COLORS.muted)
-            .maxLines(2)
+            .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
       }
@@ -44,7 +45,7 @@ export struct PanelHeading {
 
       if (this.hasPrimaryAction()) {
         Button(this.primaryLabel, { type: ButtonType.Capsule })
-          .height(32)
+          .height(34)
           .padding({ left: 14, right: 14 })
           .fontSize(UI.fontCaption)
           .fontWeight(FontWeight.Medium)
@@ -61,25 +62,29 @@ export struct PanelHeading {
           })
       }
 
-      Button({ type: ButtonType.Circle }) {
-        WorkbenchIcon({ name: 'close', iconSize: 15, color: COLORS.ink })
+      if (this.canClose) {
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.xmark'))
+            .fontSize(15)
+            .fontColor([COLORS.ink])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+        }
+        .width(34)
+        .height(34)
+        .padding(0)
+        .borderRadius(Radius.pill)
+        .backgroundColor(COLORS.surfaceMuted)
+        .border({ width: 0.8, color: COLORS.border })
+        .hoverEffect(HoverEffect.Highlight)
+        .accessibilityText(`关闭${this.title}`)
+        .bindTips('关闭')
+        .onClick(() => this.closeAction())
       }
-      .width(34)
-      .height(34)
-      .padding(0)
-      .borderRadius(Radius.pill)
-      .backgroundColor(COLORS.surfaceMuted)
-      .border({ width: 1, color: COLORS.border })
-      .enabled(this.canClose)
-      .hoverEffect(HoverEffect.Highlight)
-      .accessibilityText(`关闭${this.title}`)
-      .bindTips('关闭')
-      .onClick(() => this.closeAction())
     }
     .width('100%')
-    .constraintSize({ minHeight: this.hasSubtitle() ? 46 : 38 })
-    .padding({ bottom: this.hasSubtitle() ? 10 : 8 })
-    .margin({ bottom: 2 })
-    .border({ width: { bottom: 0.75 }, color: COLORS.border })
+    .constraintSize({ minHeight: this.hasSubtitle() ? 46 : 40 })
+    .padding({ top: 4, bottom: 8 })
+    .backgroundColor(Color.Transparent)
+    .alignItems(VerticalAlign.Center)
   }
 }

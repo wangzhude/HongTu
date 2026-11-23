@@ -1,7 +1,9 @@
 /**
  * HongTu EDA - Scene Graph
  * Hierarchical cell/instance management with transform propagation.
- * Supports KLayout-style cell hierarchy: Cell → shapes + instances → child Cells.
+ * Supports KLayout-style cell hierarchy: Cell → shapes + instances → child Cells,
+ * persistent hierarchy index/subtree bounds caching, analytical AREF viewport clipping,
+ * and sub-pixel whole-instance / dense-array LOD proxy collapse.
  */
 #ifndef HONGTU_SCENE_GRAPH_H
 #define HONGTU_SCENE_GRAPH_H
@@ -9,12 +11,15 @@
 #include "spatial_index.h"
 #include "geometry_engine.h"
 #include "triangulator.h"
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <functional>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "layout_port.h"
-#include <unordered_map>
-#include <memory>
-#include <functional>
 
 namespace hongtu {
 
@@ -45,12 +50,6 @@ struct LayerKeyHash {
     }
 };
 
-// 元素/结构属性：GDSII PROPATTR/PROPVALUE 与 OASIS PROPERTY 的统一内存表示。
-//   attr  : GDSII 属性码（OASIS 一般属性恒 0）
-//   name  : OASIS 属性名（GDSII 为空）
-//   value : 面向 UI/查询的文本值
-// 空 vector = 无属性；std::vector 尺寸固定，故本结构不改变 SceneShape 的字段布局与大小，
-// DRC / 层级展开热路径只读 points/bbox，不触及属性。
 struct SceneProperty {
     int attr = 0;
     std::string name;
@@ -58,7 +57,6 @@ struct SceneProperty {
     uint8_t dtype = 6;
 };
 
-/** 按 GDSII 属性码查值；未找到返回 nullptr。 */
 inline const SceneProperty* findProperty(const std::vector<SceneProperty>& props, int attr) {
     for (const auto& p : props) {
         if (p.attr == attr) {
@@ -68,7 +66,6 @@ inline const SceneProperty* findProperty(const std::vector<SceneProperty>& props
     return nullptr;
 }
 
-/** 按 OASIS 属性名查值；未找到返回 nullptr。 */
 inline const SceneProperty* findProperty(const std::vector<SceneProperty>& props,
                                          const std::string& name) {
     for (const auto& p : props) {
@@ -85,7 +82,6 @@ struct SceneShape {
     ShapeType type;
     LayerKey layerKey;
     std::vector<Vec2> points;     // Geometry vertices (nm)
-    // 必须显式零初始化：reader/NAPI 只填 pathWidth，未初始化会把垃圾值当线宽用于轮廓化
     double pathWidth = 0.0;       // For PATH type (nm)
     int pathType = 0;             // 0=flush, 1=round, 2=extended
     double pathBeginExtension = 0.0;
@@ -113,7 +109,6 @@ struct SceneShape {
             box.maxX = std::max(box.maxX, p.x);
             box.maxY = std::max(box.maxY, p.y);
         }
-        // Expand for path width（起止延伸的斜 45° 路径最多多出 0.41w，按整宽保守）
         if (type == ShapeType::PATH && pathWidth > 0) {
             double hw = pathWidth * 0.5;
             box = box.expand(pathType == 4 ? hw + std::max(std::abs(pathBeginExtension), std::abs(pathEndExtension)) : (pathType == 0 ? hw : pathWidth));
@@ -122,16 +117,9 @@ struct SceneShape {
     }
 };
 
-/**
- * SceneShape → 测量/渲染用有效多边形（世界坐标 nm）：
- * RECT/BOX 的 2 点对角线展成 4 角；PATH 中心线按 pathWidth + pathType 轮廓化；
- * 其余（POLYGON 等）原样返回；退化图形返回空（调用方据此跳过）。
- *
- * DRC / 图像导出 / GL 条带共用此单一口径，禁止各自复制一份轮廓逻辑。
- */
 inline std::vector<Vec2> effectivePolygon(const SceneShape& shape) {
     if (shape.type == ShapeType::NODE) {
-        return {}; // Circuit metadata has coordinates but no filled geometry.
+        return {};
     }
     if (shape.type == ShapeType::PATH) {
         return Triangulator::pathOutline(shape.points, shape.pathWidth, shape.pathType,
@@ -151,8 +139,6 @@ inline std::vector<Vec2> effectivePolygon(const SceneShape& shape) {
     return shape.points;
 }
 
-/** Transform the centerline first for absolute-width PATHs: MAG changes positions,
- * but must not multiply negative GDS WIDTH. Explicit extensions still follow MAG. */
 inline std::vector<Vec2> effectivePolygonTransformed(const SceneShape& shape, const GeometryEngine::Transform2D& xf) {
     if (shape.type == ShapeType::PATH && shape.pathWidthAbsolute) {
         const double scale = std::sqrt(std::abs(xf.determinant()));
@@ -179,12 +165,6 @@ struct InstanceTransform {
 
     bool isArray() const { return arrayCols > 0 && arrayRows > 0; }
 
-    /**
-     * GDSII / KLayout-compatible instance matrix.
-     * Application order on a local point: Mag → MirrorX → Rotation → Translation.
-     * With multiply(A,B) meaning "apply B then A", we build:
-     *   T * R * M * S
-     */
     GeometryEngine::Transform2D toMatrix() const {
         GeometryEngine::Transform2D mat = GeometryEngine::Transform2D::identity();
         if (magnification != 1.0) {
@@ -227,31 +207,20 @@ struct Cell {
     std::string pcellName;
     std::vector<std::pair<std::string, std::string>> pcellParams;
 
-    /// 结构级属性（GDSII 结构 PROPATTR/PROPVALUE / OASIS 一般属性）。
-    /// 新增字段，追加在末尾：既有聚合初始化（如 Cell{0,"TOP",{},{},...}）仍然合法。
     std::vector<SceneProperty> properties;
     std::vector<std::string> contextRecords;
 };
 
-/**
- * 世界(nm) → 图像像素 的统一映射。
- *
- * 与 ArkTS LayoutCanvasView.worldToScreenX/worldToScreenY 严格同口径：
- *   pixelX=(worldX+viewOffsetX)*z；pixelY=(viewOffsetY-worldY)*z。
- * 世界 Y 向上，图像像素行号向下；SVG/PNG 在此统一翻转显示 Y。
- * GL 顶点仍是原始世界坐标，ArkTS 相机将它映射到同样 Y 向上的 NDC。
- */
 struct ViewProjection {
-    double originX = 0;   // 图像第 0 列/行对应的世界坐标（= region.minX / maxY）
+    double originX = 0;
     double originY = 0;
-    double scale = 1;     // 像素 / nm
+    double scale = 1;
 
     double toPixelX(double x) const { return (x - originX) * scale; }
     double toPixelY(double y) const { return (originY - y) * scale; }
     double toWorldX(double px) const { return originX + px / scale; }
     double toWorldY(double py) const { return originY - py / scale; }
 
-    /** 等比铺满：把 region 放进 outW×outH 画布（世界 Y 向上，与画布一致） */
     static ViewProjection fitting(const BBox& region, double outW, double outH) {
         ViewProjection p;
         double designW = region.maxX - region.minX;
@@ -285,49 +254,37 @@ struct LayerProperties {
                        transparency(0.5f), visible(true), selectable(true), valid(true) {}
 };
 
-/**
- * Layout: the complete design database.
- * Owns all shapes, instances, cells, and layer properties.
- * Provides spatial indexing for fast queries.
- */
 class Layout {
 public:
     Layout() : nextShapeId_(1), nextInstanceId_(1), nextCellId_(1), topCellId_(-1) {}
     enum class SpatialIndexBuild { Immediate, Deferred };
-
-    // ==================== Data Access ====================
 
     std::vector<SceneShape> shapes;
     std::vector<CellInstance> instances;
     std::vector<Cell> cells;
     std::unordered_map<LayerKey, LayerProperties, LayerKeyHash> layerProps;
 
-    // Metadata
     std::string libName;
     std::vector<std::string> layoutContextRecords;
     std::vector<SceneProperty> libProperties;
     std::vector<std::string> cellKeys;
     std::vector<LayoutPort> ports;
     std::vector<LayoutCrossSection> crossSections;
-    // 单位元数据必须有确定初值：未解析到 UNITS 的 Layout 曾被读到栈垃圾
-    double dbUnit = 1e-9;       // Database unit in meters (e.g., 1e-9 = 1nm)
-    double userUnit = 1e-6;     // User unit in meters (e.g., 1e-6 = 1um)
+    double dbUnit = 1e-9;
+    double userUnit = 1e-6;
     int64_t modTime = 0;
     int64_t accessTime = 0;
 
     int topCellId() const { return topCellId_; }
-    void setTopCell(int id) { topCellId_ = id; }
-
-    // ==================== Shape Management ====================
+    void setTopCell(int id) { topCellId_ = id; ++hierarchyMutationEpoch_; }
 
     int64_t addShape(const SceneShape& shape, SpatialIndexBuild spatialIndexBuild = SpatialIndexBuild::Immediate) {
         int64_t id = shape.id > 0 ? shape.id : nextShapeId_++;
         SceneShape s = shape;
         s.id = id;
         shapes.push_back(s);
+        ++hierarchyMutationEpoch_;
 
-        // Readonly scene construction retains all geometry but does not need a
-        // spatial tree. Actual queries rebuild it through ensureSpatialIndex.
         if (spatialIndexBuild == SpatialIndexBuild::Deferred) {
             spatialDirty_ = true;
         } else {
@@ -335,12 +292,10 @@ public:
             if (box.valid()) spatialIndex_.insert((int)shapes.size() - 1, box);
         }
 
-        // Update cell membership by cell.id（非 vector 下标）
         if (Cell* owner = findCell(s.ownerCellId)) {
             owner->shapeIds.push_back(id);
         }
 
-        // Register layer
         registerLayer(s.layerKey);
 
         if (id >= nextShapeId_) nextShapeId_ = id + 1;
@@ -351,29 +306,27 @@ public:
         for (int i = 0; i < (int)shapes.size(); i++) {
             if (shapes[i].id == id) {
                 shapes.erase(shapes.begin() + i);
-                // 索引以 vector 下标为 key，erase 之后其后的 id 全部左移，
-                // 只能整体重建。但逐次重建会让 N 次删除退化成 O(N²)（批量删除、
-                // 宏回放尤其明显）——这里只标脏，下一次查询前惰性重建一次。
                 spatialDirty_ = true;
+                ++hierarchyMutationEpoch_;
                 return;
             }
         }
     }
 
     SceneShape* findShape(int64_t id) {
+        ++hierarchyMutationEpoch_;
         for (auto& s : shapes) {
             if (s.id == id) return &s;
         }
         return nullptr;
     }
 
-    // ==================== Instance Management ====================
-
     int64_t addInstance(const CellInstance& inst) {
         int64_t id = inst.id > 0 ? inst.id : nextInstanceId_++;
         CellInstance ci = inst;
         ci.id = id;
         instances.push_back(ci);
+        ++hierarchyMutationEpoch_;
 
         if (Cell* owner = findCell(ci.ownerCellId)) {
             owner->instanceIds.push_back(id);
@@ -384,13 +337,12 @@ public:
     }
 
     CellInstance* findInstance(int64_t id) {
+        ++hierarchyMutationEpoch_;
         for (auto& inst : instances) {
             if (inst.id == id) return &inst;
         }
         return nullptr;
     }
-
-    // ==================== Cell Management ====================
 
     int addCell(const std::string& name) {
         int id = nextCellId_++;
@@ -398,13 +350,10 @@ public:
         cell.id = id;
         cell.name = name;
         cells.push_back(cell);
+        ++hierarchyMutationEpoch_;
         return id;
     }
 
-    /**
-     * 按稳定 id 添加 Cell（与 GDS reader 的 cells[] 下标对齐）。
-     * 若 id 已存在则更新名称并返回该 id；并保证 nextCellId_ > id。
-     */
     int addCellWithId(int id, const std::string& name) {
         if (id < 0) {
             return addCell(name);
@@ -415,6 +364,7 @@ public:
                 if (id >= nextCellId_) {
                     nextCellId_ = id + 1;
                 }
+                ++hierarchyMutationEpoch_;
                 return id;
             }
         }
@@ -425,6 +375,7 @@ public:
         if (id >= nextCellId_) {
             nextCellId_ = id + 1;
         }
+        ++hierarchyMutationEpoch_;
         return id;
     }
 
@@ -449,10 +400,7 @@ public:
         return nullptr;
     }
 
-    // ==================== Top Cell Resolution ====================
-
     void resolveTopCell() {
-        // Top cell = cell not referenced by any instance
         std::vector<bool> referenced(cells.size(), false);
         for (const auto& inst : instances) {
             for (int i = 0; i < (int)cells.size(); i++) {
@@ -463,7 +411,6 @@ public:
             }
         }
 
-        // Find unreferenced cells
         std::vector<int> topCandidates;
         for (int i = 0; i < (int)cells.size(); i++) {
             if (!referenced[i]) {
@@ -472,7 +419,6 @@ public:
             }
         }
 
-        // If multiple candidates, pick the one with most shapes
         if (!topCandidates.empty()) {
             int best = topCandidates[0];
             size_t maxShapes = 0;
@@ -485,24 +431,22 @@ public:
             }
             topCellId_ = cells[best].id;
         }
+        ++hierarchyMutationEpoch_;
     }
-
-    // ==================== Spatial Queries ====================
 
     std::vector<int> queryPoint(double x, double y) const {
         ensureSpatialIndex();
         return spatialIndex_.queryPoint(x, y);
     }
 
-    /** Non-query observation; an empty tree can also be ready after rebuild. */
     bool spatialIndexReady() const { return !spatialDirty_; }
 
-    /** 索引标脏时先重建一次（仅在实际查询时），保证删除风暴不退化为 O(N²) */
     void ensureSpatialIndex() const {
         if (spatialDirty_) {
             rebuildSpatialIndex();
         }
     }
+
     std::vector<int> queryRange(const BBox& box) const {
         ensureSpatialIndex();
         return spatialIndex_.queryRange(box);
@@ -513,21 +457,6 @@ public:
         return spatialIndex_.queryNearest(x, y, k);
     }
 
-    // ==================== Hierarchy Traversal ====================
-
-    /**
-     * Flatten hierarchy: collect all shapes visible from a cell,
-     * applying instance transforms recursively.
-     *
-     * Depth model (aligned with KLayout hierarchy levels / UI slider):
-     *   hierarchyDepth=1 → only local geometry of cellId (no child expansion)
-     *   hierarchyDepth=2 → local + one level of referenced cell geometry
-     *   hierarchyDepth=N → recurse N-1 levels
-     *
-     * @param cellId Starting cell
-     * @param hierarchyDepth UI depth 1..N (-1 = unlimited)
-     * @param callback Called for each non-instance shape with its accumulated transform
-     */
     struct HierarchyTraversalStats {
         uint64_t visitedCells = 0;
         uint64_t prunedCells = 0;
@@ -535,34 +464,38 @@ public:
         uint64_t emittedShapes = 0;
         uint64_t candidateInstances = 0;
         uint64_t prunedInstanceGroups = 0;
+        uint64_t collapsedSubpixelInstances = 0;
     };
+
+    void invalidateHierarchyCache() const {
+        cachedHierarchyValid_ = false;
+    }
 
     void flattenHierarchy(int cellId, int hierarchyDepth,
                          std::function<void(const SceneShape&, const GeometryEngine::Transform2D&)> callback,
                          const BBox* viewport = nullptr, HierarchyTraversalStats* stats = nullptr,
                          std::function<void()> checkpoint = nullptr,
-                         const std::function<void(const BBox&)>* stoppedInstanceBoxCallback = nullptr) const {
-        // Convert UI depth to max child recursion depth
+                         const std::function<void(const BBox&)>* stoppedInstanceBoxCallback = nullptr,
+                         double subpixelInstanceSpanNm = 0.0,
+                         const std::function<void(int, const BBox&)>* subpixelInstanceCallback = nullptr) const {
         const int maxRecursion = hierarchyDepth < 0 ? -1 : std::max(0, hierarchyDepth - 1);
-        // Build a traversal-local owner index: public vectors can be changed directly,
-        // so retaining a cache across edits would risk stale geometry/ownership.
-        HierarchyTraversalContext context;
-        context.checkpoint = std::move(checkpoint);
-        context.viewport = viewport && finiteBox(*viewport) ? viewport : nullptr;
-        context.stats = stats;
-        context.stoppedInstanceBoxCallback = stoppedInstanceBoxCallback;
+        ensureHierarchyCache(checkpoint);
+        HierarchyTraversalContext context{
+            std::move(checkpoint),
+            cachedOwners_,
+            cachedBounds_,
+            viewport && finiteBox(*viewport) ? viewport : nullptr,
+            stats,
+            stoppedInstanceBoxCallback,
+            subpixelInstanceSpanNm,
+            subpixelInstanceCallback
+        };
         if (stats) *stats = {};
-        for (const auto& shape : shapes) { if (context.checkpoint) context.checkpoint(); context.owners[shape.ownerCellId].shapes.push_back(&shape); }
-        for (const auto& instance : instances) { if (context.checkpoint) context.checkpoint(); context.owners[instance.ownerCellId].instances.push_back(&instance); }
-        if (context.viewport || stoppedInstanceBoxCallback != nullptr) subtreeBounds(cellId, context);
         std::vector<int> ancestors;
         flattenRecursive(cellId, GeometryEngine::Transform2D::identity(), maxRecursion, 0,
                          ancestors, callback, context);
     }
 
-    /**
-     * Get all shapes in a cell (non-recursive, only direct ownership).
-     */
     std::vector<const SceneShape*> getCellShapes(int cellId) const {
         std::vector<const SceneShape*> result;
         for (const auto& s : shapes) {
@@ -573,9 +506,6 @@ public:
         return result;
     }
 
-    /**
-     * Get all instances in a cell.
-     */
     std::vector<const CellInstance*> getCellInstances(int cellId) const {
         std::vector<const CellInstance*> result;
         for (const auto& inst : instances) {
@@ -585,8 +515,6 @@ public:
         }
         return result;
     }
-
-    // ==================== Layer Management ====================
 
     void registerLayer(const LayerKey& key) {
         if (layerProps.find(key) == layerProps.end()) {
@@ -609,8 +537,6 @@ public:
         });
         return keys;
     }
-
-    // ==================== Statistics ====================
 
     struct Stats {
         size_t totalShapes = 0;
@@ -637,10 +563,7 @@ public:
         return s;
     }
 
-    // ==================== Bulk Operations ====================
-
     void rebuildSpatialIndex() const {
-        // A failed lazy build must remain dirty so the next query can retry.
         spatialDirty_ = true;
         spatialIndex_.clear();
         std::vector<std::pair<int, BBox>> items;
@@ -661,6 +584,10 @@ public:
         cells.clear();
         layerProps.clear();
         spatialIndex_.clear();
+        cachedOwners_.clear();
+        cachedBounds_.clear();
+        cachedHierarchyValid_ = false;
+        ++hierarchyMutationEpoch_;
         nextShapeId_ = 1;
         nextInstanceId_ = 1;
         nextCellId_ = 1;
@@ -669,14 +596,14 @@ public:
 
 private:
     mutable RTree<int> spatialIndex_;
-    mutable bool spatialDirty_ = true;   // 初始为空树，首次查询时建
+    mutable bool spatialDirty_ = true;
     int64_t nextShapeId_;
     int64_t nextInstanceId_;
     int nextCellId_;
     int topCellId_;
 
-    /// 单个 AREF 阵列展开的实例上限（与 gdsii_reader COLROW DoS 防护同值）
-    static constexpr int64_t kMaxArrayInstances = 1000000;
+    /// 单个 AREF 阵列展开的实例上限（与 gdsii_reader COLROW DoS 防护同值；开启亚像素折叠时整阵可直接 O(1) 折叠）
+    static constexpr int64_t kMaxArrayInstances = 10000000;
 
     struct HierarchyOwner {
         std::vector<const SceneShape*> shapes;
@@ -686,14 +613,27 @@ private:
         BBox box;
         bool known = true;
     };
+
+    mutable uint64_t hierarchyMutationEpoch_ = 1;
+    mutable bool cachedHierarchyValid_ = false;
+    mutable uint64_t cachedEpoch_ = 0;
+    mutable const SceneShape* cachedShapesData_ = nullptr;
+    mutable size_t cachedShapesSize_ = 0;
+    mutable const CellInstance* cachedInstancesData_ = nullptr;
+    mutable size_t cachedInstancesSize_ = 0;
+    mutable size_t cachedCellsSize_ = 0;
+    mutable std::unordered_map<int, HierarchyOwner> cachedOwners_;
+    mutable std::unordered_map<int, HierarchyBounds> cachedBounds_;
+
     struct HierarchyTraversalContext {
         std::function<void()> checkpoint;
-        std::unordered_map<int, HierarchyOwner> owners;
-        std::unordered_map<int, HierarchyBounds> bounds;
-        std::unordered_map<int, int> boundState;
+        const std::unordered_map<int, HierarchyOwner>& owners;
+        const std::unordered_map<int, HierarchyBounds>& bounds;
         const BBox* viewport = nullptr;
         HierarchyTraversalStats* stats = nullptr;
         const std::function<void(const BBox&)>* stoppedInstanceBoxCallback = nullptr;
+        double subpixelInstanceSpanNm = 0.0;
+        const std::function<void(int, const BBox&)>* subpixelInstanceCallback = nullptr;
     };
 
     static bool finiteBox(const BBox& box) {
@@ -714,8 +654,6 @@ private:
         return result;
     }
 
-    // Covers an entire AREF without expanding each member. Array vectors are in
-    // the parent coordinate system, independent of the referenced cell transform.
     static HierarchyBounds instanceBounds(const CellInstance& instance, const HierarchyBounds& child) {
         auto result = transformedBounds(child, instance.transform.toMatrix());
         if (!result.known || !result.box.valid() || !instance.transform.isArray()) return result;
@@ -732,20 +670,58 @@ private:
         return result;
     }
 
-    static HierarchyBounds subtreeBounds(int cellId, HierarchyTraversalContext& context) {
-        if (context.checkpoint) context.checkpoint();
-        if (context.boundState[cellId] == 2) return context.bounds[cellId];
-        if (context.boundState[cellId] == 1) return {BBox(), false}; // Cyclic graph: never use an incomplete bound.
-        context.boundState[cellId] = 1;
+    static HierarchyBounds computeSubtreeBounds(
+        int cellId,
+        const std::unordered_map<int, HierarchyOwner>& owners,
+        std::unordered_map<int, HierarchyBounds>& bounds,
+        std::unordered_map<int, int>& boundState,
+        const std::function<void()>& checkpoint) {
+        if (checkpoint) checkpoint();
+        auto stateIt = boundState.find(cellId);
+        if (stateIt != boundState.end()) {
+            if (stateIt->second == 2) return bounds[cellId];
+            if (stateIt->second == 1) return {BBox(), false};
+        }
+        boundState[cellId] = 1;
         HierarchyBounds result;
-        const auto owner = context.owners.find(cellId);
-        if (owner != context.owners.end()) {
+        const auto owner = owners.find(cellId);
+        if (owner != owners.end()) {
             for (const auto* shape : owner->second.shapes) {
-                if (context.checkpoint) context.checkpoint();
-                if (shape->type == ShapeType::INSTANCE) continue;
-                // Absolute GDS WIDTH is invariant under accumulated magnification.
-                // A local box is unsafe under shrinking parents; leave this branch uncullable.
+                if (checkpoint) checkpoint();
+                if (shape->type == ShapeType::INSTANCE || shape->type == ShapeType::NODE) continue;
                 if (shape->type == ShapeType::PATH && shape->pathWidthAbsolute) result.known = false;
+                if (shape->type == ShapeType::POLYGON && (shape->renderCacheFlags & 1u) != 0u) {
+                    if (shape->cachedRenderLocalBox.valid()) {
+                        result.box = result.box.unite(shape->cachedRenderLocalBox);
+                    }
+                    continue;
+                }
+                if ((shape->type == ShapeType::RECT || shape->type == ShapeType::BOX) && shape->points.size() == 2) {
+                    const double x0 = std::min(shape->points[0].x, shape->points[1].x);
+                    const double y0 = std::min(shape->points[0].y, shape->points[1].y);
+                    const double x1 = std::max(shape->points[0].x, shape->points[1].x);
+                    const double y1 = std::max(shape->points[0].y, shape->points[1].y);
+                    if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(x1) || !std::isfinite(y1)) {
+                        result.known = false;
+                    } else {
+                        result.box = result.box.unite(BBox(x0, y0, x1, y1));
+                    }
+                    continue;
+                }
+                if (shape->type == ShapeType::POLYGON) {
+                    BBox lb;
+                    bool polyFinite = true;
+                    for (const auto& p : shape->points) {
+                        if (!std::isfinite(p.x) || !std::isfinite(p.y)) { polyFinite = false; result.known = false; continue; }
+                        lb = lb.unite(BBox(p.x, p.y, p.x, p.y));
+                    }
+                    if (polyFinite) {
+                        shape->cachedRenderLocalBox = lb;
+                        shape->renderCacheFlags |= 1u;
+                    }
+                    if (lb.valid()) result.box = result.box.unite(lb);
+                    continue;
+                }
                 auto points = shape->type == ShapeType::PATH ? effectivePolygon(*shape) : shape->points;
                 for (const auto& p : points) {
                     if (!std::isfinite(p.x) || !std::isfinite(p.y)) { result.known = false; continue; }
@@ -753,16 +729,66 @@ private:
                 }
             }
             for (const auto* instance : owner->second.instances) {
-                if (context.checkpoint) context.checkpoint();
+                if (checkpoint) checkpoint();
                 if (instance->referencedCellId < 0) continue;
-                const auto child = instanceBounds(*instance, subtreeBounds(instance->referencedCellId, context));
+                const auto child = instanceBounds(*instance,
+                    computeSubtreeBounds(instance->referencedCellId, owners, bounds, boundState, checkpoint));
                 result.known = result.known && child.known;
                 result.box = result.box.unite(child.box);
             }
         }
-        context.bounds[cellId] = result;
-        context.boundState[cellId] = 2;
+        bounds[cellId] = result;
+        boundState[cellId] = 2;
         return result;
+    }
+
+    void ensureHierarchyCache(const std::function<void()>& checkpoint) const {
+        const SceneShape* sPtr = shapes.empty() ? nullptr : shapes.data();
+        const CellInstance* iPtr = instances.empty() ? nullptr : instances.data();
+        if (cachedHierarchyValid_ &&
+            cachedEpoch_ == hierarchyMutationEpoch_ &&
+            cachedShapesData_ == sPtr &&
+            cachedShapesSize_ == shapes.size() &&
+            cachedInstancesData_ == iPtr &&
+            cachedInstancesSize_ == instances.size() &&
+            cachedCellsSize_ == cells.size()) {
+            return;
+        }
+        cachedOwners_.clear();
+        cachedBounds_.clear();
+        cachedOwners_.reserve(cells.size() + 8);
+        cachedBounds_.reserve(cells.size() + 8);
+        for (const auto& shape : shapes) {
+            if (checkpoint) checkpoint();
+            cachedOwners_[shape.ownerCellId].shapes.push_back(&shape);
+        }
+        for (const auto& instance : instances) {
+            if (checkpoint) checkpoint();
+            cachedOwners_[instance.ownerCellId].instances.push_back(&instance);
+        }
+        std::unordered_map<int, int> boundState;
+        boundState.reserve(cells.size() + 8);
+        for (const auto& cell : cells) {
+            computeSubtreeBounds(cell.id, cachedOwners_, cachedBounds_, boundState, checkpoint);
+        }
+        for (const auto& kv : cachedOwners_) {
+            if (boundState.find(kv.first) == boundState.end()) {
+                computeSubtreeBounds(kv.first, cachedOwners_, cachedBounds_, boundState, checkpoint);
+            }
+        }
+        cachedEpoch_ = hierarchyMutationEpoch_;
+        cachedShapesData_ = sPtr;
+        cachedShapesSize_ = shapes.size();
+        cachedInstancesData_ = iPtr;
+        cachedInstancesSize_ = instances.size();
+        cachedCellsSize_ = cells.size();
+        cachedHierarchyValid_ = true;
+    }
+
+    static HierarchyBounds lookupBounds(int cellId, const HierarchyTraversalContext& context) {
+        const auto it = context.bounds.find(cellId);
+        if (it != context.bounds.end()) return it->second;
+        return {BBox(), true};
     }
 
     static bool outsideViewport(const HierarchyBounds& bound, const GeometryEngine::Transform2D& transform,
@@ -773,8 +799,69 @@ private:
         if (!world.known || !finiteBox(world.box)) return false;
         const double magnitude = std::max({1.0, std::abs(world.box.minX), std::abs(world.box.maxX),
             std::abs(world.box.minY), std::abs(world.box.maxY)});
-        // Guard floating point rotation at touching boundaries. Over-inclusion is safe.
         return !world.box.expand(1e-7 + magnitude * 1e-12).intersects(viewport);
+    }
+
+    /**
+     * Analytically clip AREF [0..cols-1] x [0..rows-1] indices against the world viewport
+     * by inverting the 2D lattice basis in world space. Avoids O(rows * cols) loops when
+     * zoomed into a small region of a million-element photonic crystal or memory array.
+     */
+    static bool clipArrayIndexRange(const CellInstance& inst,
+                                    const HierarchyBounds& childBound,
+                                    const GeometryEngine::Transform2D& parentTransform,
+                                    const BBox& viewport,
+                                    int cols, int rows,
+                                    int& outColMin, int& outColMax,
+                                    int& outRowMin, int& outRowMax) {
+        outColMin = 0; outColMax = cols - 1;
+        outRowMin = 0; outRowMax = rows - 1;
+        if (!childBound.known || !childBound.box.valid()) return true;
+        const auto baseWorld = transformedBounds(childBound, parentTransform.multiply(inst.transform.toMatrix()));
+        if (!baseWorld.known || !finiteBox(baseWorld.box)) return true;
+
+        // Column and row step vectors transformed into world space (linear part only).
+        const Vec2 originWorld = parentTransform.apply({0.0, 0.0});
+        const Vec2 colEndWorld = parentTransform.apply({inst.transform.arrayPitchX, inst.transform.arrayColStepY});
+        const Vec2 rowEndWorld = parentTransform.apply({inst.transform.arrayRowStepX, inst.transform.arrayPitchY});
+        const double ux = colEndWorld.x - originWorld.x;
+        const double uy = colEndWorld.y - originWorld.y;
+        const double vx = rowEndWorld.x - originWorld.x;
+        const double vy = rowEndWorld.y - originWorld.y;
+        if (!std::isfinite(ux) || !std::isfinite(uy) || !std::isfinite(vx) || !std::isfinite(vy)) return true;
+
+        // Target displacement Delta = col * U + row * V must bring baseWorld into viewport:
+        // viewport.min - baseWorld.max <= Delta <= viewport.max - baseWorld.min
+        const double dxMin = viewport.minX - baseWorld.box.maxX;
+        const double dxMax = viewport.maxX - baseWorld.box.minX;
+        const double dyMin = viewport.minY - baseWorld.box.maxY;
+        const double dyMax = viewport.maxY - baseWorld.box.minY;
+        if (!std::isfinite(dxMin) || !std::isfinite(dxMax) || !std::isfinite(dyMin) || !std::isfinite(dyMax)) return true;
+
+        const double det = ux * vy - uy * vx;
+        const double normSq = (ux * ux + uy * uy) * (vx * vx + vy * vy);
+        if (normSq > 0.0 && det * det > 1e-18 * normSq) {
+            double cMin = std::numeric_limits<double>::infinity();
+            double cMax = -std::numeric_limits<double>::infinity();
+            double rMin = std::numeric_limits<double>::infinity();
+            double rMax = -std::numeric_limits<double>::infinity();
+            for (const Vec2 d : std::array<Vec2, 4>{{{dxMin, dyMin}, {dxMax, dyMin}, {dxMax, dyMax}, {dxMin, dyMax}}}) {
+                const double c = (d.x * vy - d.y * vx) / det;
+                const double r = (ux * d.y - uy * d.x) / det;
+                if (!std::isfinite(c) || !std::isfinite(r)) return true;
+                cMin = std::min(cMin, c); cMax = std::max(cMax, c);
+                rMin = std::min(rMin, r); rMax = std::max(rMax, r);
+            }
+            const int loC = static_cast<int>(std::max<double>(0.0, std::floor(cMin - 1e-6)));
+            const int hiC = static_cast<int>(std::min<double>(static_cast<double>(cols - 1), std::ceil(cMax + 1e-6)));
+            const int loR = static_cast<int>(std::max<double>(0.0, std::floor(rMin - 1e-6)));
+            const int hiR = static_cast<int>(std::min<double>(static_cast<double>(rows - 1), std::ceil(rMax + 1e-6)));
+            if (loC > hiC || loR > hiR) return false;
+            outColMin = loC; outColMax = hiC;
+            outRowMin = loR; outRowMax = hiR;
+            return true;
+        }
+        return true;
     }
 
     void flattenRecursive(int cellId, const GeometryEngine::Transform2D& parentTransform,
@@ -782,13 +869,12 @@ private:
                          std::function<void(const SceneShape&, const GeometryEngine::Transform2D&)>& callback,
                          HierarchyTraversalContext& context) const {
         if (context.checkpoint) context.checkpoint();
-        // 循环引用（A→B→A / A→A）必须剪枝，否则 maxRecursion<0 时无限递归栈溢出；
-        // 与 ArkTS HierarchyExpandService 的 visiting 栈同语义。
         for (int c : ancestors) {
             if (c == cellId) return;
         }
         if (context.stats) ++context.stats->visitedCells;
-        if (context.viewport && outsideViewport(subtreeBounds(cellId, context), parentTransform, *context.viewport)) {
+        const auto cellBound = lookupBounds(cellId, context);
+        if (context.viewport && outsideViewport(cellBound, parentTransform, *context.viewport)) {
             if (context.stats) ++context.stats->prunedCells;
             return;
         }
@@ -796,7 +882,6 @@ private:
         if (owner == context.owners.end()) return;
         ancestors.push_back(cellId);
 
-        // Emit local geometry at every visited level (currentDepth is child-recursion level)
         for (const auto* shape : owner->second.shapes) {
             if (context.checkpoint) context.checkpoint();
             if (context.stats) ++context.stats->candidateShapes;
@@ -806,29 +891,33 @@ private:
             }
         }
 
-        // Descend into instances only while remaining recursion budget allows
         if (maxRecursion >= 0 && currentDepth >= maxRecursion) {
             if (context.stoppedInstanceBoxCallback != nullptr) {
                 for (const auto* instance : owner->second.instances) {
                     if (context.checkpoint) context.checkpoint();
                     const auto& inst = *instance;
                     if (inst.referencedCellId < 0) continue;
-                    const auto childBound = subtreeBounds(inst.referencedCellId, context);
+                    const auto childBound = lookupBounds(inst.referencedCellId, context);
                     if (!childBound.known || !childBound.box.valid()) continue;
                     if (context.viewport && outsideViewport(instanceBounds(inst, childBound), parentTransform, *context.viewport)) continue;
                     if (inst.transform.isArray()) {
                         const int cols = std::max(1, inst.transform.arrayCols);
                         const int rows = std::max(1, inst.transform.arrayRows);
-                        const int64_t product = static_cast<int64_t>(cols) * rows;
-                        if (product > 4096) {
+                        int colMin = 0, colMax = cols - 1, rowMin = 0, rowMax = rows - 1;
+                        if (context.viewport && !clipArrayIndexRange(inst, childBound, parentTransform, *context.viewport,
+                                                                     cols, rows, colMin, colMax, rowMin, rowMax)) {
+                            continue;
+                        }
+                        const int64_t visibleCount = static_cast<int64_t>(colMax - colMin + 1) * (rowMax - rowMin + 1);
+                        if (visibleCount > 4096) {
                             const auto groupWorld = transformedBounds(instanceBounds(inst, childBound), parentTransform);
                             if (groupWorld.known && finiteBox(groupWorld.box)) {
                                 (*context.stoppedInstanceBoxCallback)(groupWorld.box);
                             }
                             continue;
                         }
-                        for (int row = 0; row < rows; row++) {
-                            for (int col = 0; col < cols; col++) {
+                        for (int row = rowMin; row <= rowMax; row++) {
+                            for (int col = colMin; col <= colMax; col++) {
                                 if (context.checkpoint) context.checkpoint();
                                 InstanceTransform elem = inst.transform;
                                 elem.x += col * inst.transform.arrayPitchX + row * inst.transform.arrayRowStepX;
@@ -861,39 +950,120 @@ private:
             const auto& inst = *instance;
             if (context.stats) ++context.stats->candidateInstances;
             if (inst.referencedCellId < 0) continue;
-            if (context.viewport && outsideViewport(instanceBounds(inst, subtreeBounds(inst.referencedCellId, context)),
-                                                    parentTransform, *context.viewport)) {
+            const auto childBound = lookupBounds(inst.referencedCellId, context);
+            const auto groupLocalBound = instanceBounds(inst, childBound);
+            if (context.viewport && outsideViewport(groupLocalBound, parentTransform, *context.viewport)) {
                 if (context.stats) ++context.stats->prunedInstanceGroups;
                 continue;
             }
 
-            // parent * instance: apply instance first, then parent
             auto instTransform = parentTransform.multiply(inst.transform.toMatrix());
+            const bool canCollapseSubpixel = context.subpixelInstanceCallback != nullptr &&
+                context.subpixelInstanceSpanNm > 0.0 && childBound.known && childBound.box.valid();
 
             if (inst.transform.isArray()) {
-                // DoS 防护：与 gdsii_reader COLROW 同一硬上限
                 const int cols = std::max(1, inst.transform.arrayCols);
                 const int rows = std::max(1, inst.transform.arrayRows);
-                const int64_t product = static_cast<int64_t>(cols) * rows;
-                const int clampedRows = product > kMaxArrayInstances
-                    ? static_cast<int>(std::max<int64_t>(1, kMaxArrayInstances / cols)) : rows;
-                for (int row = 0; row < clampedRows; row++) {
-                    for (int col = 0; col < cols; col++) {
+                int colMin = 0, colMax = cols - 1, rowMin = 0, rowMax = rows - 1;
+                if (context.viewport && !clipArrayIndexRange(inst, childBound, parentTransform, *context.viewport,
+                                                             cols, rows, colMin, colMax, rowMin, rowMax)) {
+                    if (context.stats) ++context.stats->prunedInstanceGroups;
+                    continue;
+                }
+
+                // O(1) Sub-pixel Dense Lattice Collapse: when both array pitch vectors and unit-cell
+                // bounding box project below a pixel in world space (e.g. 2000x2000 photonic crystal
+                // lattice or memory array at full-chip zoom), collapse the visible slice into ONE solid
+                // proxy rectangle without looping millions of elements!
+                if (canCollapseSubpixel) {
+                    const auto elemBaseWorld = transformedBounds(childBound, instTransform);
+                    const Vec2 oW = parentTransform.apply({0.0, 0.0});
+                    const Vec2 cW = parentTransform.apply({inst.transform.arrayPitchX, inst.transform.arrayColStepY});
+                    const Vec2 rW = parentTransform.apply({inst.transform.arrayRowStepX, inst.transform.arrayPitchY});
+                    const double colStepSpan = std::hypot(cW.x - oW.x, cW.y - oW.y);
+                    const double rowStepSpan = std::hypot(rW.x - oW.x, rW.y - oW.y);
+                    const double unitSpan = elemBaseWorld.known && finiteBox(elemBaseWorld.box)
+                        ? std::max(elemBaseWorld.box.maxX - elemBaseWorld.box.minX,
+                                   elemBaseWorld.box.maxY - elemBaseWorld.box.minY)
+                        : std::numeric_limits<double>::infinity();
+                    if (unitSpan <= context.subpixelInstanceSpanNm &&
+                        colStepSpan <= context.subpixelInstanceSpanNm &&
+                        rowStepSpan <= context.subpixelInstanceSpanNm) {
+                        BBox sliceWorld;
+                        const double ux = cW.x - oW.x, uy = cW.y - oW.y;
+                        const double vx = rW.x - oW.x, vy = rW.y - oW.y;
+                        for (const int cc : {colMin, colMax}) {
+                            for (const int rr : {rowMin, rowMax}) {
+                                const double ox = cc * ux + rr * vx;
+                                const double oy = cc * uy + rr * vy;
+                                sliceWorld = sliceWorld.unite(BBox(
+                                    elemBaseWorld.box.minX + ox, elemBaseWorld.box.minY + oy,
+                                    elemBaseWorld.box.maxX + ox, elemBaseWorld.box.maxY + oy));
+                            }
+                        }
+                        if (context.viewport && sliceWorld.valid()) {
+                            sliceWorld.minX = std::max(sliceWorld.minX, context.viewport->minX);
+                            sliceWorld.minY = std::max(sliceWorld.minY, context.viewport->minY);
+                            sliceWorld.maxX = std::min(sliceWorld.maxX, context.viewport->maxX);
+                            sliceWorld.maxY = std::min(sliceWorld.maxY, context.viewport->maxY);
+                        }
+                        if (finiteBox(sliceWorld)) {
+                            (*context.subpixelInstanceCallback)(inst.referencedCellId, sliceWorld);
+                            if (context.stats) {
+                                context.stats->collapsedSubpixelInstances +=
+                                    static_cast<uint64_t>(colMax - colMin + 1) * (rowMax - rowMin + 1);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                const int spanCols = colMax - colMin + 1;
+                const int spanRows = rowMax - rowMin + 1;
+                const int64_t visibleProduct = static_cast<int64_t>(spanCols) * spanRows;
+                const int clampedRowMax = visibleProduct > kMaxArrayInstances
+                    ? rowMin + static_cast<int>(std::max<int64_t>(1, kMaxArrayInstances / std::max(1, spanCols))) - 1
+                    : rowMax;
+
+                for (int row = rowMin; row <= clampedRowMax; row++) {
+                    for (int col = colMin; col <= colMax; col++) {
                         if (context.checkpoint) context.checkpoint();
-                        // 阵列步长在**父坐标系**中平移（GDSII AREF DX/DY 不随实例
-                        // 旋转/镜像/放大）：改写 origin 后复用同一 toMatrix() 合成，
-                        // 保证与单层 SREF 完全同序（mag→mirrorX→rot→trans）。
                         InstanceTransform elem = inst.transform;
                         elem.x += col * inst.transform.arrayPitchX + row * inst.transform.arrayRowStepX;
                         elem.y += col * inst.transform.arrayColStepY + row * inst.transform.arrayPitchY;
-                        elem.arrayCols = 0;      // 本元素已展开，禁止递归再走阵列分支
+                        elem.arrayCols = 0;
                         elem.arrayRows = 0;
                         auto elemTransform = parentTransform.multiply(elem.toMatrix());
+                        if (canCollapseSubpixel) {
+                            const auto elemWorld = transformedBounds(childBound, elemTransform);
+                            if (elemWorld.known && finiteBox(elemWorld.box)) {
+                                if (context.viewport && !elemWorld.box.intersects(*context.viewport)) continue;
+                                const double span = std::max(elemWorld.box.maxX - elemWorld.box.minX,
+                                                             elemWorld.box.maxY - elemWorld.box.minY);
+                                if (span <= context.subpixelInstanceSpanNm) {
+                                    (*context.subpixelInstanceCallback)(inst.referencedCellId, elemWorld.box);
+                                    if (context.stats) ++context.stats->collapsedSubpixelInstances;
+                                    continue;
+                                }
+                            }
+                        }
                         flattenRecursive(inst.referencedCellId, elemTransform,
                                        maxRecursion, currentDepth + 1, ancestors, callback, context);
                     }
                 }
             } else {
+                if (canCollapseSubpixel) {
+                    const auto instWorld = transformedBounds(childBound, instTransform);
+                    if (instWorld.known && finiteBox(instWorld.box)) {
+                        const double span = std::max(instWorld.box.maxX - instWorld.box.minX,
+                                                     instWorld.box.maxY - instWorld.box.minY);
+                        if (span <= context.subpixelInstanceSpanNm) {
+                            (*context.subpixelInstanceCallback)(inst.referencedCellId, instWorld.box);
+                            if (context.stats) ++context.stats->collapsedSubpixelInstances;
+                            continue;
+                        }
+                    }
+                }
                 flattenRecursive(inst.referencedCellId, instTransform,
                                maxRecursion, currentDepth + 1, ancestors, callback, context);
             }
@@ -903,7 +1073,6 @@ private:
     }
 
     void assignDefaultColor(LayerProperties& lp) {
-        // KLayout-style default colors based on layer number
         static const uint32_t defaultColors[] = {
             0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00,
             0xFFFF00FF, 0xFF00FFFF, 0xFFFF8000, 0xFF8000FF,
@@ -916,10 +1085,7 @@ private:
     }
 };
 
-// Inline implementation of CellInstance::bbox
-inline BBox CellInstance::bbox(const Cell* referencedCell) const {
-    // Would need access to the referenced cell's bbox
-    // For now, return a point bbox at the instance position
+inline BBox CellInstance::bbox(const Cell* /*referencedCell*/) const {
     return BBox(transform.x, transform.y, transform.x, transform.y);
 }
 

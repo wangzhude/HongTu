@@ -417,7 +417,13 @@ export struct LayoutCanvasView {
    * GL 主路径是否真正可用。true 时版图几何由 GPU 绘制，ShapeNode 仅叠加
    * 选中/INSTANCE/TEXT（可点击）；false 时回退有上限的 ShapeNode。
    */
-  @State glActive: boolean = false;
+  @State glActive: boolean = true;
+  @Prop preferNativeExpand: boolean = true;
+  private cachedEditOverlayRev: string = '';
+  private cachedCurrentCellInstances: Shape[] = [];
+  private cachedSelectedOverlayShapes: Shape[] = [];
+  private cachedSceneDrawFrameKey: string = '';
+  private cachedSceneDrawFrameResult: ViewSceneDrawResult | undefined = undefined;
   // Shape IDs restart in each document. Re-key only when geometry/style data
   // changes, not for cursor, pan or drag-preview frames.
   @State geometryRenderRevision: number = 0;
@@ -621,6 +627,7 @@ export struct LayoutCanvasView {
   aboutToDisappear(): void {
     this.sceneService.clear();
     this.hatchBudgetSource = undefined; this.hatchBudgetResult = undefined; this.hatchBudgetKey = '';
+    this.cachedSceneDrawFrameKey = ''; this.cachedSceneDrawFrameResult = undefined;
     this.stopBlinkAnimation();
     this.stopLayerBlink();
     this.isMousePanning = false;
@@ -763,7 +770,7 @@ export struct LayoutCanvasView {
           currentCellId: editService.getCurrentCellId(),
           hierarchyDepth: this.hierarchyDepth,
           // 编辑后 native g_layout 未同步：必须走 ArkTS 已展开 shapes，避免 GL 画旧几何
-          preferNativeExpand: !editService.isDirty(),
+          preferNativeExpand: this.preferNativeExpand && !editService.isDirty(),
           onGlActiveChange: (active: boolean) => {
             this.glActive = active;
           },
@@ -1186,6 +1193,7 @@ export struct LayoutCanvasView {
     // A pure GL replacement may never draw through this independent ArkUI cache.
     this.sceneService.clear();
     this.hatchBudgetSource = undefined; this.hatchBudgetResult = undefined; this.hatchBudgetKey = '';
+    this.cachedSceneDrawFrameKey = ''; this.cachedSceneDrawFrameResult = undefined;
     this.onToolChanged();
     this.selectionBoundsResolver = null;
     this.selectionBoundsKey = '';
@@ -1386,14 +1394,20 @@ export struct LayoutCanvasView {
     // Drop only derived presentation data when the authoritative scene changes.
     this.sceneService.clear();
     this.hatchBudgetSource = undefined; this.hatchBudgetResult = undefined; this.hatchBudgetKey = '';
+    this.cachedSceneDrawFrameKey = ''; this.cachedSceneDrawFrameResult = undefined;
   }
 
   private onHatchDensityChanged(): void {
     this.hatchBudgetSource = undefined; this.hatchBudgetResult = undefined; this.hatchBudgetKey = '';
+    this.cachedSceneDrawFrameKey = ''; this.cachedSceneDrawFrameResult = undefined;
   }
 
   private sceneDrawResult(): ViewSceneDrawResult {
     if (!this.renderSceneProvider) return { primitives: [], overflow: false, limit: 2000, message: '' };
+    const frameKey: string = `${this.sceneRevision}:${this.styleRenderRevision}:${this.geometryRenderRevision}:${this.canvasWidth}:${this.canvasHeight}:${this.zoomPercent}:${this.viewOffsetX}:${this.viewOffsetY}:${this.hatchDensitySignal}`;
+    if (frameKey === this.cachedSceneDrawFrameKey && this.cachedSceneDrawFrameResult !== undefined) {
+      return this.cachedSceneDrawFrameResult;
+    }
     try {
       const scene: ViewSceneDrawResult = this.sceneService.draw(this.renderSceneProvider(), sceneViewportFromCamera(this.canvasWidth,
         this.canvasHeight, this.zoomPercent, this.viewOffsetX, this.viewOffsetY, 96), 2000, this.zoomPercent);
@@ -1401,12 +1415,15 @@ export struct LayoutCanvasView {
         p.kind !== 'text' && p.hierarchyFrame !== true && p.style.hatch.length > 0 &&
         p.opacity > 0 && p.style.fillOpacity > 0)) {
         this.hatchBudgetSource = undefined; this.hatchBudgetResult = undefined; this.hatchBudgetKey = '';
+    this.cachedSceneDrawFrameKey = ''; this.cachedSceneDrawFrameResult = undefined;
+        this.cachedSceneDrawFrameKey = frameKey; this.cachedSceneDrawFrameResult = scene;
         return scene;
       }
       const density: number = this.getUIContext().vp2px(1);
       const key: string = JSON.stringify([this.canvasWidth, this.canvasHeight, this.zoomPercent,
         this.viewOffsetX, this.viewOffsetY, this.hatchDensitySignal, density]);
       if (this.hatchBudgetSource === scene && this.hatchBudgetKey === key && this.hatchBudgetResult !== undefined) {
+        this.cachedSceneDrawFrameKey = frameKey; this.cachedSceneDrawFrameResult = this.hatchBudgetResult;
         return this.hatchBudgetResult;
       }
       let result: ViewSceneDrawResult = scene;
@@ -1418,11 +1435,15 @@ export struct LayoutCanvasView {
         result = { primitives: [], overflow: true, limit: scene.limit, message: `当前场景未完整绘制：${e}` };
       }
       this.hatchBudgetSource = scene; this.hatchBudgetKey = key; this.hatchBudgetResult = result;
+      this.cachedSceneDrawFrameKey = frameKey; this.cachedSceneDrawFrameResult = result;
       return result;
     } catch (e) {
       this.sceneService.clear();
       this.hatchBudgetSource = undefined; this.hatchBudgetResult = undefined; this.hatchBudgetKey = '';
-      return { primitives: [], overflow: true, limit: 2000, message: `当前来源无法完整绘制：${e}` };
+    this.cachedSceneDrawFrameKey = ''; this.cachedSceneDrawFrameResult = undefined;
+      const errRes: ViewSceneDrawResult = { primitives: [], overflow: true, limit: 2000, message: `当前来源无法完整绘制：${e}` };
+      this.cachedSceneDrawFrameKey = frameKey; this.cachedSceneDrawFrameResult = errRes;
+      return errRes;
     }
   }
 
@@ -1457,12 +1478,49 @@ export struct LayoutCanvasView {
     return this.renderSceneProvider !== null ? this.sceneDrawResult().overflow : this.fallbackDrawResult().overflow;
   }
 
+  private ensureEditOverlayBuckets(): void {
+    const revKey: string = `${this.documentKey}:${this.geometryRenderRevision}:${editService.getCurrentCellId()}:${this.selectedShapeId}:${this.selectedShapeCount}:${editService.getSelectionIdentity()}`;
+    if (revKey === this.cachedEditOverlayRev) {
+      return;
+    }
+    const instances: Shape[] = [];
+    const selected: Shape[] = [];
+    const currentCellId: number = editService.getCurrentCellId();
+    const topCellId: number = editService.getTopCellId();
+    for (let i = 0; i < this.shapes.length; i++) {
+      const s: Shape = this.shapes[i];
+      if (s.type === ShapeType.NODE) continue;
+      const owner: number = s.ownerCellId !== undefined ? s.ownerCellId : topCellId;
+      if (owner !== currentCellId) continue;
+      if (this.isShapeSelected(s.id)) {
+        selected.push(s);
+      } else if (s.type === ShapeType.INSTANCE) {
+        instances.push(s);
+      }
+    }
+    this.cachedCurrentCellInstances = instances;
+    this.cachedSelectedOverlayShapes = selected;
+    this.cachedEditOverlayRev = revKey;
+  }
+
   private sceneEditOverlaysForRender(): Shape[] {
     // This is the sole editing overlay. Source primitives never enter this path.
     if (this.renderSceneProvider !== null && (!this.glEnabled || !this.glActive) && this.sceneDrawResult().overflow) return [];
-    return this.currentCellShapes().filter((s: Shape): boolean => s.type !== ShapeType.NODE &&
-      (this.isShapeSelected(s.id) || (s.type === ShapeType.INSTANCE && this.hierarchyDepth >= 2 &&
-        this.zoomPercent >= 1 && this.isInstanceAnchorInViewport(s))));
+    this.ensureEditOverlayBuckets();
+    if (this.hierarchyDepth < 2 || this.zoomPercent < 1 || this.cachedCurrentCellInstances.length === 0) {
+      return this.cachedSelectedOverlayShapes;
+    }
+    const out: Shape[] = this.cachedSelectedOverlayShapes.slice();
+    // Cap ArkUI instance anchor ShapeNodes at 256 in viewport so millions of array/cell instances never flood ArkUI layout
+    let instCount: number = 0;
+    for (let i = 0; i < this.cachedCurrentCellInstances.length && instCount < 256; i++) {
+      const inst: Shape = this.cachedCurrentCellInstances[i];
+      if (this.isInstanceAnchorInViewport(inst)) {
+        out.push(inst);
+        instCount++;
+      }
+    }
+    return out;
   }
 
   private sceneTextSelectionPrimitive(shape: Shape): ViewScenePrimitive | undefined {

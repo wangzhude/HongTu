@@ -49,6 +49,16 @@ import {
   validatePythonBridgeEndpoint,
   normalizePythonBridgeCaPath
 } from '../main/ets/services/PythonBridgeService';
+import {
+  validatePublicWebUrl,
+  extractReadableTextFromHtml,
+  parseBingRssItems
+} from '../main/ets/services/DshWebSearchService';
+import {
+  classifyAttachmentByName,
+  formatAttachmentSize
+} from '../main/ets/services/AiAttachmentService';
+import { listNativeTools, readNativeTool } from '../main/ets/services/AiNativeCatalog';
 
 function buildMinimalWorkspaceDocument(cellNames: string[], shapes: Shape[]): WorkspaceDocument {
   const emptyCellProps: LayoutPropRecord[][] = cellNames.map((): LayoutPropRecord[] => []);
@@ -1038,6 +1048,48 @@ export default function localUnitTest(): void {
       ms.rulerOrientation = 'crosshair';
       ms.addCrosshairRuler(500, 600);
       expect(ms.rulers.length).assertEqual(2);
+
+      // v8 Visual Harness, WebSearch SSRF, Attachment Classifier & 195-Tool Catalog verification
+      expect(validatePublicWebUrl('https://developer.huawei.com/consumer/cn/')).assertEqual('https://developer.huawei.com/consumer/cn/');
+      let blockedLocal: boolean = false;
+      try {
+        validatePublicWebUrl('http://127.0.0.1:8080/secret');
+      } catch (_e) {
+        blockedLocal = true;
+      }
+      expect(blockedLocal).assertTrue();
+
+      const parsedDoc = extractReadableTextFromHtml('<html><head><title>KLayout Guide</title></head><body><h1>AREF</h1><p>Array instance pitch.</p></body></html>', 500);
+      expect(parsedDoc.title).assertEqual('KLayout Guide');
+      expect(parsedDoc.content.includes('Array instance pitch.')).assertTrue();
+
+      const rssItems = parseBingRssItems('<rss><channel><item><title>HarmonyOS XComponent</title><link>https://developer.huawei.com/x</link><description>High FPS rendering</description></item></channel></rss>', 5);
+      expect(rssItems.length).assertEqual(1);
+      expect(rssItems[0].title).assertEqual('HarmonyOS XComponent');
+
+      const gdsType = classifyAttachmentByName('pcsel_unit.gds', '');
+      expect(gdsType.kind).assertEqual('layout');
+      const imgType = classifyAttachmentByName('capture.png', 'image/png');
+      expect(imgType.kind).assertEqual('image');
+      expect(formatAttachmentSize(2048)).assertEqual('2.0 KB');
+
+      const allNative = listNativeTools('');
+      expect(allNative.total).assertEqual(195);
+      expect(readNativeTool('layers.delete') !== undefined).assertTrue();
+      expect(readNativeTool('layers.delete_empty') !== undefined).assertTrue();
+      expect(readNativeTool('instance.place_aref') !== undefined).assertTrue();
+      expect(readNativeTool('workspace.close') !== undefined).assertTrue();
+
+      const snapDesc = describeAiToolCall({
+        id: 'shot-1',
+        name: 'capture_screenshot',
+        status: 'completed',
+        arguments: '{"target":"window"}',
+        result: '{"success":true,"width":1280,"height":800}'
+      }, false);
+      expect(snapDesc.title.length > 0).assertTrue();
+      expect(matchAiSlashCommands('/screenshot').length).assertEqual(1);
+      expect(matchAiSlashCommands('/search').length).assertEqual(1);
     });
   });
 }

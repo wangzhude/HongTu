@@ -155,8 +155,13 @@ export struct TechnologyPanel {
             .backgroundColor(COLORS.primary).fontColor(Color.White).border({ width: 1, color: COLORS.primary }).borderRadius(UI.controlRadius).enabled(!this.busy).onClick(() => this.applyDraft())
         }.width(this.panelWidth < 480 ? '100%' : '50%')
       }.width('100%').padding({ top: 16 }).border({ width: { top: 1 }, color: COLORS.border })
-    }.width(this.panelWidth).height(this.panelHeight).padding(UI.panelPadding)
-      .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay')))
+    }
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .padding({ left: 18, right: 18, top: 8, bottom: 24 })
+    .backgroundColor(Color.Transparent)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
 

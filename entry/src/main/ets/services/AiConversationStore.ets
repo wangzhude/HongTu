@@ -251,6 +251,33 @@ export class AiConversationStore {
         if (step.tool !== undefined) this.validateTool(step.tool);
       }
     }
+    if (message.attachments !== undefined) {
+      if (!Array.isArray(message.attachments) || message.attachments.length > 24) throw new Error('消息附件数量超过限制');
+      for (const att of message.attachments) {
+        if (!att || typeof att.id !== 'string' || typeof att.name !== 'string' || att.name.length > 256 ||
+          !['image', 'layout', 'text', 'binary'].includes(att.kind) ||
+          typeof att.sandboxPath !== 'string' || att.sandboxPath.length > 2048 ||
+          !Number.isFinite(att.sizeBytes) || att.sizeBytes < 0) {
+          throw new Error('消息附件元数据无效');
+        }
+      }
+    }
+    if (message.webSources !== undefined) {
+      if (!Array.isArray(message.webSources) || message.webSources.length > 24) throw new Error('联网来源数量超过限制');
+      for (const ws of message.webSources) {
+        if (!ws || typeof ws.title !== 'string' || typeof ws.url !== 'string' || ws.url.length > 2048) {
+          throw new Error('联网来源记录无效');
+        }
+      }
+    }
+    if (message.askUserExchanges !== undefined) {
+      if (!Array.isArray(message.askUserExchanges) || message.askUserExchanges.length > 24) throw new Error('互动提问记录超过限制');
+      for (const ex of message.askUserExchanges) {
+        if (!ex || typeof ex.id !== 'string' || typeof ex.question !== 'string' || !Array.isArray(ex.options)) {
+          throw new Error('互动提问记录无效');
+        }
+      }
+    }
     const task = message.task;
     if (task !== undefined && (!task || message.role !== 'user' || typeof task.originalRequest !== 'string' ||
       task.originalRequest.trim().length === 0 || task.originalRequest.length > 16000 ||

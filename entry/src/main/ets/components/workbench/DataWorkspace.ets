@@ -1064,30 +1064,24 @@ struct DataGlyph {
   @Prop iconSize: number = 24;
   @Prop colorValue: string = COLORS.muted;
 
-  private commands(): string {
+  private symbolResource(): Resource {
     switch (this.name) {
-      case 'cells': return 'M12 2L22 7L12 12L2 7Z M2 12L12 17L22 12 M2 17L12 22L22 17';
-      case 'elements': return 'M12 4L4 20H20Z M14 4A2 2 0 1 1 10 4A2 2 0 1 1 14 4 M6 20A2 2 0 1 1 2 20A2 2 0 1 1 6 20 M22 20A2 2 0 1 1 18 20A2 2 0 1 1 22 20';
-      case 'cell': return 'M5 5H19V19H5Z M9 9H15V15H9Z M8 2V5 M12 2V5 M16 2V5 M8 19V22 M12 19V22 M16 19V22 M2 8H5 M2 12H5 M2 16H5 M19 8H22 M19 12H22 M19 16H22';
-      case 'scan': return 'M8 3H3V8 M16 3H21V8 M3 16V21H8 M21 16V21H16 M7 12H17';
-      default: return 'M6 2H14L20 8V22H6Z M14 2V8H20';
+      case 'cells': return $r('sys.symbol.square_stack_3d');
+      case 'elements': return $r('sys.symbol.square_grid_2x2');
+      case 'cell': return $r('sys.symbol.rectangle_on_rectangle');
+      case 'scan': return $r('sys.symbol.scope');
+      default: return $r('sys.symbol.doc_text');
     }
   }
 
   build() {
-    Shape() {
-      Path()
-        .commands(this.commands())
-        .fill(Color.Transparent)
-        .stroke(this.colorValue)
-        .strokeWidth('1.6px')
-        .strokeLineCap(LineCapStyle.Round)
-        .strokeLineJoin(LineJoinStyle.Round)
-    }
-    .viewPort({ x: '0px', y: '0px', width: '24px', height: '24px' })
-    .width(this.iconSize)
-    .height(this.iconSize)
-    .hitTestBehavior(HitTestMode.None)
-    .accessibilityLevel('no')
+    SymbolGlyph(this.symbolResource())
+      .fontSize(this.iconSize)
+      .fontColor([this.colorValue])
+      .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      .width(this.iconSize)
+      .height(this.iconSize)
+      .hitTestBehavior(HitTestMode.None)
+      .accessibilityLevel('no')
   }
 }

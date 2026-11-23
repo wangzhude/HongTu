@@ -1,13 +1,10 @@
 /**
- * 纯矢量抗锯齿状态图标组件（`DrawnStatusIcon`）
+ * 鸿蒙原生状态指示组件（`DrawnStatusIcon`）
  *
  * This file is part of HongTu, licensed under GPLv3.
  *
- * 严格遵循零 Emoji / 零内联特殊符号政策：
- * - 开启 `RenderingContextSettings(true)` 抗锯齿；
- * - 圆头线帽（`lineCap = 'round'`、`lineJoin = 'round'`）；
- * - 线宽随尺寸自适应 `Math.max(1.35, size * 0.092)`；
- * - 根据 `#RRGGBB` 主色自动派生 `rgba(r, g, b, 0.14)` 柔和同色系底色，并随 `@Watch` 即时重绘。
+ * 全面移除旧版命令式 `CanvasRenderingContext2D` 实例（消除列表与标签栏每行创建 2D 画布上下文的开销），
+ * 统一采用 HarmonyOS 官方 `SymbolGlyph` 与声明式原生图形原语（`Stack` / `Circle`）承载状态语义。
  */
 
 export type DrawnStatusKind = 'warning' | 'success' | 'error' | 'dirty' | 'active' | 'radio';
@@ -26,96 +23,59 @@ function buildSoftTint(hexColor: string, alpha: number = 0.14): string {
 
 @Component
 export struct DrawnStatusIcon {
-  @Prop @Watch('redraw') kind: DrawnStatusKind = 'warning';
-  @Prop @Watch('redraw') iconSize: number = 16;
-  @Prop @Watch('redraw') strokeColor: string = '#E8A23C';
-  @Prop @Watch('redraw') showSoftPlate: boolean = true;
+  @Prop kind: DrawnStatusKind = 'warning';
+  @Prop iconSize: number = 16;
+  @Prop strokeColor: string = '#E8A23C';
+  @Prop showSoftPlate: boolean = true;
 
-  private settings: RenderingContextSettings = new RenderingContextSettings(true);
-  private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
-  private canvasReady: boolean = false;
-
-  private redraw(): void {
-    if (!this.canvasReady) {
-      return;
+  private symbolForKind(): Resource {
+    if (this.kind === 'success') {
+      return $r('sys.symbol.checkmark_circle');
     }
-    const s: number = Math.max(10, this.iconSize);
-    const c: CanvasRenderingContext2D = this.ctx;
-    c.clearRect(0, 0, s, s);
-    c.lineCap = 'round';
-    c.lineJoin = 'round';
-    const lw: number = Math.max(1.35, s * 0.092);
-    c.lineWidth = lw;
-    c.strokeStyle = this.strokeColor;
-    const cx: number = s * 0.5;
-    const cy: number = s * 0.5;
-
-    if (this.showSoftPlate) {
-      c.fillStyle = buildSoftTint(this.strokeColor, 0.14);
-      c.beginPath();
-      c.arc(cx, cy, s * 0.45, 0, Math.PI * 2);
-      c.fill();
+    if (this.kind === 'error') {
+      return $r('sys.symbol.xmark_square');
     }
-
-    if (this.kind === 'warning') {
-      const topY: number = s * 0.19;
-      const botY: number = s * 0.79;
-      const halfW: number = s * 0.34;
-      c.beginPath();
-      c.moveTo(cx, topY);
-      c.lineTo(cx + halfW, botY);
-      c.lineTo(cx - halfW, botY);
-      c.closePath();
-      c.stroke();
-
-      c.beginPath();
-      c.moveTo(cx, s * 0.41);
-      c.lineTo(cx, s * 0.58);
-      c.stroke();
-
-      c.fillStyle = this.strokeColor;
-      c.beginPath();
-      c.arc(cx, s * 0.69, Math.max(1.0, lw * 0.56), 0, Math.PI * 2);
-      c.fill();
-    } else if (this.kind === 'success') {
-      c.beginPath();
-      c.moveTo(s * 0.27, s * 0.52);
-      c.lineTo(s * 0.44, s * 0.69);
-      c.lineTo(s * 0.75, s * 0.34);
-      c.stroke();
-    } else if (this.kind === 'error') {
-      c.beginPath();
-      c.moveTo(s * 0.32, s * 0.32);
-      c.lineTo(s * 0.68, s * 0.68);
-      c.moveTo(s * 0.68, s * 0.32);
-      c.lineTo(s * 0.32, s * 0.68);
-      c.stroke();
-    } else if (this.kind === 'dirty' || this.kind === 'active') {
-      c.fillStyle = this.strokeColor;
-      c.beginPath();
-      c.arc(cx, cy, s * 0.26, 0, Math.PI * 2);
-      c.fill();
-    } else if (this.kind === 'radio') {
-      c.beginPath();
-      c.arc(cx, cy, s * 0.36, 0, Math.PI * 2);
-      c.stroke();
-      c.fillStyle = this.strokeColor;
-      c.beginPath();
-      c.arc(cx, cy, s * 0.18, 0, Math.PI * 2);
-      c.fill();
-    }
+    return $r('sys.symbol.exclamationmark_triangle');
   }
 
   build() {
-    Canvas(this.ctx)
-      .width(this.iconSize)
-      .height(this.iconSize)
-      .renderGroup(true)
-      .hitTestBehavior(HitTestMode.None)
-      .accessibilityLevel('no')
-      .onReady(() => {
-        this.canvasReady = true;
-        this.redraw();
-      })
+    Stack({ alignContent: Alignment.Center }) {
+      if (this.showSoftPlate) {
+        Circle({ width: Math.max(10, this.iconSize), height: Math.max(10, this.iconSize) })
+          .fill(buildSoftTint(this.strokeColor, 0.14))
+      }
+
+      if (this.kind === 'warning' || this.kind === 'success' || this.kind === 'error') {
+        SymbolGlyph(this.symbolForKind())
+          .fontSize(this.showSoftPlate ? Math.max(9, Math.round(this.iconSize * 0.68)) : Math.max(10, this.iconSize))
+          .fontColor([this.strokeColor])
+          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      } else if (this.kind === 'radio') {
+        Stack({ alignContent: Alignment.Center }) {
+          Circle({
+            width: Math.max(7, Math.round(this.iconSize * 0.76)),
+            height: Math.max(7, Math.round(this.iconSize * 0.76))
+          })
+            .fill(Color.Transparent)
+            .stroke(this.strokeColor)
+            .strokeWidth(Math.max(1.2, this.iconSize * 0.12))
+          Circle({
+            width: Math.max(3.5, Math.round(this.iconSize * 0.38)),
+            height: Math.max(3.5, Math.round(this.iconSize * 0.38))
+          })
+            .fill(this.strokeColor)
+        }
+      } else {
+        Circle({
+          width: Math.max(5, Math.round(this.iconSize * 0.56)),
+          height: Math.max(5, Math.round(this.iconSize * 0.56))
+        })
+          .fill(this.strokeColor)
+      }
+    }
+    .width(this.iconSize)
+    .height(this.iconSize)
+    .hitTestBehavior(HitTestMode.None)
+    .accessibilityLevel('no')
   }
 }

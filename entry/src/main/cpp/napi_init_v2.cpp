@@ -51,6 +51,7 @@
 #include "image_export.h"
 #include "format_readers.h"
 #include "pcell_framework.h"
+#include "embedded_python_runtime.h"
 
 // Forward declare XComponent plugin
 #include "xcomponent_plugin.h"
@@ -3326,6 +3327,176 @@ static napi_value NapiGeneratePCell(napi_env env, napi_callback_info info) {
     SetProp(env, result, "errorMessage", CreateString(env, ""));
     SetProp(env, result, "shapes", shapes);
     return result;
+}
+
+// ==================== Embedded On-Device Python 3 Runtime ====================
+
+struct EmbeddedPythonAsyncData {
+    napi_async_work work = nullptr;
+    napi_deferred deferred = nullptr;
+    EmbeddedPythonRequest req;
+    EmbeddedPythonResult res;
+};
+
+static napi_value NapiGetEmbeddedPythonInfo(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    std::string homeDir;
+    if (argc >= 1 && args[0] != nullptr) {
+        napi_valuetype vt = napi_undefined;
+        napi_typeof(env, args[0], &vt);
+        if (vt == napi_string) {
+            homeDir = ReadStringArg(env, args[0]);
+        }
+    }
+    const EmbeddedPythonRuntimeInfo rtInfo = EmbeddedPythonRuntime::queryInfo(homeDir);
+    napi_value obj = nullptr;
+    napi_create_object(env, &obj);
+    SetProp(env, obj, "available", CreateBool(env, rtInfo.available));
+    SetProp(env, obj, "hasCPython", CreateBool(env, rtInfo.hasCPython));
+    SetProp(env, obj, "activeTier", CreateString(env, rtInfo.activeTier));
+    SetProp(env, obj, "version", CreateString(env, rtInfo.version));
+    SetProp(env, obj, "summary", CreateString(env, rtInfo.summary));
+    return obj;
+}
+
+static void EmbeddedPythonExecute(napi_env, void* data) {
+    auto* asyncData = static_cast<EmbeddedPythonAsyncData*>(data);
+    try {
+        asyncData->res = EmbeddedPythonRuntime::execute(asyncData->req);
+    } catch (const std::exception& e) {
+        asyncData->res.success = false;
+        asyncData->res.errorMessage = e.what();
+    } catch (...) {
+        asyncData->res.success = false;
+        asyncData->res.errorMessage = "端侧内置 Python 执行发生未知异常";
+    }
+}
+
+static void EmbeddedPythonComplete(napi_env env, napi_status status, void* data) {
+    auto* asyncData = static_cast<EmbeddedPythonAsyncData*>(data);
+    if (status != napi_ok) {
+        napi_value err = nullptr;
+        napi_create_error(env, nullptr, CreateString(env, "异步 Python 工作线程已取消"), &err);
+        napi_reject_deferred(env, asyncData->deferred, err);
+    } else {
+        const EmbeddedPythonResult& r = asyncData->res;
+        napi_value obj = nullptr;
+        napi_create_object(env, &obj);
+        SetProp(env, obj, "success", CreateBool(env, r.success));
+        SetProp(env, obj, "engineTier", CreateString(env, r.engineTier));
+        SetProp(env, obj, "engineVersion", CreateString(env, r.engineVersion));
+        SetProp(env, obj, "errorMessage", CreateString(env, r.errorMessage));
+        SetProp(env, obj, "fileName", CreateString(env, r.fileName));
+        SetProp(env, obj, "outputGdsPath", CreateString(env, r.outputGdsPath));
+        SetProp(env, obj, "outputSvgPath", CreateString(env, r.outputSvgPath));
+        SetProp(env, obj, "previewSvg", CreateString(env, r.previewSvg));
+        SetProp(env, obj, "stdoutText", CreateString(env, r.stdoutText));
+        SetProp(env, obj, "cellCount", CreateInt(env, r.cellCount));
+        SetProp(env, obj, "shapeCount", CreateInt(env, r.shapeCount));
+        SetProp(env, obj, "expandedShapeCount", CreateInt(env, r.expandedShapeCount));
+        SetProp(env, obj, "layerCount", CreateInt(env, r.layerCount));
+        SetProp(env, obj, "gdsBytes", CreateInt64(env, static_cast<int64_t>(r.gdsBytes)));
+        SetProp(env, obj, "cellNames", CreateStringArray(env, r.cellNames));
+
+        napi_value layerDefs = nullptr;
+        napi_create_array_with_length(env, r.layerDefinitions.size(), &layerDefs);
+        for (size_t i = 0; i < r.layerDefinitions.size(); ++i) {
+            napi_value ld = nullptr;
+            napi_create_object(env, &ld);
+            SetProp(env, ld, "layerNumber", CreateInt(env, r.layerDefinitions[i].layerNumber));
+            SetProp(env, ld, "datatype", CreateInt(env, r.layerDefinitions[i].datatype));
+            SetProp(env, ld, "name", CreateString(env, r.layerDefinitions[i].name));
+            napi_set_element(env, layerDefs, i, ld);
+        }
+        SetProp(env, obj, "layerDefinitions", layerDefs);
+
+        napi_value portsArr = nullptr;
+        napi_create_array_with_length(env, r.ports.size(), &portsArr);
+        for (size_t i = 0; i < r.ports.size(); ++i) {
+            const auto& p = r.ports[i];
+            napi_value po = nullptr;
+            napi_create_object(env, &po);
+            SetProp(env, po, "id", CreateString(env, p.id));
+            SetProp(env, po, "ownerCellId", CreateInt(env, p.ownerCellId));
+            SetProp(env, po, "ownerCellKey", CreateString(env, p.ownerCellKey));
+            SetProp(env, po, "name", CreateString(env, p.name));
+            SetProp(env, po, "xNm", CreateDouble(env, p.xNm));
+            SetProp(env, po, "yNm", CreateDouble(env, p.yNm));
+            SetProp(env, po, "orientationDeg", CreateDouble(env, p.orientationDeg));
+            SetProp(env, po, "widthNm", CreateDouble(env, p.widthNm));
+            SetProp(env, po, "layerNumber", CreateInt(env, p.layerNumber));
+            SetProp(env, po, "datatype", CreateInt(env, p.datatype));
+            SetProp(env, po, "portType", CreateString(env, p.portType));
+            napi_set_element(env, portsArr, i, po);
+        }
+        SetProp(env, obj, "ports", portsArr);
+        napi_resolve_deferred(env, asyncData->deferred, obj);
+    }
+    napi_delete_async_work(env, asyncData->work);
+    delete asyncData;
+}
+
+static std::string ReadObjStrProp(napi_env env, napi_value obj, const char* key, const std::string& defVal = "") {
+    napi_value v = nullptr;
+    if (napi_get_named_property(env, obj, key, &v) != napi_ok || v == nullptr) return defVal;
+    napi_valuetype vt = napi_undefined;
+    napi_typeof(env, v, &vt);
+    if (vt != napi_string) return defVal;
+    return ReadStringArg(env, v);
+}
+
+static napi_value NapiRunEmbeddedPythonAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    auto* asyncData = new EmbeddedPythonAsyncData();
+    if (argc >= 1 && args[0] != nullptr) {
+        napi_valuetype vt = napi_undefined;
+        napi_typeof(env, args[0], &vt);
+        if (vt == napi_object) {
+            asyncData->req.script = ReadObjStrProp(env, args[0], "script");
+            asyncData->req.inputMode = ReadObjStrProp(env, args[0], "inputMode", "new");
+            asyncData->req.sourceGdsPath = ReadObjStrProp(env, args[0], "sourceGdsPath");
+            asyncData->req.selectionGdsPath = ReadObjStrProp(env, args[0], "selectionGdsPath");
+            asyncData->req.currentCellName = ReadObjStrProp(env, args[0], "currentCellName");
+            asyncData->req.parametersJson = ReadObjStrProp(env, args[0], "parametersJson", "{}");
+            asyncData->req.outputGdsPath = ReadObjStrProp(env, args[0], "outputGdsPath");
+            asyncData->req.outputSvgPath = ReadObjStrProp(env, args[0], "outputSvgPath");
+            asyncData->req.cpythonHomeDir = ReadObjStrProp(env, args[0], "cpythonHomeDir");
+            napi_value tmVal = nullptr;
+            if (napi_get_named_property(env, args[0], "timeoutMs", &tmVal) == napi_ok && tmVal != nullptr) {
+                napi_valuetype tvt = napi_undefined;
+                napi_typeof(env, tmVal, &tvt);
+                if (tvt == napi_number) {
+                    asyncData->req.timeoutMs = static_cast<int64_t>(ReadDoubleArg(env, tmVal));
+                }
+            }
+        }
+    }
+    napi_value promise = nullptr;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+    napi_value resourceName = nullptr;
+    napi_create_string_utf8(env, "runEmbeddedPythonAsync", NAPI_AUTO_LENGTH, &resourceName);
+    if (napi_create_async_work(env, nullptr, resourceName, EmbeddedPythonExecute,
+                               EmbeddedPythonComplete, asyncData, &asyncData->work) != napi_ok) {
+        napi_deferred deferred = asyncData->deferred;
+        delete asyncData;
+        napi_value err = nullptr;
+        napi_create_error(env, nullptr, CreateString(env, "创建端侧 Python 异步任务失败"), &err);
+        napi_reject_deferred(env, deferred, err);
+        return promise;
+    }
+    if (napi_queue_async_work(env, asyncData->work) != napi_ok) {
+        napi_delete_async_work(env, asyncData->work);
+        napi_deferred deferred = asyncData->deferred;
+        delete asyncData;
+        napi_value err = nullptr;
+        napi_create_error(env, nullptr, CreateString(env, "排队端侧 Python 异步任务失败"), &err);
+        napi_reject_deferred(env, deferred, err);
+    }
+    return promise;
 }
 
 // ==================== Module Registration ====================

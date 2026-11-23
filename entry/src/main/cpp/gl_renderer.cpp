@@ -27,37 +27,6 @@ constexpr const char* HONGTU_GL_TAG = "HongTuGL";
 
 namespace hongtu {
 
-/*
- * ==================== 图层显示样式在 GL 主路径上的能力边界（gap-matrix §5） ====================
- *
- * GL 能真实承载的（本文件 + GlCanvas.ets 已接线）：
- *   1. 颜色 + 逐批次 alpha：batch.color[3] 由 UiLayer.transparency/highlighted 派生，
- *      填充与描边都吃这个 alpha（下面 drawBatch 里不再硬编码 0.35/0.6/1.0）。
- *   2. 实心 vs 只描边（fillStyle = outline / hollow / cross / diagonal 的退化形）：
- *      由 batch.type 在 ArkTS 侧从 rectFilled/polygonFilled 切到 *_outline，走已有的两条着色器。
- *   3. 线宽：受 GL_LINE_WIDTH_RANGE 上限约束（见 maxSupportedLineWidth_）。
- *      GLES 规范只保证 hairline=1px，多数驱动 glLineWidth(>1) 会 GL_INVALID_VALUE，
- *      故这里按查询到的上限钳制；PATH 的**真实**宽度靠 buildPathRibbon() 轮廓化成条带，
- *      不依赖 glLineWidth。
- *
- * GL 承载不了、且不打算伪造的：
- *   - lineStyle（dashed / dotted / dotdash）：OpenGL ES 3.0 核心**没有** glLineStipple
- *     （线划是桌面 GL 1.1 / EXT 的能力，GLES 规范未收录）。要在 fragment shader 里做 dash，
- *     需要沿路径的弧长 varying（第二顶点属性）；而 ArkTS→native 的 RenderBatch 契约
- *     （entry/src/main/cpp/types/libhongtu/Index.d.ts）只带 type/layerNumber/datatype/
- *     vertices/color/selected，既没有样式槽位也没有第二个属性可传弧长。CPU 侧把每条边
- *     切成等长 dash 段理论上可行（xcomponent_plugin.cpp 可扩），但没有样式输入仍是死代码，
- *     所以不写。
- *   4. 填充图案（fillStyle = diagonal / cross / stipple）：通过 RenderBatch.fillPattern
- *      （0..3）与填充片元着色器 u_fillPattern 基于屏幕像素坐标 gl_FragCoord.xy 过程化生成，
- *      零额外顶点属性即可在 GPU 主路径忠实绘制斜线、交叉线与点阵填充。
- *   - animated（动画层闪烁）：GL 侧是「数据变了才重传」的事件驱动绘制，没有逐帧回调；
- *     闪烁只在 ArkUI 回退路径实现。
- * 结论：样式忠实的呈现路径是 ArkUI ShapeNode（LayoutCanvasView.ets）与 SVG/PNG 导出
- * （image_export.h）；GL 是性能优先的近似。
- */
-
-// 着色器源码：填充模式
 static const char* kFillVertexShader = R"(
 #version 300 es
 precision highp float;
@@ -95,7 +64,6 @@ void main() {
 }
 )";
 
-// 着色器源码：线框/描边模式（实线；GLES3 无 stipple，虚线不在此实现，见文件头能力边界注释）
 static const char* kLineVertexShader = R"(
 #version 300 es
 precision highp float;
@@ -132,7 +100,6 @@ GLRenderer::~GLRenderer() {
 }
 
 bool GLRenderer::initialize() {
-    // 编译填充着色器
     GLuint fillVS = compileShader(GL_VERTEX_SHADER, kFillVertexShader);
     GLuint fillFS = compileShader(GL_FRAGMENT_SHADER, kFillFragmentShader);
     if (fillVS == 0 || fillFS == 0) {
@@ -147,7 +114,6 @@ bool GLRenderer::initialize() {
         return false;
     }
 
-    // 编译线框着色器
     GLuint lineVS = compileShader(GL_VERTEX_SHADER, kLineVertexShader);
     GLuint lineFS = compileShader(GL_FRAGMENT_SHADER, kLineFragmentShader);
     if (lineVS == 0 || lineFS == 0) {
@@ -162,14 +128,12 @@ bool GLRenderer::initialize() {
         return false;
     }
 
-    // 获取 uniform 位置
     mvpLocation_ = glGetUniformLocation(shaderProgram_, "u_mvp");
     colorLocation_ = glGetUniformLocation(shaderProgram_, "u_color");
     fillPatternLocation_ = glGetUniformLocation(shaderProgram_, "u_fillPattern");
     lineMvpLocation_ = glGetUniformLocation(lineShaderProgram_, "u_mvp");
     lineColorLocation_ = glGetUniformLocation(lineShaderProgram_, "u_color");
 
-    // 线宽能力：GLES 没有桌面 GL_LINE_WIDTH_RANGE，对应查询是 GL_ALIASED_LINE_WIDTH_RANGE
     GLfloat widthRange[2] = {maxSupportedLineWidth_, maxSupportedLineWidth_};
     glGetFloatv(GL_ALIASED_LINE_WIDTH_RANGE, widthRange);
     if (std::isfinite(widthRange[1]) && widthRange[1] >= 1.0f) {
@@ -177,12 +141,10 @@ bool GLRenderer::initialize() {
     }
     LOGI("GL 线宽上限: %{public}f px", maxSupportedLineWidth_);
 
-    // 创建 VBO 和 VAO
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
     uploadPending_ = true;
 
-    // 启用混合（透明填充）
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -228,63 +190,94 @@ void GLRenderer::onViewportChanged(int width, int height) {
     }
 }
 
-void GLRenderer::render() {
+void GLRenderer::captureFrameSnapshot(FrameSnapshot& out) {
+    out.uploadVertices = uploadPending_;
+    if (uploadPending_) {
+        out.vertices = cachedVertices_;
+        uploadPending_ = false;
+    } else {
+        out.vertices.clear();
+    }
+    out.commands = drawCommands_;
+    out.originX = originX_;
+    out.originY = originY_;
+    out.camera = camera_;
+    out.surfaceViewportWidth = surfaceViewportWidth_;
+    out.surfaceViewportHeight = surfaceViewportHeight_;
+    std::copy(backgroundColor_, backgroundColor_ + 4, out.backgroundColor);
+    out.preparedPrimitiveCount = preparedPrimitiveCount_;
+    out.preparedBatchCount = preparedBatchCount_;
+}
+
+void GLRenderer::renderSnapshot(const FrameSnapshot& snapshot, FrameMetrics& metricsOut) {
+    metricsOut = {};
     if (!ready_) return;
 
-    auto startTime = std::chrono::high_resolution_clock::now();
+    const auto startTime = std::chrono::high_resolution_clock::now();
 
-    if (surfaceViewportWidth_ > 0 && surfaceViewportHeight_ > 0) {
-        glViewport(0, 0, surfaceViewportWidth_, surfaceViewportHeight_);
+    int surfW = snapshot.surfaceViewportWidth;
+    int surfH = snapshot.surfaceViewportHeight;
+    if (surfW > 0 && surfH > 0) {
+        glViewport(0, 0, surfW, surfH);
     } else {
         GLint vp[4] = {0, 0, 0, 0};
         glGetIntegerv(GL_VIEWPORT, vp);
         if (vp[2] > 0 && vp[3] > 0) {
-            surfaceViewportWidth_ = vp[2];
-            surfaceViewportHeight_ = vp[3];
+            surfW = vp[2];
+            surfH = vp[3];
         }
     }
 
-    // 清屏色由 ArkTS 主题提供，白画布与深色画布共用 GPU 主路径。
-    glClearColor(backgroundColor_[0], backgroundColor_[1], backgroundColor_[2], backgroundColor_[3]);
+    glClearColor(snapshot.backgroundColor[0], snapshot.backgroundColor[1],
+                 snapshot.backgroundColor[2], snapshot.backgroundColor[3]);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    lastPrimitiveCount_ = 0;
-    lastVertexCount_ = 0;
-    lastBatchCount_ = 0;
-    lastDrawCallCount_ = 0;
-    lastUploadedBytes_ = 0;
-
-    // 绑定 VAO
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    if (uploadPending_) {
-        lastUploadedBytes_ = cachedVertices_.size() * sizeof(GLVertex);
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(lastUploadedBytes_),
-                     cachedVertices_.empty() ? nullptr : cachedVertices_.data(), GL_DYNAMIC_DRAW);
-        uploadPending_ = false;
+    if (snapshot.uploadVertices) {
+        metricsOut.uploadedBytes = snapshot.vertices.size() * sizeof(GLVertex);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(metricsOut.uploadedBytes),
+                     snapshot.vertices.empty() ? nullptr : snapshot.vertices.data(), GL_DYNAMIC_DRAW);
     }
 
-    // 设置顶点属性指针
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(GLVertex), (void*)0);
     glEnableVertexAttribArray(0);
 
-    // 预先在 double 精度下合成当前帧 Camera-Relative + 视口比例校正 MVP 矩阵
-    computeMVPMatrix(mvpMatrix_);
+    float mvp[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    computeMVPMatrixFor(snapshot.camera, snapshot.originX, snapshot.originY, surfW, surfH, mvp);
 
-    // Each filled rectangle batch has at most two draws, regardless of rectangle count.
-    for (const auto& command : drawCommands_) {
-        drawCommand(command);
-        ++lastDrawCallCount_;
-        lastVertexCount_ += command.count;
+    for (const auto& command : snapshot.commands) {
+        drawCommandWithMvp(command, mvp);
+        ++metricsOut.drawCallCount;
+        metricsOut.vertexCount += command.count;
     }
-    lastPrimitiveCount_ = preparedPrimitiveCount_;
-    lastBatchCount_ = preparedBatchCount_;
+    metricsOut.primitiveCount = snapshot.preparedPrimitiveCount;
+    metricsOut.batchCount = snapshot.preparedBatchCount;
 
     glBindVertexArray(0);
 
-    auto endTime = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration<float, std::milli>(endTime - startTime);
-    lastFrameTime_ = duration.count();
+    const auto endTime = std::chrono::high_resolution_clock::now();
+    metricsOut.frameTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+}
+
+void GLRenderer::commitFrameMetrics(const FrameMetrics& metrics) {
+    lastPrimitiveCount_ = metrics.primitiveCount;
+    lastVertexCount_ = metrics.vertexCount;
+    lastBatchCount_ = metrics.batchCount;
+    lastDrawCallCount_ = metrics.drawCallCount;
+    if (metrics.uploadedBytes > 0) {
+        lastUploadedBytes_ = metrics.uploadedBytes;
+    }
+    lastFrameTime_ = metrics.frameTimeMs;
+}
+
+void GLRenderer::render() {
+    if (!ready_) return;
+    FrameSnapshot snapshot;
+    captureFrameSnapshot(snapshot);
+    FrameMetrics metrics;
+    renderSnapshot(snapshot, metrics);
+    commitFrameMetrics(metrics);
 }
 
 GLuint GLRenderer::compileShader(GLenum type, const char* source) {
@@ -322,27 +315,23 @@ GLuint GLRenderer::linkProgram(GLuint vertShader, GLuint fragShader) {
     return program;
 }
 
-void GLRenderer::computeMVPMatrix(float outMvp[9]) {
-    double effScaleX = camera_.scaleX;
-    double effScaleY = camera_.scaleY;
+void GLRenderer::computeMVPMatrixFor(const Camera& cam, double rawOriginX, double rawOriginY,
+                                     int surfW, int surfH, float outMvp[9]) {
+    double effScaleX = cam.scaleX;
+    double effScaleY = cam.scaleY;
 
-    // 结合原生 glViewport 实际宽高修正正交投影比例，消除连续拖拽分屏/折叠时的图形拉伸与选区漂移：
-    // 稳态下校准物理像素密度 px/vp；当分屏拖拽导致原生 Surface 物理尺寸先于 ArkUI 逻辑尺寸变更时，
-    // 按实际 glViewport 宽高与物理密度换算真实逻辑视口尺寸，保持各向同性缩放与左上角世界锚点对齐。
-    if (surfaceViewportWidth_ > 0 && surfaceViewportHeight_ > 0 &&
-        camera_.viewportWidth > 0 && camera_.viewportHeight > 0 &&
+    if (surfW > 0 && surfH > 0 &&
+        cam.viewportWidth > 0 && cam.viewportHeight > 0 &&
         effScaleX > 0.0 && effScaleY > 0.0 &&
         std::isfinite(effScaleX) && std::isfinite(effScaleY)) {
-        const double camTwoZX = effScaleX * static_cast<double>(camera_.viewportWidth);
-        const double camTwoZY = effScaleY * static_cast<double>(camera_.viewportHeight);
+        const double camTwoZX = effScaleX * static_cast<double>(cam.viewportWidth);
+        const double camTwoZY = effScaleY * static_cast<double>(cam.viewportHeight);
         const double maxTwoZ = std::max(camTwoZX, camTwoZY);
         const bool isotropicCamera = maxTwoZ > 0.0 &&
             std::abs(camTwoZX - camTwoZY) <= 1e-3 * maxTwoZ;
         if (isotropicCamera) {
-            const double rx = static_cast<double>(surfaceViewportWidth_) /
-                              static_cast<double>(camera_.viewportWidth);
-            const double ry = static_cast<double>(surfaceViewportHeight_) /
-                              static_cast<double>(camera_.viewportHeight);
+            const double rx = static_cast<double>(surfW) / static_cast<double>(cam.viewportWidth);
+            const double ry = static_cast<double>(surfH) / static_cast<double>(cam.viewportHeight);
             const double maxRatio = std::max(rx, ry);
             if (maxRatio > 0.0 && std::abs(rx - ry) <= 0.02 * maxRatio) {
                 displayDensity_ = 0.5 * (rx + ry);
@@ -351,8 +340,8 @@ void GLRenderer::computeMVPMatrix(float outMvp[9]) {
                 const double density = (densityCalibrated_ && displayDensity_ > 0.0)
                     ? displayDensity_
                     : (ry > 0.0 ? ry : 1.0);
-                const double effVpW = static_cast<double>(surfaceViewportWidth_) / density;
-                const double effVpH = static_cast<double>(surfaceViewportHeight_) / density;
+                const double effVpW = static_cast<double>(surfW) / density;
+                const double effVpH = static_cast<double>(surfH) / density;
                 const double twoZ = 0.5 * (camTwoZX + camTwoZY);
                 if (effVpW > 0.0 && effVpH > 0.0) {
                     effScaleX = twoZ / effVpW;
@@ -362,39 +351,27 @@ void GLRenderer::computeMVPMatrix(float outMvp[9]) {
         }
     }
 
-    // Camera-Relative 双精度合成：
-    // 顶点缓冲存储 a_position = float(world - origin_)；
-    // 世界到屏幕 NDC：
-    //   ndcX = effScaleX * (localX + originX_ + viewOffsetX) - 1
-    //        = effScaleX * localX + [effScaleX * (viewOffsetX + originX_) - 1]
-    //   ndcY = 1 - effScaleY * (viewOffsetY - (localY + originY_))
-    //        = effScaleY * localY + [1 + effScaleY * (originY_ - viewOffsetY)]
-    // 先在 double 精度下合并 (cameraWorldOffset + origin_) 的微小相对偏移，再乘缩放转 float，
-    // 根除毫米级芯片在 6400% 纳米缩放下 u_mvp * vec3(a_position, 1.0) 的 25vp 大数相消抖动。
-    const double originX = std::isfinite(originX_) ? originX_ : 0.0;
-    const double originY = std::isfinite(originY_) ? originY_ : 0.0;
+    const double originX = std::isfinite(rawOriginX) ? rawOriginX : 0.0;
+    const double originY = std::isfinite(rawOriginY) ? rawOriginY : 0.0;
 
-    double ndcOffsetX = camera_.offsetX + effScaleX * originX;
-    double ndcOffsetY = camera_.offsetY + effScaleY * originY;
+    double ndcOffsetX = cam.offsetX + effScaleX * originX;
+    double ndcOffsetY = cam.offsetY + effScaleY * originY;
 
-    if (camera_.hasWorldOffset || (std::abs(camera_.scaleX) > 1e-30 && std::isfinite(camera_.scaleX))) {
-        const double viewOffsetX = camera_.hasWorldOffset
-            ? camera_.worldOffsetX
-            : ((camera_.offsetX + 1.0) / camera_.scaleX);
+    if (cam.hasWorldOffset || (std::abs(cam.scaleX) > 1e-30 && std::isfinite(cam.scaleX))) {
+        const double viewOffsetX = cam.hasWorldOffset
+            ? cam.worldOffsetX
+            : ((cam.offsetX + 1.0) / cam.scaleX);
         const double relWorldX = viewOffsetX + originX;
         ndcOffsetX = effScaleX * relWorldX - 1.0;
     }
-    if (camera_.hasWorldOffset || (std::abs(camera_.scaleY) > 1e-30 && std::isfinite(camera_.scaleY))) {
-        const double viewOffsetY = camera_.hasWorldOffset
-            ? camera_.worldOffsetY
-            : ((1.0 - camera_.offsetY) / camera_.scaleY);
+    if (cam.hasWorldOffset || (std::abs(cam.scaleY) > 1e-30 && std::isfinite(cam.scaleY))) {
+        const double viewOffsetY = cam.hasWorldOffset
+            ? cam.worldOffsetY
+            : ((1.0 - cam.offsetY) / cam.scaleY);
         const double relWorldY = originY - viewOffsetY;
         ndcOffsetY = 1.0 + effScaleY * relWorldY;
     }
 
-    // Column-major 3x3: | sx  0  tx |
-    //                   | 0  sy  ty |
-    //                   | 0   0   1 |
     outMvp[0] = static_cast<float>(effScaleX);
     outMvp[1] = 0.0f;
     outMvp[2] = 0.0f;
@@ -406,9 +383,12 @@ void GLRenderer::computeMVPMatrix(float outMvp[9]) {
     outMvp[8] = 1.0f;
 }
 
+void GLRenderer::computeMVPMatrix(float outMvp[9]) {
+    computeMVPMatrixFor(camera_, originX_, originY_, surfaceViewportWidth_, surfaceViewportHeight_, outMvp);
+}
+
 void GLRenderer::updateMVP(GLint location) {
     computeMVPMatrix(mvpMatrix_);
-    // Uniform locations belong to the currently bound program only.
     if (location >= 0) glUniformMatrix3fv(location, 1, GL_FALSE, mvpMatrix_);
 }
 
@@ -431,7 +411,6 @@ uint64_t HashRelativePolygon(const std::vector<GLVertex>& verts, int n) {
 }
 } // namespace
 
-// 将多边形边界三角化为 GL_TRIANGLES 顶点列表（凹多边形安全，支持预计算索引与全等轮廓缓存复用）。
 bool GLRenderer::triangulatePolygonCached(const std::vector<GLVertex>& verts, int n,
                                           const std::vector<uint32_t>& precomputedIndices,
                                           std::vector<GLVertex>& outVerts) {
@@ -551,8 +530,6 @@ bool GLRenderer::triangulatePolygonCached(const std::vector<GLVertex>& verts, in
     return true;
 }
 
-// PATH 中心线 → 真实线宽条带三角顶点（相对批次局部原点 nm）。
-// 与 DRC/图像导出共用 Triangulator::pathOutline，保证 GPU 与导出图形状一致。
 static bool buildPathRibbon(const std::vector<GLVertex>& verts, int n, float pathWidth,
                             std::vector<GLVertex>& outVerts, int pathType,
                             double beginExtension, double endExtension,
@@ -586,8 +563,6 @@ static bool buildPathRibbon(const std::vector<GLVertex>& verts, int n, float pat
     return outVerts.size() >= 3;
 }
 
-// 线宽钳制到上下文实际支持的上限：GLES 驱动普遍只支持 1px，超限会直接 GL_INVALID_VALUE
-// 并静默丢弃本次 stroke 绘制，故宁可用 hairline 也不报错。
 void GLRenderer::applyStrokeWidth(float desiredPx) {
     if (!std::isfinite(desiredPx) || desiredPx <= 0.0f) {
         desiredPx = 1.0f;
@@ -620,14 +595,10 @@ struct DirectedEdgeKeyHash {
     }
 };
 
-// Emit polygon boundary segments into GL_LINES while cancelling exact antiparallel
-// zero-width keyhole bridge pairs (u -> v and v -> u). Fast-paths ordinary simple
-// polygons with zero heap allocations via a tiny stack duplicate-vertex hash table.
 static void appendPolygonOutlineEdges(const std::vector<GLVertex>& verts, size_t n,
                                       std::vector<GLVertex>& outEdges,
                                       bool mayHaveKeyholeBridge = true) {
     if (n < 2) return;
-    // Strip trailing closing vertex if identical to verts[0] so simple GDS rings never trigger duplicate path
     while (n > 2 && packVertexKey(verts[n - 1]) == packVertexKey(verts[0])) {
         --n;
     }
@@ -640,7 +611,6 @@ static void appendPolygonOutlineEdges(const std::vector<GLVertex>& verts, size_t
         return;
     }
 
-    // Zero-heap-allocation open-addressing vertex duplicate check + antiparallel bridge cancellation
     constexpr uint32_t kCap = 32768u;
     constexpr uint32_t kMask = kCap - 1u;
     thread_local uint64_t tlVertKeys[kCap];
@@ -678,7 +648,6 @@ static void appendPolygonOutlineEdges(const std::vector<GLVertex>& verts, size_t
         return;
     }
 
-    // Zero-heap-allocation flat open-addressing antiparallel edge matcher for keyhole polygons <= 16384 pts
     if (n <= 16384) {
         thread_local uint64_t tlEdgeU[kCap];
         thread_local uint64_t tlEdgeV[kCap];
@@ -1067,16 +1036,20 @@ void GLRenderer::setLayoutRenderData(const std::vector<RenderBatch>& batches,
         std::chrono::high_resolution_clock::now() - startTime).count();
 }
 
-void GLRenderer::drawCommand(const DrawCommand& command) {
+void GLRenderer::drawCommandWithMvp(const DrawCommand& command, const float mvp[9]) {
     glUseProgram(command.fill ? shaderProgram_ : lineShaderProgram_);
     const GLint mvpLoc = command.fill ? mvpLocation_ : lineMvpLocation_;
-    if (mvpLoc >= 0) glUniformMatrix3fv(mvpLoc, 1, GL_FALSE, mvpMatrix_);
+    if (mvpLoc >= 0) glUniformMatrix3fv(mvpLoc, 1, GL_FALSE, mvp);
     glUniform4fv(command.fill ? colorLocation_ : lineColorLocation_, 1, command.color);
     if (command.fill && fillPatternLocation_ >= 0) {
         glUniform1i(fillPatternLocation_, command.fillPattern);
     }
     if (!command.fill) applyStrokeWidth(2.0f);
     glDrawArrays(command.mode, command.first, command.count);
+}
+
+void GLRenderer::drawCommand(const DrawCommand& command) {
+    drawCommandWithMvp(command, mvpMatrix_);
 }
 
 } // namespace hongtu

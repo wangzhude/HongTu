@@ -40,7 +40,8 @@ export enum RenderMode {
 @Component
 export struct GlCanvas {
   @Prop @Watch('onDataChange') shapes: Shape[] = [];
-  @Prop @Watch('onDataChange') layers: UiLayer[] = [];
+  @Prop @Watch('onLayersPropChange') layers: UiLayer[] = [];
+  private lastLayerStyleSignature: string = '';
   @Prop @Watch('onCameraChange') zoomScale: number = 100;
   @Prop @Watch('onCameraChange') offsetX: number = 0;
   @Prop @Watch('onCameraChange') offsetY: number = 0;
@@ -115,6 +116,7 @@ export struct GlCanvas {
       this.setRenderMode(RenderMode.FALLBACK);
       return;
     }
+    this.lastLayerStyleSignature = this.computeLayerStyleSignature(this.layers);
     this.initNativeGL();
   }
 
@@ -173,6 +175,24 @@ export struct GlCanvas {
       console.error('[GlCanvas] initNativeGL 失败,降级 FALLBACK:', e);
       this.setRenderMode(RenderMode.FALLBACK);
     }
+  }
+
+  private computeLayerStyleSignature(items: UiLayer[]): string {
+    const parts: string[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const l: UiLayer = items[i];
+      parts.push(`${l.layerNumber}:${l.datatype}:${l.visible !== false ? 1 : 0}:${l.color}:${l.transparency ?? ''}:${l.fillStyle ?? ''}:${l.lineStyle ?? ''}:${l.lineWidth ?? ''}:${l.highlighted ? 1 : 0}:${l.animated ? 1 : 0}`);
+    }
+    return parts.join('|');
+  }
+
+  onLayersPropChange(): void {
+    const sig: string = this.computeLayerStyleSignature(this.layers);
+    if (sig === this.lastLayerStyleSignature) {
+      return;
+    }
+    this.lastLayerStyleSignature = sig;
+    this.onDataChange();
   }
 
   /** @Watch 回调：图形/图层/Cell/深度/场景版本变化时标记几何失效并同帧合并上传（非饥饿调度） */
@@ -626,6 +646,8 @@ export struct GlCanvas {
         this.zoomScale, this.offsetX, this.offsetY, this.computeOverscanMarginPx());
 
       // 单活动文档未编辑直通快路径：直接复用 C++ g_layout 零拷贝提交，免除 ReadonlySceneCache 双份 Layout 内存（省 ~110MB）
+      const hasVisibleDashLayer: boolean = sources.length === 1 &&
+        sources[0].layers.some((l: UiLayer): boolean => l.visible !== false && layerRenderStyle(l).dashArray.length > 0);
       const singleCleanMain: boolean =
         sources.length === 1 &&
         !sources[0].readOnly &&
@@ -637,10 +659,10 @@ export struct GlCanvas {
         sources[0].transform.d === 1 &&
         sources[0].transform.tx === 0 &&
         sources[0].transform.ty === 0 &&
-        !sources[0].layers.some((l: UiLayer): boolean => l.visible !== false && layerRenderStyle(l).dashArray.length > 0);
+        (!hasVisibleDashLayer || sources[0].shapes.length > 2000);
       if (singleCleanMain) {
         const s0: ViewSceneSource = sources[0];
-        this.sceneStyleLimited = s0.layers.some((l: UiLayer): boolean => l.visible && l.animated === true);
+        this.sceneStyleLimited = hasVisibleDashLayer || s0.layers.some((l: UiLayer): boolean => l.visible && l.animated === true);
         if (this.nativeModule.clearRenderScene !== undefined && this.sceneService !== undefined) {
           this.sceneService.clear();
         }
@@ -718,6 +740,18 @@ export struct GlCanvas {
 
       const stats: RenderStats = this.nativeModule.getRenderStats();
       const surfaceNotReady: boolean = !needsArkUiTight && nativeError.length === 0 && stats.ready !== true;
+
+      // 当原生 XComponent Surface 正在异步初始化（首帧约 2~16ms）且版图超过 2000 图元时，
+      // 严禁回退执行主线程 50 万节点 JS 遍历或闪出“超过 2000 图元预算”报错，直接等待下一帧 EGL 就绪自愈！
+      let totalSourceShapes: number = 0;
+      for (let i = 0; i < sources.length; i++) {
+        totalSourceShapes += sources[i].shapes.length;
+      }
+      if (surfaceNotReady && totalSourceShapes > 2000 && this.surfaceRecoveryAttempts < 30 && !this.disappearing) {
+        this.renderError = '';
+        this.scheduleSurfaceRecovery();
+        return;
+      }
 
       this.clearSceneSurface();
       const fallback = styledScene ?? this.sceneService.draw(sources, tightVp, 2000, this.zoomScale);
