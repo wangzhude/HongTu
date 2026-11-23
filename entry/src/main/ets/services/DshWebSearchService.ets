@@ -16,6 +16,11 @@ export interface DshWebSearchItem {
   source: string;
 }
 
+interface ScoredSearchItem {
+  item: DshWebSearchItem;
+  score: number;
+}
+
 export interface DshWebSearchResponse {
   query: string;
   engine: string;
@@ -196,7 +201,7 @@ export function filterRelevantSearchItems(query: string, items: DshWebSearchItem
   if (tokens.length === 0 || items.length <= 1) {
     return items;
   }
-  const scored: Array<{ item: DshWebSearchItem; score: number }> = [];
+  const scored: ScoredSearchItem[] = [];
   for (let i = 0; i < items.length; i++) {
     const it: DshWebSearchItem = items[i];
     const hay: string = `${it.title} ${it.url} ${it.snippet}`.toLowerCase();
@@ -211,9 +216,9 @@ export function filterRelevantSearchItems(query: string, items: DshWebSearchItem
     scored.push({ item: it, score });
   }
   const strong: DshWebSearchItem[] = scored
-    .filter((entry): boolean => entry.score > 0)
-    .sort((a, b): number => b.score - a.score)
-    .map((entry): DshWebSearchItem => entry.item);
+    .filter((entry: ScoredSearchItem): boolean => entry.score > 0)
+    .sort((a: ScoredSearchItem, b: ScoredSearchItem): number => b.score - a.score)
+    .map((entry: ScoredSearchItem): DshWebSearchItem => entry.item);
   return strong.length > 0 ? strong : items;
 }
 
