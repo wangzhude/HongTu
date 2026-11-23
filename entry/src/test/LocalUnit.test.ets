@@ -58,7 +58,7 @@ import {
   classifyAttachmentByName,
   formatAttachmentSize
 } from '../main/ets/services/AiAttachmentService';
-import { listNativeTools, readNativeTool } from '../main/ets/services/AiNativeCatalog';
+import { aiNativeTool, aiNativeTools, AiNativeToolPage } from '../main/ets/services/AiNativeTools';
 
 function buildMinimalWorkspaceDocument(cellNames: string[], shapes: Shape[]): WorkspaceDocument {
   const emptyCellProps: LayoutPropRecord[][] = cellNames.map((): LayoutPropRecord[] => []);
@@ -1073,12 +1073,12 @@ export default function localUnitTest(): void {
       expect(imgType.kind).assertEqual('image');
       expect(formatAttachmentSize(2048)).assertEqual('2.0 KB');
 
-      const allNative = listNativeTools('');
+      const allNative: AiNativeToolPage = aiNativeTools();
       expect(allNative.total).assertEqual(195);
-      expect(readNativeTool('layers.delete') !== undefined).assertTrue();
-      expect(readNativeTool('layers.delete_empty') !== undefined).assertTrue();
-      expect(readNativeTool('instance.place_aref') !== undefined).assertTrue();
-      expect(readNativeTool('workspace.close') !== undefined).assertTrue();
+      expect(aiNativeTool('layers.delete').name).assertEqual('layers.delete');
+      expect(aiNativeTool('layers.delete_empty').name).assertEqual('layers.delete_empty');
+      expect(aiNativeTool('instance.place_aref').name).assertEqual('instance.place_aref');
+      expect(aiNativeTool('workspace.close').name).assertEqual('workspace.close');
 
       const snapDesc = describeAiToolCall({
         id: 'shot-1',
