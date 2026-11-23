@@ -85,7 +85,7 @@ export struct AgentCanvasAuraOverlay {
   }
 
   private activeBorderColor(): string {
-    if (!this.isLoading && !this.liveRunning) {
+    if (!this.isLoading) {
       return withAlpha('#14B8A6', 0.85);
     }
     if (this.reduceMotion) {

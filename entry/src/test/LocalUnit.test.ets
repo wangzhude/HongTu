@@ -7,6 +7,7 @@ import { formatZoomPercent, worldToScreenPx, screenToWorldPx } from '../main/ets
 import { worldViewportFromCamera } from '../main/ets/services/HierarchyExpandService';
 import { LayerGroup, UiLayer } from '../main/ets/common/types';
 import { AiService, parseAiModelCatalog, inferAiModelContextWindow, AiProvider } from '../main/ets/services/AiService';
+import type { AiProcessStep } from '../main/ets/services/AiService';
 import { queryAiWorkbench } from '../main/ets/services/AiWorkbenchQuery';
 import { parseLyp, mergeLypIntoLayers, entriesFromUiLayers, formatLyp } from '../main/ets/services/LypService';
 import { splitMarkdownSegments, repairStreamingMarkdown, describeAiToolCall, matchAiSlashCommands, buildAgentCanvasHudModel, parseAiTokenMeter, computeDraftAwareTokenMeter, splitInlineThinking,
@@ -957,12 +958,13 @@ export default function localUnitTest(): void {
       expect(u2.appended.length).assertEqual(1);
       expect(u2.tail).assertEqual('第二段正在流式生成');
 
-      publishAiLiveStream(true, '正在调用 query_editor…', [
+      const liveSteps: AiProcessStep[] = [
         { id: 'think-1', kind: 'thinking', title: '思考过程', text: '先查看顶层单元', status: 'completed' },
         { id: 'tool-1', kind: 'tool', title: 'query_editor', text: '', status: 'completed',
           tool: { id: 'c1', name: 'query_editor', status: 'completed', arguments: '{"kind":"shapes"}', result: '{"total":4}' } },
         { id: 'think-2', kind: 'thinking', title: '思考过程', text: '继续核对间距', status: 'running' }
-      ], '');
+      ];
+      publishAiLiveStream(true, '正在调用 query_editor…', liveSteps, '');
       const liveSnap = getAiLiveStreamSnapshot();
       expect(liveSnap.running).assertTrue();
       expect(liveSnap.steps.length).assertEqual(3);

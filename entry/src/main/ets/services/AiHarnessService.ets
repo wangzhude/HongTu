@@ -7,10 +7,7 @@ import { AiBudgetMessage, aiHistoryMessages, buildAiContextBudget } from './AiCo
 import type { AiEditorQuery } from './AiWorkbenchQuery';
 
 /** Native transport for the upstream Pydantic AI Harness / AG-UI runtime. */
-export interface HarnessToolState {
-  id: string; name: string; status: 'running' | 'completed' | 'failed';
-  arguments: string; result: string;
-}
+export type HarnessToolState = AiChatToolState;
 export interface HarnessArtifactInfo {
   artifactId: string; script: string; originalRequest: string; summary: string;
   validationProfile?: 'generic_inverter';

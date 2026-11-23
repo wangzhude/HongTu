@@ -10,7 +10,7 @@
  * This file is part of HongTu, licensed under GPLv3 (incorporating clean-room ArkTS adaptations compatible with MIT).
  */
 
-import type { AiChatToolState, ChatMessage } from './AiService';
+import type { AiChatToolState, AiProcessStep, ChatMessage } from './AiService';
 
 export class AiGfmTable {
   headers: string[] = [];
@@ -439,6 +439,11 @@ export function splitMarkdownSegments(rawText: string): AiMarkdownSegment[] {
     return [emptySeg];
   }
   return segments;
+}
+
+export function parseGfmTableBlock(text: string): AiGfmTable | null {
+  const segments: AiMarkdownSegment[] = splitMarkdownSegments(text);
+  return segments.length === 1 && segments[0].kind === 'table' ? segments[0].table : null;
 }
 
 function asRecord(raw: string): Record<string, Object> | null {
