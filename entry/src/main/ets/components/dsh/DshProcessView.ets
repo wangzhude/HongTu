@@ -992,7 +992,7 @@ export struct DshAttachmentGrid {
     if (att.sandboxPath.length > 0) {
       return att.sandboxPath.startsWith('file://') ? att.sandboxPath : `file://${att.sandboxPath}`;
     }
-    return att.sourceUri;
+    return att.fileUriString;
   }
 
   build() {

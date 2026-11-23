@@ -180,7 +180,7 @@ import {
 import { Shape, ShapeType, Point, ShapeBounds, nativeShapesToShapes, nativeResultToShapesAsync, packShapesCoordinates, getShapeBounds } from '../models/GdsiiData';
 import { UiLayer, LayerGroup, DrawTool, ViewMode } from '../common/types';
 import { NativeStatus, nativeHongTuService } from '../services/NativeHongTuService';
-import type { GdsiiResult, ExportLayerStyle, NativeNet, NativeLvsResult, NativeViaLayer, NativeLayoutCompareLayer, NativeLayoutCompareResult, SourceLayerDefinition, QuantizationReport as NativeQuantizationReport, NativeRenderSnapshot, NativeRenderShape, NativeImportEstimate } from '../../cpp/types/libhongtu/Index';
+import type { GdsiiResult, GdsiiWriteResult, ExportLayerStyle, NativeNet, NativeLvsResult, NativeViaLayer, NativeLayoutCompareLayer, NativeLayoutCompareResult, SourceLayerDefinition, QuantizationReport as NativeQuantizationReport, NativeRenderSnapshot, NativeRenderShape, NativeImportEstimate, NativeEmbeddedPythonInfo } from '../../cpp/types/libhongtu/Index';
 import { fileImportService, ImportedLayoutResult, PickedLayout, layoutFileTypeForPath } from '../services/FileImportService';
 import {
   lypService,
@@ -329,6 +329,66 @@ interface DshEmbeddedPythonBrief {
 interface DshLayoutActiveLayer {
   layer: number;
   datatype: number;
+}
+
+interface DshWorkbenchWindow {
+  widthVp: number;
+  heightVp: number;
+  deviceType: string;
+  desktopMode: boolean;
+  themeMode: ThemeMode;
+  isDark: boolean;
+}
+
+interface DshWorkbenchCamera {
+  zoomPercent: number;
+  viewOffsetX: number;
+  viewOffsetY: number;
+  hierarchyDepth: number;
+  viewportWorldBoundsNm: ShapeBounds;
+}
+
+interface DshWorkbenchGrid {
+  gridVisible: boolean;
+  gridSizeNm: number;
+  snapEnabled: boolean;
+  geometrySnapEnabled: boolean;
+  smartGuidesEnabled: boolean;
+  routingMode: RoutingMode;
+}
+
+interface DshWorkbenchPanels {
+  sidebarVisible: boolean;
+  inspectorVisible: boolean;
+  drcDockOpen: boolean;
+  aiPanel: boolean;
+  pythonPanel: boolean;
+  verificationPanel: boolean;
+  lvsPanel: boolean;
+  macroPanel: boolean;
+  libraryPanel: boolean;
+  technologyPanel: boolean;
+  layerStackPanel: boolean;
+  comparePanel: boolean;
+  rdbReviewPanel: boolean;
+  searchPanel: boolean;
+  projectPanel: boolean;
+  viewWorkspacePanel: boolean;
+}
+
+interface DshWorkbenchSnapshot {
+  window: DshWorkbenchWindow;
+  currentModule: WorkModule;
+  viewMode: string;
+  activeTool: ActiveTool;
+  activeLayer: DshLayoutActiveLayer;
+  camera: DshWorkbenchCamera;
+  gridAndSnap: DshWorkbenchGrid;
+  panels: DshWorkbenchPanels;
+  rulersCount: number;
+  embeddedPython: NativeEmbeddedPythonInfo;
+  pythonExecutionMode: string;
+  statusText: string;
 }
 
 interface DshLayoutCellSummary {
@@ -2440,7 +2500,6 @@ struct Index {
     }) {
       this.workbench()
     }
-    .id('hongtu-workbench-root')
   }
 
   @Builder
@@ -4348,6 +4407,7 @@ struct Index {
       // 让用户显式选择查看/编辑模式并提示内存影响（解决 KLayout 痛点：
       // "Edit mode 会显著增加加载时间和内存，尤其对 OASIS 数组不友好"）。
     }
+    .id('hongtu-workbench-root')
     .width(LayoutPolicy.matchParent)
     .height(LayoutPolicy.matchParent)
     .backgroundColor(COLORS.bg)
@@ -9859,7 +9919,7 @@ struct Index {
   private async pickAiPhotosForChat(): Promise<void> {
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const picked: AiChatAttachment[] = await aiAttachmentService.pickImagesFromGallery(context, 6);
+      const picked: AiChatAttachment[] = await aiAttachmentService.pickPhotos(context, 6);
       if (picked.length > 0) {
         this.aiStore.aiPendingAttachments = this.aiStore.aiPendingAttachments.concat(picked).slice(0, 12);
         this.panelStore.statusText = `已添加 ${picked.length} 张图片附件`;
@@ -9900,7 +9960,7 @@ struct Index {
   private async pasteClipboardIntoAiChat(): Promise<void> {
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const res: AiClipboardPasteResult = await aiAttachmentService.pasteFromClipboard(context);
+      const res: AiClipboardPasteResult = await aiAttachmentService.readClipboard(context);
       if (res.attachments.length > 0) {
         this.aiStore.aiPendingAttachments = this.aiStore.aiPendingAttachments.concat(res.attachments).slice(0, 12);
       }
@@ -9938,7 +9998,8 @@ struct Index {
 
   private async saveAiAttachmentAs(att: AiChatAttachment): Promise<void> {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    const msg: string = await aiAttachmentService.saveAttachmentAs(context, att);
+    const msg: string = await aiAttachmentService.saveAttachmentToUserFile(context, att);
+    if (msg.length === 0) return;
     this.panelStore.statusText = msg;
     showAppToast(this.getUIContext(), msg, AppToastDuration.SHORT);
   }
@@ -9953,7 +10014,9 @@ struct Index {
       const artifact: PythonLayoutArtifact = {
         name: att.name,
         path: att.sandboxPath,
+        previewPath: '',
         summary: att.summary ?? att.name,
+        stdout: '',
         sourceRevision: this.docStore.editorRevision
       };
       const curRev: number = this.docStore.editorRevision;
@@ -10038,7 +10101,8 @@ struct Index {
     }
     if (candidate.layerDefinitions !== undefined) {
       candidate.layerDefinitions = candidate.layerDefinitions.filter(
-        (d: SourceLayerDefinition): boolean => !(d.layerNumber === layerNumber && d.datatype === datatype)
+        (d: SourceLayerDefinition): boolean => !(d.layer.lower === layerNumber && d.layer.upper === layerNumber &&
+          d.datatype.lower === datatype && d.datatype.upper === datatype)
       );
     }
     if (!this.commitCellStructure(candidate, candidate.selectedIds, true)) {
@@ -10123,7 +10187,7 @@ struct Index {
           captureMethod = 'componentSnapshot(canvas)';
         }
         if (pixmap !== null) {
-          capturedAttachment = await aiAttachmentService.savePixelMapPng(
+          capturedAttachment = await aiAttachmentService.savePixelMapAsAttachment(
             context,
             pixmap,
             `${this.currentShareBaseName()}_${target}.png`
@@ -10214,7 +10278,7 @@ struct Index {
     const maxWorldY: number = Math.round(this.viewportStore.viewOffsetY / scalePxPerNm);
     const minWorldY: number = Math.round((this.viewportStore.viewOffsetY - vpH) / scalePxPerNm);
     const pyInfo = nativeHongTuService.getEmbeddedPythonInfo();
-    return JSON.stringify({
+    const snapshot: DshWorkbenchSnapshot = {
       window: {
         widthVp: this.panelStore.windowWidthVp,
         heightVp: this.panelStore.windowHeightVp,
@@ -10272,7 +10336,8 @@ struct Index {
       embeddedPython: pyInfo,
       pythonExecutionMode: pythonBridgeService.getExecutionMode(),
       statusText: this.panelStore.statusText
-    });
+    };
+    return JSON.stringify(snapshot);
   }
 
   private computeCellBoundsForPitch(cellId: number): ShapeBounds {
@@ -10340,7 +10405,8 @@ struct Index {
       innerPts.reverse();
       return outerPts.concat(innerPts);
     }
-    return isArc ? [{ x: Math.round(cx), y: Math.round(cy) }].concat(outerPts) : outerPts.slice(0, segs);
+    const center: Point = { x: Math.round(cx), y: Math.round(cy) };
+    return isArc ? [center].concat(outerPts) : outerPts.slice(0, segs);
   }
 
   private buildDshBackendHost(ticket: number): DshLayoutBackendHost {
@@ -10362,7 +10428,7 @@ struct Index {
         const pyInfo = nativeHongTuService.getEmbeddedPythonInfo();
         const pyBrief: DshEmbeddedPythonBrief = {
           available: pyInfo.available,
-          tier: pyInfo.tier,
+          tier: pyInfo.activeTier,
           version: pyInfo.version,
           executionMode: pythonBridgeService.getExecutionMode()
         };
@@ -10593,7 +10659,7 @@ struct Index {
             if (typeof step['snapEnabled'] === 'boolean') this.viewportStore.snapEnabled = step['snapEnabled'] as boolean;
             if (typeof step['routingMode'] === 'string') {
               const rm: string = step['routingMode'] as string;
-              this.viewportStore.routingMode = rm === 'free_angle' ? RoutingMode.FREE_ANGLE : (rm === 'octilinear_45' ? RoutingMode.OCTILINEAR_45 : RoutingMode.MANHATTAN_90);
+              this.viewportStore.routingMode = rm === 'free_angle' ? RoutingMode.FREE : (rm === 'octilinear_45' ? RoutingMode.OCTILINEAR_45 : RoutingMode.MANHATTAN_90);
             }
             logs.push('更新栅格/磁吸/走线配置');
           } else if (action === 'set_theme') {
@@ -11664,11 +11730,15 @@ struct Index {
             );
           } else if (fmt === 'gds' || fmt === 'oas') {
             const outPath: string = `${context.cacheDir}/${base}_${Date.now()}.${fmt}`;
-            const docNative = layoutExportService.buildNativeDocument(this.currentExportInput());
-            const writeRes = fmt === 'oas'
-              ? nativeHongTuService.writeDocumentOasis(docNative, outPath)
-              : nativeHongTuService.writeDocumentGdsii(docNative, outPath);
-            if (!writeRes.success) throw new Error(writeRes.errorMessage || '导出二进制版图失败');
+            if (fmt === 'oas') {
+              if (!this.synchronizeCurrentDocument()) throw new Error('无法同步当前版图');
+              const writeRes: GdsiiWriteResult = nativeHongTuService.writeOasis(outPath);
+              if (!writeRes.success || writeRes.skippedShapes > 0) {
+                throw new Error(writeRes.errorMessage || 'OASIS 版图未完整导出');
+              }
+            } else {
+              await layoutExportService.writeGdsToPath(this.currentExportInput(), outPath);
+            }
             deliverable = aiAttachmentService.adoptSandboxFile(
               context,
               outPath,
@@ -11814,7 +11884,7 @@ struct Index {
         const documentId: string = this.docStore.activeWorkspaceId;
         const revision: number = this.docStore.editorRevision;
         // 仅当用户显式切换到“外部桌面伴随服务”模式时才探测远程 HTTP；默认端侧内置完整 Python 3 直接离线运行！
-        if (pythonBridgeService.getExecutionMode() === 'companion') {
+        if (pythonBridgeService.getExecutionMode() === 'remote') {
           await pythonBridgeService.checkConnection(false);
         }
         if (!this.pageAlive || ticket !== this.aiRequestGeneration || generation !== this.pageGeneration ||

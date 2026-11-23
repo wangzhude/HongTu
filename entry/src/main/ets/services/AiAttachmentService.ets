@@ -168,8 +168,9 @@ export class AiAttachmentService {
     if (att.kind === 'layout') {
       try {
         const scan = nativeHongTuService.quickScan(att.sandboxPath);
-        if (scan && scan.valid) {
-          att.summary = `${scan.format.toUpperCase()} 版图 · ${scan.cellCount} Cells · ${scan.layerCount} Layers · ${formatAttachmentSize(att.sizeBytes)}`;
+        if (scan.success) {
+          const format: string = scan.version === 0 ? 'OASIS' : 'GDSII';
+          att.summary = `${format} 版图 · ${scan.cellCount} Cells · ${scan.layerCount} Layers · ${formatAttachmentSize(att.sizeBytes)}`;
         } else {
           att.summary = `版图文件 · ${formatAttachmentSize(att.sizeBytes)}`;
         }
@@ -211,7 +212,7 @@ export class AiAttachmentService {
       copiedBytes = this.copyFdToPath(srcFile.fd, dstPath);
     } catch (e) {
       try { fs.unlinkSync(dstPath); } catch (_) {}
-      throw e;
+      throw new Error(String(e));
     } finally {
       try { fs.closeSync(srcFile); } catch (_) {}
     }
@@ -384,7 +385,7 @@ export class AiAttachmentService {
           } catch (_) {}
         }
       }
-      if (attachments.length === 0 && data.hasType(pasteboard.MIMETYPE_URI)) {
+      if (attachments.length === 0 && data.hasType(pasteboard.MIMETYPE_TEXT_URI)) {
         const primaryUri: string = data.getPrimaryUri();
         if (primaryUri && primaryUri.trim().length > 0) {
           attachments.push(this.ingestUri(context, primaryUri.trim()));
@@ -424,7 +425,7 @@ export class AiAttachmentService {
         imgSource = image.createImageSource(att.sandboxPath);
         pm = await imgSource.createPixelMap();
         const pasteData: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_PIXELMAP, pm);
-        const uriRecord: pasteboard.PasteDataRecord = pasteboard.createRecord(pasteboard.MIMETYPE_URI, att.fileUriString);
+        const uriRecord: pasteboard.PasteDataRecord = pasteboard.createUriRecord(att.fileUriString);
         pasteData.addRecord(uriRecord);
         await sysBoard.setData(pasteData);
         return `已复制图片「${att.name}」到剪贴板`;
@@ -434,7 +435,7 @@ export class AiAttachmentService {
       }
     }
 
-    const pasteData: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_URI, att.fileUriString);
+    const pasteData: pasteboard.PasteData = pasteboard.createUriData(att.fileUriString);
     if (att.kind === 'text') {
       try {
         const txt: string = this.readAttachmentText(att, 64000);
@@ -446,6 +447,11 @@ export class AiAttachmentService {
     }
     await sysBoard.setData(pasteData);
     return `已复制文件「${att.name}」到剪贴板`;
+  }
+
+  async copyTextToClipboard(text: string): Promise<string> {
+    await pasteboard.getSystemPasteboard().setData(pasteboard.createPlainTextData(text));
+    return '已复制文本到剪贴板';
   }
 
   async saveAttachmentToUserFile(context: common.UIAbilityContext, att: AiChatAttachment): Promise<string> {

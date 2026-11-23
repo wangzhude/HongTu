@@ -29,7 +29,7 @@ import type {
 } from './AiService';
 import { aiAttachmentService } from './AiAttachmentService';
 import { dshWebSearchService } from './DshWebSearchService';
-import type { DshWebFetchResult, DshWebSearchItem, DshWebSearchResult } from './DshWebSearchService';
+import type { DshWebFetchResponse, DshWebSearchItem, DshWebSearchResponse } from './DshWebSearchService';
 import { splitInlineThinking } from './AiAgentPresentation';
 import type { DshPermissionMode } from '../components/dsh/DshDesign';
 
@@ -665,10 +665,10 @@ export class DshLayoutAgentService {
       }
 
       if (imageParts.length > 0) {
-        const parts: WireContentPart[] = [{ type: 'text', text: userPromptText }].concat(imageParts);
+        const parts: WireContentPart[] = [{ type: 'text', text: userPromptText }];
         wireMessages.push({
           role: 'user',
-          content: parts,
+          content: parts.concat(imageParts),
           fallbackText: userPromptText
         });
       } else {
@@ -750,7 +750,8 @@ export class DshLayoutAgentService {
               onLiveChunk
             );
           } else {
-            throw turnErr;
+            const failure: Error = turnErr instanceof Error ? turnErr : new Error(String(turnErr));
+            throw failure;
           }
         }
 
@@ -934,10 +935,10 @@ export class DshLayoutAgentService {
           textSummaryLines.push('请结合上述实时截图画面与结构化几何状态，核查图形排布、图层可见性、连线或界面状态是否符合预期。');
           const fallbackObsText: string = textSummaryLines.join('\n');
           if (parts.length > 0) {
-            const fullParts: WireContentPart[] = [{ type: 'text', text: fallbackObsText }].concat(parts);
+            const fullParts: WireContentPart[] = [{ type: 'text', text: fallbackObsText }];
             wireMessages.push({
               role: 'user',
-              content: fullParts,
+              content: fullParts.concat(parts),
               fallbackText: fallbackObsText
             });
           }
@@ -1068,13 +1069,15 @@ export class DshLayoutAgentService {
           placeholder
         });
         askUserExchanges.push(exchange);
+        const answer: string = exchange.selectedLabels.concat([exchange.customText])
+          .filter((text: string): boolean => text.trim().length > 0).join('、');
         return {
           success: true,
-          summary: exchange.skipped ? '用户跳过了该提问' : `用户已回复：${exchange.answer}`,
+          summary: exchange.skipped ? '用户跳过了该提问' : `用户已回复：${answer}`,
           payloadJson: JSON.stringify({
             success: true,
             question: exchange.question,
-            answer: exchange.answer,
+            answer,
             selectedLabels: exchange.selectedLabels,
             customText: exchange.customText ?? '',
             skipped: exchange.skipped === true
@@ -1089,17 +1092,16 @@ export class DshLayoutAgentService {
         const maxRes: number = typeof args['maxResults'] === 'number'
           ? Math.max(1, Math.min(10, Math.round(args['maxResults'] as number)))
           : 6;
-        const searchRes: DshWebSearchResult = await dshWebSearchService.search(query, maxRes);
-        for (let i = 0; i < searchRes.items.length; i++) {
-          const it: DshWebSearchItem = searchRes.items[i];
+        const searchRes: DshWebSearchResponse = await dshWebSearchService.search(query, maxRes);
+        for (const it of searchRes.results) {
           if (it.url.length > 0 && !seenSourceUrls.has(it.url) && webSources.length < 16) {
             seenSourceUrls.add(it.url);
             webSources.push(it);
           }
         }
         return {
-          success: searchRes.items.length > 0 || searchRes.error === undefined,
-          summary: `联网检索「${query}」返回 ${searchRes.items.length} 条结果`,
+          success: searchRes.results.length > 0 || searchRes.errorMessage === undefined,
+          summary: `联网检索「${query}」返回 ${searchRes.results.length} 条结果`,
           payloadJson: JSON.stringify(searchRes)
         };
       }
@@ -1111,8 +1113,8 @@ export class DshLayoutAgentService {
         const maxChars: number = typeof args['maxChars'] === 'number'
           ? Math.max(500, Math.min(24000, Math.round(args['maxChars'] as number)))
           : 10000;
-        const fetchRes: DshWebFetchResult = await dshWebSearchService.fetchPage(targetUrl, maxChars);
-        if (fetchRes.ok && fetchRes.url.length > 0 && !seenSourceUrls.has(fetchRes.url) && webSources.length < 16) {
+        const fetchRes: DshWebFetchResponse = await dshWebSearchService.fetchPage(targetUrl, maxChars);
+        if (!seenSourceUrls.has(fetchRes.url) && webSources.length < 16) {
           seenSourceUrls.add(fetchRes.url);
           webSources.push({
             title: fetchRes.title.length > 0 ? fetchRes.title : fetchRes.url,
@@ -1122,8 +1124,8 @@ export class DshLayoutAgentService {
           });
         }
         return {
-          success: fetchRes.ok,
-          summary: fetchRes.ok ? `已读取网页「${fetchRes.title || fetchRes.url}」` : (fetchRes.error ?? '网页读取失败'),
+          success: true,
+          summary: `已读取网页「${fetchRes.title || fetchRes.url}」`,
           payloadJson: JSON.stringify(fetchRes)
         };
       }

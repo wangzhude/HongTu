@@ -992,7 +992,7 @@ export struct DrawingToolbar {
           .borderRadius(UI.controlRadius).focusable(false)
           .bindTips('全图适配 (F)')
           .onClick(() => this.fitAllAction())
-          if (this.measureStore.rulers.length > 0 || this.measureStore.active) {
+          if (this.measureStore.totalMeasurementCount() > 0) {
             Button({ type: ButtonType.Normal }) {
               WorkbenchIcon({ name: 'delete', iconSize: 16, color: COLORS.danger })
             }
