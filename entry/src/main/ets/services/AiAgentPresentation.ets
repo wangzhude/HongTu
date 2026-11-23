@@ -1112,3 +1112,260 @@ export function splitStreamingMarkdownBlocks(raw: string): AiStreamingBlock[] {
   }
   return blocks;
 }
+
+/**
+ * 直接移植自 DSH-Harmony `NativeStreamingMarkdown.ets`：
+ * 已闭合段落脱离流式重绘循环，仅末尾活跃块作为单节点内联更新，彻底兼顾实时刷新与零高度跳动。
+ */
+export class DshStreamingMarkdownUpdate {
+  changed: boolean = false;
+  reset: boolean = false;
+  tail: string = '';
+  tailInFence: boolean = false;
+  appended: string[] = [];
+}
+
+export class DshStreamingMarkdownBuffer {
+  private value: string = '';
+  private tail: string = '';
+  private blocks: string[] = [];
+  private blockStart: number = 0;
+  private lineStart: number = 0;
+  private scanAt: number = 0;
+  private fenceCharacter: string = '';
+  private fenceLength: number = 0;
+  private tableCandidate: boolean = false;
+  readonly maxBlockLength: number = 3072;
+
+  private reset(): void {
+    this.blocks = [];
+    this.tail = '';
+    this.blockStart = 0;
+    this.lineStart = 0;
+    this.scanAt = 0;
+    this.fenceCharacter = '';
+    this.fenceLength = 0;
+    this.tableCandidate = false;
+  }
+
+  private finishBlock(source: string, end: number, update: DshStreamingMarkdownUpdate): void {
+    if (end <= this.blockStart) return;
+    const block: string = source.substring(this.blockStart, end);
+    if (block.trim().length > 0) {
+      this.blocks.push(block);
+      update.appended.push(block);
+    }
+    this.blockStart = end;
+    this.tableCandidate = false;
+  }
+
+  private processLine(source: string, lineEnd: number, line: string, update: DshStreamingMarkdownUpdate): void {
+    if (this.fenceCharacter.length > 0) {
+      const close = /^[ \t]*(?:>[ \t]?)*[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(line);
+      if (close !== null && close[1].charAt(0) === this.fenceCharacter && close[1].length >= this.fenceLength) {
+        this.fenceCharacter = '';
+        this.fenceLength = 0;
+      }
+      return;
+    }
+    const fence = /^[ \t]*(?:>[ \t]?)*[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence !== null) {
+      this.fenceCharacter = fence[1].charAt(0);
+      this.fenceLength = fence[1].length;
+      return;
+    }
+    if (line.trim().length === 0) {
+      this.finishBlock(source, lineEnd, update);
+      return;
+    }
+    if (line.indexOf('|') >= 0) this.tableCandidate = true;
+    const length: number = lineEnd - this.blockStart;
+    if (!this.tableCandidate && length >= this.maxBlockLength) {
+      this.finishBlock(source, lineEnd, update);
+    }
+  }
+
+  update(next: string): DshStreamingMarkdownUpdate {
+    const update: DshStreamingMarkdownUpdate = new DshStreamingMarkdownUpdate();
+    if (next === this.value) {
+      update.tail = this.tail;
+      update.tailInFence = this.fenceCharacter.length > 0;
+      return update;
+    }
+    update.changed = true;
+    update.reset = !next.startsWith(this.value);
+    if (update.reset) this.reset();
+    const from: number = update.reset ? 0 : this.scanAt;
+    this.value = next;
+    for (let index = from; index < next.length; index++) {
+      if (next.charAt(index) !== '\n') continue;
+      const line: string = next.substring(this.lineStart, index);
+      this.processLine(next, index + 1, line, update);
+      this.lineStart = index + 1;
+    }
+    this.scanAt = next.length;
+    this.tail = next.substring(this.blockStart);
+    update.tail = this.tail;
+    update.tailInFence = this.fenceCharacter.length > 0;
+    return update;
+  }
+}
+
+export function oneLineStepPreview(raw: string, maxChars: number = 96): string {
+  const clean: string = (raw || '').replace(/\*\*/g, '').replace(/`/g, '').replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxChars) return clean;
+  return `${clean.substring(0, maxChars - 1)}…`;
+}
+
+/**
+ * 为历史消息或实时步骤统一生成 DSH 交错多步过程列表：
+ * 新消息直接使用按事件时序记录的 `msg.steps`（思考 #1 -> 工具 #1 -> 思考 #2 -> 工具 #2）；
+ * 旧历史消息自动由 `reasoning` 与 `tools` 回退合成为步骤序列。
+ */
+export function resolveMessageProcessSteps(msg: ChatMessage): AiProcessStep[] {
+  if (msg.steps !== undefined && msg.steps.length > 0) {
+    return msg.steps.filter((s: AiProcessStep): boolean =>
+      s.kind === 'tool' || s.text.trim().length > 0);
+  }
+  const fallback: AiProcessStep[] = [];
+  const split = splitInlineThinking(msg.content || '', msg.reasoning ?? '');
+  if (split.thinking.trim().length > 0) {
+    fallback.push({
+      id: `legacy-think-${msg.timestamp}`,
+      kind: 'thinking',
+      title: '思考过程',
+      text: split.thinking.trim(),
+      status: 'completed'
+    });
+  }
+  const tools: AiChatToolState[] = msg.tools ?? [];
+  for (let i = 0; i < tools.length; i++) {
+    fallback.push({
+      id: `legacy-tool-${tools[i].id}`,
+      kind: 'tool',
+      title: tools[i].name,
+      text: '',
+      status: tools[i].status,
+      tool: tools[i]
+    });
+  }
+  return fallback;
+}
+
+export function resolveMessageFinalAnswer(msg: ChatMessage): string {
+  if (msg.steps !== undefined && msg.steps.length > 0) {
+    return splitInlineThinking(msg.content || '', '').answer;
+  }
+  return splitInlineThinking(msg.content || '', msg.reasoning ?? '').answer;
+}
+
+export function summarizeProcessSteps(steps: AiProcessStep[], isLive: boolean): string {
+  let thinkCount: number = 0;
+  let toolCount: number = 0;
+  let failedTools: number = 0;
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i].kind === 'thinking' && steps[i].text.trim().length > 0) thinkCount++;
+    if (steps[i].kind === 'tool') {
+      toolCount++;
+      if (steps[i].status === 'failed') failedTools++;
+    }
+  }
+  if (isLive) {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const s: AiProcessStep = steps[i];
+      if (s.status === 'running') {
+        if (s.kind === 'tool' && s.tool !== undefined) {
+          const desc: AiToolPresentation = describeAiToolCall(s.tool, true);
+          return desc.inlineTarget.length > 0 ? `正在${desc.title} · ${desc.inlineTarget}` : `正在${desc.title}`;
+        }
+        if (s.kind === 'thinking') {
+          const preview: string = oneLineStepPreview(s.text, 42);
+          return preview.length > 0 ? `正在思考 · ${preview}` : '正在深度思考…';
+        }
+      }
+    }
+  }
+  const parts: string[] = [];
+  if (thinkCount > 0) parts.push(`${thinkCount} 步思考`);
+  if (toolCount > 0) {
+    parts.push(failedTools > 0 ? `${toolCount} 步工具（${failedTools} 步未通过）` : `${toolCount} 步工具调用`);
+  }
+  return parts.length > 0 ? parts.join(' · ') : '工作过程';
+}
+
+/**
+ * 纯 V1 `@StorageLink('hongtu_ai_live_rev')` 实时流通道（对应 DSH-Harmony `nativeRefreshRevision`）：
+ * 彻底绕开 Index(V1) -> AiStore(@ObservedV2) -> AiAssistantPanel(V1 @Prop) 的跨代响应式断层，
+ * 确保无需收起/展开面板，每一个流式分片与工具步骤都实时刷新到屏幕上。
+ */
+export interface AiLiveStreamSnapshot {
+  revision: number;
+  running: boolean;
+  statusText: string;
+  steps: AiProcessStep[];
+  answerText: string;
+  activeThinkId: string;
+  activeThinkText: string;
+}
+
+let currentLiveSnapshot: AiLiveStreamSnapshot = {
+  revision: 0,
+  running: false,
+  statusText: '',
+  steps: [],
+  answerText: '',
+  activeThinkId: '',
+  activeThinkText: ''
+};
+
+function bumpLiveRevision(): void {
+  try {
+    AppStorage.setOrCreate<number>('hongtu_ai_live_rev', currentLiveSnapshot.revision);
+  } catch (_) {
+    // Headless unit test environments without ArkUI AppStorage safely ignore.
+  }
+}
+
+export function publishAiLiveStream(
+  running: boolean,
+  statusText: string,
+  steps: AiProcessStep[],
+  answerText: string
+): void {
+  let activeId: string = '';
+  let activeText: string = '';
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (steps[i].kind === 'thinking' && steps[i].status === 'running') {
+      activeId = steps[i].id;
+      activeText = steps[i].text;
+      break;
+    }
+  }
+  currentLiveSnapshot = {
+    revision: currentLiveSnapshot.revision + 1,
+    running,
+    statusText,
+    steps: steps.slice(),
+    answerText,
+    activeThinkId: activeId,
+    activeThinkText: activeText
+  };
+  bumpLiveRevision();
+}
+
+export function resetAiLiveStream(): void {
+  currentLiveSnapshot = {
+    revision: currentLiveSnapshot.revision + 1,
+    running: false,
+    statusText: '',
+    steps: [],
+    answerText: '',
+    activeThinkId: '',
+    activeThinkText: ''
+  };
+  bumpLiveRevision();
+}
+
+export function getAiLiveStreamSnapshot(): AiLiveStreamSnapshot {
+  return currentLiveSnapshot;
+}

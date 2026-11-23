@@ -439,6 +439,15 @@ export interface AiContextCoverage {
   selectedGeometryTruncated: boolean;
 }
 
+export interface AiProcessStep {
+  id: string;
+  kind: 'thinking' | 'tool' | 'commentary';
+  title: string;
+  text: string;
+  status: 'running' | 'completed' | 'failed';
+  tool?: AiChatToolState;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
@@ -449,6 +458,7 @@ export interface ChatMessage {
   /** Provider-supplied reasoning only; absent when the provider did not return reasoning. */
   reasoning?: string;
   tools?: AiChatToolState[];
+  steps?: AiProcessStep[];
   runStatus?: 'completed' | 'failed' | 'cancelled';
   task?: AiAgentTask;
   /** 时间戳 */
@@ -1041,9 +1051,9 @@ export class AiService {
   private validateRequestConfig(config: AiModelConfig): void {
     if (!Number.isFinite(config.temperature) || config.temperature < 0 || config.temperature > 2 ||
       !Number.isInteger(config.maxTokens) || config.maxTokens < 128 || config.maxTokens > 65536 ||
-      !Number.isFinite(config.timeoutMs) || config.timeoutMs < 1000 || config.timeoutMs > 180000 ||
+      !Number.isFinite(config.timeoutMs) || config.timeoutMs < 1000 || config.timeoutMs > 600000 ||
       config.maxTokens + 6000 >= (config.contextWindowTokens ?? 32768)) {
-      throw new Error('模型参数无效：温度 0–2，输出 128–65536 tokens，超时 1–180 秒；输出加系统和工具预留 6000 tokens 必须小于上下文窗口');
+      throw new Error('模型参数无效：温度 0–2，输出 128–65536 tokens，超时 1–600 秒；输出加系统和工具预留 6000 tokens 必须小于上下文窗口');
     }
   }
 
@@ -1252,18 +1262,35 @@ export class AiService {
   /** Persists the official harness output and tool evidence together with the original user request. */
   recordHarnessResult(request: string, text: string, reasoning: string, tools: AiChatToolState[], success: boolean,
                       commandStatus?: 'pending' | 'executed' | 'failed', conversationId: string = this.getActiveConversationId(), cancelled: boolean = false,
-                      task?: AiAgentTask): void {
+                      task?: AiAgentTask, steps?: AiProcessStep[]): void {
     const timestamp: number = Date.now();
     const toolHistory: AiChatToolState[] = tools.map((tool: AiChatToolState): AiChatToolState => ({
       id: tool.id, name: tool.name, status: tool.status,
       arguments: this.redactConversationText(tool.arguments), result: this.redactConversationText(tool.result)
     }));
+    const stepHistory: AiProcessStep[] | undefined = (steps !== undefined && steps.length > 0)
+      ? steps.slice(0, 96).map((step: AiProcessStep): AiProcessStep => ({
+          id: step.id.substring(0, 160),
+          kind: step.kind,
+          title: this.redactConversationText(step.title).substring(0, 200),
+          text: this.redactConversationText(step.text).substring(0, 262144),
+          status: step.status === 'running' ? (success ? 'completed' : 'failed') : step.status,
+          tool: step.tool === undefined ? undefined : {
+            id: step.tool.id,
+            name: step.tool.name,
+            status: step.tool.status === 'running' ? (success ? 'completed' : 'failed') : step.tool.status,
+            arguments: this.redactConversationText(step.tool.arguments),
+            result: this.redactConversationText(step.tool.result)
+          }
+        }))
+      : undefined;
     this.conversations.append(conversationId, [{ role: ChatRole.USER, content: this.redactConversationText(request), timestamp,
       task: task === undefined ? undefined : { originalRequest: this.redactConversationText(task.originalRequest),
         readOnly: task.readOnly, artifactGenerationAllowed: task.artifactGenerationAllowed,
         requiredValidationProfile: task.requiredValidationProfile } },
       { role: ChatRole.ASSISTANT, content: this.redactConversationText(text), timestamp,
-      reasoning: this.redactConversationText(reasoning), tools: toolHistory, isCommand: commandStatus !== undefined || !success,
+      reasoning: this.redactConversationText(reasoning), tools: toolHistory, steps: stepHistory,
+      isCommand: commandStatus !== undefined || !success,
       runStatus: cancelled ? 'cancelled' : (success ? 'completed' : 'failed'),
       commandStatus: success ? commandStatus : 'failed' }]);
   }
@@ -1868,6 +1895,9 @@ current_cell.transform(db.Trans(dx, 0))`}`;
       const content = (choice !== undefined && choice.message !== undefined) ? choice.message.content : '';
       if (typeof content !== 'string' || content.trim().length === 0) {
         if (typeof choice?.message?.reasoning_content === 'string' && choice.message.reasoning_content.length > 0) {
+          if (systemOverride.startsWith('连接测试')) {
+            return choice.message.reasoning_content;
+          }
           throw new Error('模型仅返回推理内容，没有生成正文；请增加输出预算或切换模型');
         }
         throw new Error('模型没有返回文本内容');
@@ -1897,8 +1927,8 @@ current_cell.transform(db.Trans(dx, 0))`}`;
     requestTimeoutMs: number = 0,
   ): Promise<string> {
     const httpRequest = http.createHttp();
-    const idleTimeout: number = requestTimeoutMs > 0 ? 30000 : this.config.timeoutMs;
-    const nativeReadTimeout: number = requestTimeoutMs > 0 ? Math.min(120000, requestTimeoutMs) : this.config.timeoutMs;
+    const idleTimeout: number = Math.max(60000, requestTimeoutMs > 0 ? requestTimeoutMs : this.config.timeoutMs);
+    const nativeReadTimeout: number = 600000;
     let fullText = '';
     let sawReasoning: boolean = false;
     let terminalSeen: boolean = false;
@@ -1941,9 +1971,14 @@ current_cell.transform(db.Trans(dx, 0))`}`;
         reject(new Error(this.redactConversationText(error.message)));
       };
       this.cancelLlmRequest = cancelThisStream;
-      totalTimer = setTimeout(() => fail(new Error('流式请求总时长超限 (timeout)')), 120000);
+      const resetTotalTimer = (): void => {
+        clearTimeout(totalTimer);
+        totalTimer = setTimeout(() => fail(new Error('流式请求长时间无新输出已超时 (timeout)')), Math.max(180000, idleTimeout));
+      };
+      resetTotalTimer();
       const resetReadTimer = (): void => {
         clearTimeout(timer);
+        resetTotalTimer();
         timer = setTimeout(() => {
           fail(new Error('流式请求读取超时 (timeout)'));
         }, idleTimeout);
@@ -2372,8 +2407,10 @@ current_cell.transform(db.Trans(dx, 0))`}`;
         selectedShape: null,
       };
 
-      const result = await this.callLLM(testContext, undefined, '', '你好，请回复"连接成功"', 0, probe);
-      return { success: true, message: `连接成功，模型响应: ${result.substring(0, 50)}...` };
+      const probeCfg: AiModelConfig = this.mergeConfig(probe, probe);
+      probeCfg.timeoutMs = Math.max(45000, probeCfg.timeoutMs);
+      const result = await this.callLLM(testContext, undefined, '连接测试：请简短直接回复“连接成功”。', '你好，请回复“连接成功”', 256, probeCfg);
+      return { success: true, message: `连接成功，模型响应: ${result.replace(/\s+/g, ' ').trim().substring(0, 50)}` };
     } catch (e) {
       const fail: TestConnectionResult = { success: false, message: `连接失败: ${e}` };
       return fail;

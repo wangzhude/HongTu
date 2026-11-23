@@ -25,6 +25,7 @@ import {
   ChatMessage,
   ChatRole,
   AiChatToolState,
+  AiProcessStep,
   AiConversationSummary,
   AiContextOptions,
   ParsedCommand,
@@ -52,8 +53,14 @@ import {
   formatRelativeConversationTime,
   matchAiSlashCommands,
   parseAiTokenMeter,
+  AiLiveStreamSnapshot,
+  getAiLiveStreamSnapshot,
+  oneLineStepPreview,
   reasoningEffortLabel,
-  splitInlineThinking
+  resolveMessageFinalAnswer,
+  resolveMessageProcessSteps,
+  splitInlineThinking,
+  summarizeProcessSteps
 } from '../../services/AiAgentPresentation';
 import { pythonBridgeService } from '../../services/PythonBridgeService';
 import { aiHarnessService } from '../../services/AiHarnessService';
@@ -200,8 +207,17 @@ export struct AiAssistantPanel {
   @State showQuickModelPicker: boolean = false;
   @State quickModelSearch: string = '';
   @State reasoningEffortValue: AiReasoningEffort = 'auto';
+  @StorageLink('hongtu_ai_live_rev') @Watch('onLiveStreamTick') liveStreamRev: number = 0;
+  @State liveRunning: boolean = false;
+  @State liveStatusText: string = '';
+  @State liveSteps: AiProcessStep[] = [];
+  @State liveAnswerText: string = '';
+  @State liveActiveThinkId: string = '';
+  @State liveActiveThinkText: string = '';
   @State autoExpandThinking: boolean = true;
   @State collapsedThinkingKeys: string[] = [];
+  @State manualOpenSteps: string[] = [];
+  @State manualClosedSteps: string[] = [];
   @State showCompressedSummaryText: boolean = false;
   @State contextCustomWindowText: string = '';
   @State discoveryBusy: boolean = false;
@@ -228,6 +244,7 @@ export struct AiAssistantPanel {
     this.panelDisposed = false;
     PersistentStorage.persistProp('hongtu_ai_auto_expand_thinking', true);
     this.autoExpandThinking = AppStorage.get<boolean>('hongtu_ai_auto_expand_thinking') ?? true;
+    this.syncLiveStreamFromBus();
     aiService.ensureReady().then(() => {
       if (this.panelDisposed) return;
       this.loadConfigFields();
@@ -267,6 +284,95 @@ export struct AiAssistantPanel {
     this.managementStatus = '';
     this.followsLatest = true;
     this.scrollConversationToLatest();
+  }
+
+  onLiveStreamTick(): void {
+    if (this.panelDisposed) return;
+    this.syncLiveStreamFromBus();
+  }
+
+  private syncLiveStreamFromBus(): void {
+    const snap: AiLiveStreamSnapshot = getAiLiveStreamSnapshot();
+    const justStarted: boolean = snap.running && !this.liveRunning;
+    this.liveRunning = snap.running;
+    this.liveStatusText = snap.statusText;
+    this.liveSteps = snap.steps.slice();
+    this.liveAnswerText = snap.answerText;
+    this.liveActiveThinkId = snap.activeThinkId;
+    this.liveActiveThinkText = snap.activeThinkText;
+    if (justStarted) {
+      this.followsLatest = true;
+      this.manualOpenSteps = this.manualOpenSteps.filter((k: string): boolean => !k.startsWith('live:'));
+      this.manualClosedSteps = this.manualClosedSteps.filter((k: string): boolean => !k.startsWith('live:'));
+      this.expandedTraces = this.expandedTraces.filter((k: string): boolean => k !== 'live:process');
+    }
+    if (this.followsLatest) {
+      this.pinConversationToBottomInstant();
+    }
+  }
+
+  private isProcessGroupExpanded(groupKey: string, isLive: boolean, isLatestTurn: boolean): boolean {
+    if (this.manualClosedSteps.includes(groupKey)) return false;
+    if (this.manualOpenSteps.includes(groupKey)) return true;
+    if (isLive) return true;
+    return isLatestTurn;
+  }
+
+  private toggleProcessGroup(groupKey: string, currentlyExpanded: boolean): void {
+    if (currentlyExpanded) {
+      this.manualOpenSteps = this.manualOpenSteps.filter((k: string): boolean => k !== groupKey);
+      if (!this.manualClosedSteps.includes(groupKey)) {
+        this.manualClosedSteps = this.manualClosedSteps.concat([groupKey]);
+      }
+    } else {
+      this.manualClosedSteps = this.manualClosedSteps.filter((k: string): boolean => k !== groupKey);
+      if (!this.manualOpenSteps.includes(groupKey)) {
+        this.manualOpenSteps = this.manualOpenSteps.concat([groupKey]);
+      }
+    }
+  }
+
+  private isProcessStepExpanded(
+    stepKey: string,
+    step: AiProcessStep,
+    isLive: boolean,
+    isLastStepInTurn: boolean,
+    totalStepsInTurn: number
+  ): boolean {
+    if (this.manualClosedSteps.includes(stepKey)) return false;
+    if (this.manualOpenSteps.includes(stepKey)) return true;
+    if (step.kind === 'thinking') {
+      if (isLive && (step.status === 'running' || step.id === this.liveActiveThinkId)) return true;
+      if (totalStepsInTurn === 1 && this.autoExpandThinking) return true;
+      if (!isLive && isLastStepInTurn && this.autoExpandThinking && totalStepsInTurn <= 2) return true;
+      return false;
+    }
+    return false;
+  }
+
+  private thinkingOrdinalLabel(steps: AiProcessStep[], stepId: string): string {
+    let totalThink: number = 0;
+    let currentIdx: number = 0;
+    for (let i = 0; i < steps.length; i++) {
+      if (steps[i].kind === 'thinking') {
+        totalThink++;
+        if (steps[i].id === stepId) {
+          currentIdx = totalThink;
+        }
+      }
+    }
+    return totalThink > 1 && currentIdx > 0 ? `思考过程 #${currentIdx}` : '思考过程';
+  }
+
+  private extractToolsFromSteps(steps: AiProcessStep[]): AiChatToolState[] {
+    const out: AiChatToolState[] = [];
+    for (let i = 0; i < steps.length; i++) {
+      const t: AiChatToolState | undefined = steps[i].tool;
+      if (steps[i].kind === 'tool' && t !== undefined) {
+        out.push(t);
+      }
+    }
+    return out;
   }
 
   onLoadingChange(): void {
@@ -828,7 +934,7 @@ export struct AiAssistantPanel {
     config.provider = this.providerValue;
     config.endpoint = this.endpointText.trim();
     config.apiKey = this.apiKeyText.trim();
-    config.timeoutMs = Math.round(this.configNumber(this.timeoutSecondsText, '超时秒数', 1, 180, false) * 1000);
+    config.timeoutMs = Math.round(this.configNumber(this.timeoutSecondsText, '超时秒数', 1, 600, false) * 1000);
     return config;
   }
 
@@ -840,7 +946,7 @@ export struct AiAssistantPanel {
       maxTokens = Math.max(512, contextWindowTokens - 6500);
       this.maxTokensText = String(maxTokens);
     }
-    const timeoutSeconds: number = this.configNumber(this.timeoutSecondsText, '超时秒数', 1, 180, false);
+    const timeoutSeconds: number = this.configNumber(this.timeoutSecondsText, '超时秒数', 1, 600, false);
     const compressionThreshold: number = this.configNumber(this.compressionThresholdText, '压缩阈值百分比', 50, 95, false) / 100;
     const fallbackModel = this.providerValue === AiProvider.DEMO_MODE ? 'hongtu-demo' : '';
     const candidateModel: string = this.modelNameText.trim().length > 0
@@ -1273,7 +1379,8 @@ export struct AiAssistantPanel {
   }
 
   private liveAssistantVisible(): boolean {
-    return this.streamingText.length > 0 || this.reasoningText.length > 0 || this.toolCalls.length > 0;
+    return this.liveRunning || this.liveSteps.length > 0 || this.liveAnswerText.length > 0 ||
+      this.streamingText.length > 0 || this.reasoningText.length > 0 || this.toolCalls.length > 0;
   }
 
   private resultFallbackVisible(): boolean {
@@ -1597,7 +1704,8 @@ export struct AiAssistantPanel {
   }
 
   private planForDisplay(tools: AiChatToolState[], key: string): AiPlanStepView[] {
-    const current: AiChatToolState[] = key === '0' ? this.toolCalls : tools;
+    const liveTools: AiChatToolState[] = this.extractToolsFromSteps(this.liveSteps);
+    const current: AiChatToolState[] = key === '0' ? (liveTools.length > 0 ? liveTools : this.toolCalls) : tools;
     let steps: AiPlanStepView[] = [];
     for (const tool of current) {
       if (tool.status !== 'completed' || this.toolFailed(tool)) continue;
@@ -1621,7 +1729,10 @@ export struct AiAssistantPanel {
 
   private toolForDisplay(tool: AiChatToolState, key: string): AiChatToolState {
     if (key.startsWith('0:')) {
-      return this.toolCalls.find((current: AiChatToolState): boolean => current.id === tool.id) ?? tool;
+      const liveTools: AiChatToolState[] = this.extractToolsFromSteps(this.liveSteps);
+      return liveTools.find((current: AiChatToolState): boolean => current.id === tool.id)
+        ?? this.toolCalls.find((current: AiChatToolState): boolean => current.id === tool.id)
+        ?? tool;
     }
     return tool;
   }
@@ -1969,19 +2080,367 @@ export struct AiAssistantPanel {
     }
   }
 
-  /** Live Builder expressions must read observed props, not capture a one-time ChatMessage. */
+  /**
+   * 完整移植自 DSH-Harmony `NativeProcessView.ets` + `NativeProcessStepView.ets`：
+   * 按真实 AG-UI 事件时序交错展示「思考过程 #1 -> 执行工具 #1 -> 思考过程 #2 -> 执行工具 #2 -> 阶段说明」，
+   * 当前活跃思考步自动展开并直接读取 V1 `@State liveActiveThinkText` 实时流式刷新，已完成前序思考步自动收拢为单行摘要供随时点开。
+   */
+  @Builder
+  LiveProcessTimeline() {
+    if (this.liveSteps.length > 0) {
+      Column({ space: 6 }) {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 6 }) {
+            if (this.liveRunning || this.isLoading) {
+              LoadingProgress().width(14).height(14).color(COLORS.primary)
+            } else {
+              WorkbenchIcon({ name: 'think', iconSize: 14, color: COLORS.primary })
+            }
+            Text('工作过程')
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.ink)
+            Text('·')
+              .fontSize(11)
+              .fontColor(COLORS.muted)
+            Text(summarizeProcessSteps(this.liveSteps, true))
+              .fontSize(11)
+              .fontColor(COLORS.primary)
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            WorkbenchIcon({
+              name: this.isProcessGroupExpanded('live:process', true, true) ? 'chevronUp' : 'chevronDown',
+              iconSize: 12,
+              color: COLORS.muted
+            })
+          }.width('100%').alignItems(VerticalAlign.Center)
+        }
+        .width('100%')
+        .height(30)
+        .padding({ left: 10, right: 10 })
+        .backgroundColor(COLORS.surfaceMuted)
+        .border({ width: 0.8, color: withAlpha(COLORS.primary, 0.35) })
+        .borderRadius(10)
+        .onClick(() => {
+          this.toggleProcessGroup('live:process', this.isProcessGroupExpanded('live:process', true, true));
+        })
+
+        if (this.isProcessGroupExpanded('live:process', true, true)) {
+          Column({ space: 4 }) {
+            this.PlanChecklist(this.extractToolsFromSteps(this.liveSteps), '0')
+
+            ForEach(
+              this.liveSteps,
+              (step: AiProcessStep, idx: number) => {
+                if (step.kind === 'tool' && step.tool !== undefined) {
+                  this.ToolCard(step.tool, `0:${step.tool.id}`)
+                } else if (step.kind === 'commentary') {
+                  Row({ space: 8 }) {
+                    Column({ space: 2 }) {
+                      Circle({ width: 6, height: 6 }).fill(COLORS.primary)
+                    }.width(18).padding({ top: 6 }).alignItems(HorizontalAlign.Center)
+                    Text(step.text)
+                      .fontSize(12)
+                      .lineHeight(19)
+                      .fontColor(COLORS.muted)
+                      .wordBreak(WordBreak.BREAK_WORD)
+                      .layoutWeight(1)
+                  }.width('100%').alignItems(VerticalAlign.Top).padding({ top: 2, bottom: 2 })
+                } else if (step.kind === 'thinking') {
+                  Column({ space: 4 }) {
+                    Button({ type: ButtonType.Normal }) {
+                      Row({ space: 6 }) {
+                        if (step.id === this.liveActiveThinkId && (this.liveRunning || this.isLoading)) {
+                          LoadingProgress().width(13).height(13).color(COLORS.primary)
+                        } else {
+                          WorkbenchIcon({ name: 'think', iconSize: 13, color: COLORS.primary })
+                        }
+                        Text(this.thinkingOrdinalLabel(this.liveSteps, step.id))
+                          .fontSize(12)
+                          .fontWeight(FontWeight.Medium)
+                          .fontColor(step.id === this.liveActiveThinkId ? COLORS.primary : COLORS.ink)
+                        if (!this.isProcessStepExpanded(`live:${step.id}`, step, true, idx === this.liveSteps.length - 1, this.liveSteps.length)) {
+                          Text('·').fontSize(11).fontColor(COLORS.muted)
+                          Text(oneLineStepPreview(step.id === this.liveActiveThinkId ? this.liveActiveThinkText : step.text, 72))
+                            .fontSize(11)
+                            .fontColor(COLORS.muted)
+                            .layoutWeight(1)
+                            .maxLines(1)
+                            .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        } else {
+                          Text(`${(step.id === this.liveActiveThinkId ? this.liveActiveThinkText : step.text).length} 字`)
+                            .fontSize(10)
+                            .fontColor(COLORS.muted)
+                          Blank().layoutWeight(1)
+                        }
+                        WorkbenchIcon({
+                          name: this.isProcessStepExpanded(`live:${step.id}`, step, true, idx === this.liveSteps.length - 1, this.liveSteps.length) ? 'chevronUp' : 'chevronDown',
+                          iconSize: 11,
+                          color: COLORS.muted
+                        })
+                      }.width('100%').alignItems(VerticalAlign.Center)
+                    }
+                    .height(28)
+                    .width('100%')
+                    .padding({ left: 8, right: 8 })
+                    .backgroundColor(Color.Transparent)
+                    .borderRadius(8)
+                    .onClick(() => {
+                      const k: string = `live:${step.id}`;
+                      const cur: boolean = this.isProcessStepExpanded(k, step, true, idx === this.liveSteps.length - 1, this.liveSteps.length);
+                      this.toggleProcessGroup(k, cur);
+                    })
+
+                    if (this.isProcessStepExpanded(`live:${step.id}`, step, true, idx === this.liveSteps.length - 1, this.liveSteps.length)) {
+                      if (step.id === this.liveActiveThinkId) {
+                        // DSH NativeTextContent rule: read @State this.liveActiveThinkText directly inline!
+                        Scroll(this.liveThinkingScroller) {
+                          Row({ space: 8 }) {
+                            Column().width(2).backgroundColor(withAlpha(COLORS.primary, 0.45)).borderRadius(1)
+                            Text(this.liveActiveThinkText)
+                              .fontSize(12)
+                              .lineHeight(19)
+                              .fontColor(COLORS.muted)
+                              .wordBreak(WordBreak.BREAK_WORD)
+                              .copyOption(CopyOptions.LocalDevice)
+                              .layoutWeight(1)
+                          }
+                          .width('100%')
+                          .alignItems(VerticalAlign.Top)
+                          .padding({ left: 10, right: 8, bottom: 6 })
+                          .onAreaChange((_oldArea: Area, newArea: Area) => {
+                            const nextH: number = Number(newArea.height);
+                            if (Number.isFinite(nextH) && Math.abs(nextH - this.liveThinkingContentHeight) > 0.5) {
+                              this.liveThinkingContentHeight = nextH;
+                              if (this.liveThinkingViewportHeight > 0 && nextH > this.liveThinkingViewportHeight) {
+                                try {
+                                  this.liveThinkingScroller.scrollTo({
+                                    xOffset: 0,
+                                    yOffset: Math.max(0, nextH - this.liveThinkingViewportHeight),
+                                    animation: false
+                                  });
+                                } catch (_) {}
+                              }
+                            }
+                          })
+                        }
+                        .width('100%')
+                        .constraintSize({ maxHeight: 176 })
+                        .align(Alignment.TopStart)
+                        .scrollBar(BarState.Auto)
+                        .nestedScroll({ scrollForward: NestedScrollMode.SELF_FIRST, scrollBackward: NestedScrollMode.SELF_FIRST })
+                        .onAreaChange((_oldArea: Area, newArea: Area) => {
+                          const nextV: number = Number(newArea.height);
+                          if (Number.isFinite(nextV) && Math.abs(nextV - this.liveThinkingViewportHeight) > 0.5) {
+                            this.liveThinkingViewportHeight = nextV;
+                          }
+                        })
+                      } else {
+                        Scroll() {
+                          Row({ space: 8 }) {
+                            Column().width(2).backgroundColor(COLORS.border).borderRadius(1)
+                            Text(step.text)
+                              .fontSize(12)
+                              .lineHeight(19)
+                              .fontColor(COLORS.muted)
+                              .wordBreak(WordBreak.BREAK_WORD)
+                              .copyOption(CopyOptions.LocalDevice)
+                              .layoutWeight(1)
+                          }
+                          .width('100%')
+                          .alignItems(VerticalAlign.Top)
+                          .padding({ left: 10, right: 8, bottom: 6 })
+                        }
+                        .width('100%')
+                        .constraintSize({ maxHeight: 176 })
+                        .align(Alignment.TopStart)
+                        .scrollBar(BarState.Auto)
+                      }
+                    }
+                  }
+                  .width('100%')
+                  .backgroundColor(withAlpha(COLORS.surface, 0.72))
+                  .border({ width: 0.6, color: step.id === this.liveActiveThinkId ? withAlpha(COLORS.primary, 0.35) : COLORS.border })
+                  .borderRadius(8)
+                }
+              },
+              (step: AiProcessStep): string => `${step.id}:${step.status}:${step.tool?.status ?? ''}:${step.tool?.result.length ?? 0}`
+            )
+          }
+          .width('100%')
+          .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+          .backgroundColor(withAlpha(COLORS.surfaceMuted, 0.62))
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(10)
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .margin({ bottom: 6 })
+    }
+  }
+
+  @Builder
+  SavedProcessTimeline(msg: ChatMessage) {
+    if (resolveMessageProcessSteps(msg).length > 0) {
+      Column({ space: 6 }) {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 6 }) {
+            Circle({ width: 7, height: 7 })
+              .fill(resolveMessageProcessSteps(msg).some((s: AiProcessStep): boolean => s.status === 'failed') ? COLORS.danger : COLORS.success)
+            Text('工作过程')
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.ink)
+            Text('·')
+              .fontSize(11)
+              .fontColor(COLORS.muted)
+            Text(summarizeProcessSteps(resolveMessageProcessSteps(msg), false))
+              .fontSize(11)
+              .fontColor(COLORS.muted)
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            WorkbenchIcon({
+              name: this.isProcessGroupExpanded(`proc:${msg.timestamp}`, false, this.isLatestAssistantMessage(msg)) ? 'chevronUp' : 'chevronDown',
+              iconSize: 12,
+              color: COLORS.muted
+            })
+          }.width('100%').alignItems(VerticalAlign.Center)
+        }
+        .width('100%')
+        .height(30)
+        .padding({ left: 10, right: 10 })
+        .backgroundColor(COLORS.surfaceMuted)
+        .border({ width: 0.8, color: COLORS.border })
+        .borderRadius(10)
+        .onClick(() => {
+          const gk: string = `proc:${msg.timestamp}`;
+          this.toggleProcessGroup(gk, this.isProcessGroupExpanded(gk, false, this.isLatestAssistantMessage(msg)));
+        })
+
+        if (this.isProcessGroupExpanded(`proc:${msg.timestamp}`, false, this.isLatestAssistantMessage(msg))) {
+          Column({ space: 4 }) {
+            this.PlanChecklist(msg.tools ?? [], `${msg.timestamp}`)
+
+            ForEach(
+              resolveMessageProcessSteps(msg),
+              (step: AiProcessStep, idx: number) => {
+                if (step.kind === 'tool' && step.tool !== undefined) {
+                  this.ToolCard(step.tool, `${msg.timestamp}:${step.tool.id}`)
+                } else if (step.kind === 'commentary') {
+                  Row({ space: 8 }) {
+                    Column({ space: 2 }) {
+                      Circle({ width: 6, height: 6 }).fill(COLORS.muted)
+                    }.width(18).padding({ top: 6 }).alignItems(HorizontalAlign.Center)
+                    Text(step.text)
+                      .fontSize(12)
+                      .lineHeight(19)
+                      .fontColor(COLORS.muted)
+                      .wordBreak(WordBreak.BREAK_WORD)
+                      .layoutWeight(1)
+                  }.width('100%').alignItems(VerticalAlign.Top).padding({ top: 2, bottom: 2 })
+                } else if (step.kind === 'thinking') {
+                  Column({ space: 4 }) {
+                    Button({ type: ButtonType.Normal }) {
+                      Row({ space: 6 }) {
+                        WorkbenchIcon({ name: 'think', iconSize: 13, color: COLORS.primary })
+                        Text(this.thinkingOrdinalLabel(resolveMessageProcessSteps(msg), step.id))
+                          .fontSize(12)
+                          .fontWeight(FontWeight.Medium)
+                          .fontColor(COLORS.ink)
+                        if (!this.isProcessStepExpanded(`saved:${msg.timestamp}:${step.id}`, step, false,
+                          idx === resolveMessageProcessSteps(msg).length - 1, resolveMessageProcessSteps(msg).length)) {
+                          Text('·').fontSize(11).fontColor(COLORS.muted)
+                          Text(oneLineStepPreview(step.text, 72))
+                            .fontSize(11)
+                            .fontColor(COLORS.muted)
+                            .layoutWeight(1)
+                            .maxLines(1)
+                            .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        } else {
+                          Text(`${step.text.length} 字`).fontSize(10).fontColor(COLORS.muted)
+                          Blank().layoutWeight(1)
+                        }
+                        WorkbenchIcon({
+                          name: this.isProcessStepExpanded(`saved:${msg.timestamp}:${step.id}`, step, false,
+                            idx === resolveMessageProcessSteps(msg).length - 1, resolveMessageProcessSteps(msg).length) ? 'chevronUp' : 'chevronDown',
+                          iconSize: 11,
+                          color: COLORS.muted
+                        })
+                      }.width('100%').alignItems(VerticalAlign.Center)
+                    }
+                    .height(28)
+                    .width('100%')
+                    .padding({ left: 8, right: 8 })
+                    .backgroundColor(Color.Transparent)
+                    .borderRadius(8)
+                    .onClick(() => {
+                      const sk: string = `saved:${msg.timestamp}:${step.id}`;
+                      const cur: boolean = this.isProcessStepExpanded(sk, step, false,
+                        idx === resolveMessageProcessSteps(msg).length - 1, resolveMessageProcessSteps(msg).length);
+                      this.toggleProcessGroup(sk, cur);
+                    })
+
+                    if (this.isProcessStepExpanded(`saved:${msg.timestamp}:${step.id}`, step, false,
+                      idx === resolveMessageProcessSteps(msg).length - 1, resolveMessageProcessSteps(msg).length)) {
+                      Scroll() {
+                        Row({ space: 8 }) {
+                          Column().width(2).backgroundColor(withAlpha(COLORS.primary, 0.4)).borderRadius(1)
+                          Text(step.text)
+                            .fontSize(12)
+                            .lineHeight(19)
+                            .fontColor(COLORS.muted)
+                            .wordBreak(WordBreak.BREAK_WORD)
+                            .copyOption(CopyOptions.LocalDevice)
+                            .layoutWeight(1)
+                        }
+                        .width('100%')
+                        .alignItems(VerticalAlign.Top)
+                        .padding({ left: 10, right: 8, bottom: 6 })
+                      }
+                      .width('100%')
+                      .constraintSize({ maxHeight: 220 })
+                      .align(Alignment.TopStart)
+                      .scrollBar(BarState.Auto)
+                    }
+                  }
+                  .width('100%')
+                  .backgroundColor(withAlpha(COLORS.surface, 0.72))
+                  .border({ width: 0.6, color: COLORS.border })
+                  .borderRadius(8)
+                }
+              },
+              (step: AiProcessStep): string => `${msg.timestamp}:${step.id}:${step.status}`
+            )
+          }
+          .width('100%')
+          .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+          .backgroundColor(withAlpha(COLORS.surfaceMuted, 0.62))
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(10)
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .margin({ bottom: 6 })
+    }
+  }
+
+  /** Live Builder reads pure V1 @State synced via @StorageLink('hongtu_ai_live_rev') for guaranteed real-time streaming. */
   @Builder
   LiveAssistantRow() {
     Row() {
       Column({ space: 4 }) {
         Row({ space: 6 }) {
-          if (this.isLoading) {
+          if (this.liveRunning || this.isLoading) {
             LoadingProgress().width(14).height(14).color(COLORS.primary)
           } else {
             WorkbenchIcon({ name: 'sparkles', iconSize: 13, color: COLORS.primary })
           }
           Text('鸿图 Agent').fontSize(12).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
-          Text(this.generationStatus || (this.liveAssistantVisible() ? '思考与绘图中…' : '正在连接模型…'))
+          Text(this.liveStatusText || this.generationStatus || (this.liveAssistantVisible() ? '思考与绘图中…' : '正在连接模型…'))
             .fontSize(11)
             .fontColor(COLORS.primary)
             .maxLines(1)
@@ -1989,22 +2448,16 @@ export struct AiAssistantPanel {
             .layoutWeight(1)
         }.width('100%').height(20).alignItems(VerticalAlign.Center).margin({ bottom: 2 })
 
-        if (splitInlineThinking(this.streamingText, this.reasoningText).thinking.length > 0) {
-          this.ThinkingDisclosureCard(
-            splitInlineThinking(this.streamingText, this.reasoningText).thinking,
-            'live:thinking',
-            true,
-            splitInlineThinking(this.streamingText, this.reasoningText).isStreamingThink ||
-              (this.reasoningText.length > 0 && splitInlineThinking(this.streamingText, this.reasoningText).answer.length === 0),
-            true
-          )
-        }
+        this.LiveProcessTimeline()
 
-        this.AgentTraceAccordion(this.toolCalls, '0', true)
-
-        if (splitInlineThinking(this.streamingText, this.reasoningText).answer.length > 0) {
-          AiMarkdownBody({ content: splitInlineThinking(this.streamingText, this.reasoningText).answer, streaming: this.isLoading,
-            fontSize: this.desktopMode ? UI.fontBody : 12 })
+        if ((this.liveAnswerText || splitInlineThinking(this.streamingText, this.reasoningText).answer).length > 0) {
+          AiMarkdownBody({
+            content: this.liveAnswerText.length > 0
+              ? this.liveAnswerText
+              : splitInlineThinking(this.streamingText, this.reasoningText).answer,
+            streaming: true,
+            fontSize: this.desktopMode ? UI.fontBody : 12
+          })
             .width('100%').padding({ left: 2, right: 2, top: 4, bottom: 4 })
             .backgroundColor(Color.Transparent).borderRadius(RADIUS.md)
         }
@@ -2012,7 +2465,7 @@ export struct AiAssistantPanel {
     }.width('100%').justifyContent(FlexAlign.Start).padding({ top: 6, bottom: 6 })
   }
 
-  /** DSH-style Agent message row: right-aligned user pill vs left-aligned Agent turn with first-class Thinking + Trace + Answer. */
+  /** DSH-style Agent message row: right-aligned user pill vs left-aligned Agent turn with multi-step Process Timeline + Answer. */
   @Builder
   ChatMessageRow(msg: ChatMessage) {
     if (msg.role === ChatRole.USER) {
@@ -2058,26 +2511,15 @@ export struct AiAssistantPanel {
             }
           }.width('100%').alignItems(VerticalAlign.Center).margin({ bottom: 2 })
 
-          if (msg.role === ChatRole.ASSISTANT &&
-            splitInlineThinking(this.messageText(msg), msg.reasoning ?? '').thinking.length > 0) {
-            this.ThinkingDisclosureCard(
-              splitInlineThinking(this.messageText(msg), msg.reasoning ?? '').thinking,
-              `msg:${msg.timestamp}`,
-              false,
-              false,
-              this.isLatestAssistantMessage(msg)
-            )
-          }
-
           if (msg.role === ChatRole.ASSISTANT) {
-            this.AgentTraceAccordion(msg.tools ?? [], `${msg.timestamp}`, false)
+            this.SavedProcessTimeline(msg)
           }
 
-          if (splitInlineThinking(this.messageText(msg), msg.reasoning ?? '').answer.length > 0) {
+          if (resolveMessageFinalAnswer(msg).length > 0) {
             if (msg.role === ChatRole.ASSISTANT) {
               AiMarkdownBody({
-                content: splitInlineThinking(this.messageText(msg), msg.reasoning ?? '').answer,
-                streaming: msg.timestamp === 0 && this.isLoading,
+                content: resolveMessageFinalAnswer(msg),
+                streaming: msg.timestamp === 0 && (this.isLoading || this.liveRunning),
                 fontSize: this.desktopMode ? UI.fontBody : 12
               })
                 .width('100%').padding({ left: 2, right: 2, top: 4, bottom: 4 })
@@ -3463,7 +3905,7 @@ export struct AiAssistantPanel {
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
 
           Column({ space: 4 }) {
-            Text('请求超时 (秒)').fontSize(11).fontColor(COLORS.muted)
+            Text('空闲超时 (秒)').fontSize(11).fontColor(COLORS.muted)
             TextInput({ text: this.timeoutSecondsText, placeholder: '120' })
               .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
               .height(34).fontSize(12).fontColor(COLORS.ink)
@@ -3739,7 +4181,7 @@ export struct AiAssistantPanel {
             this.ChatMessageRow(msg)
           }, (msg: ChatMessage, idx: number) =>
             `${this.activeConversationId}_${idx}_${msg.timestamp}_${msg.commandStatus ?? 'none'}`)
-          if (this.isLoading || this.liveAssistantVisible()) {
+          if (this.liveRunning || this.isLoading || this.liveAssistantVisible()) {
             this.LiveAssistantRow()
           }
           if (this.errorMessage.length > 0) {

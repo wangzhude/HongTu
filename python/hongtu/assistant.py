@@ -161,7 +161,7 @@ class ModelConfig(StrictModel):
     modelName: str = Field(min_length=1, max_length=200)
     temperature: float = Field(default=0.3, ge=0, le=2)
     maxTokens: int = Field(default=8192, ge=128, le=65536)
-    timeoutMs: int = Field(default=120000, ge=1000, le=180000)
+    timeoutMs: int = Field(default=120000, ge=1000, le=600000)
     enabled: bool = True
     contextWindowTokens: int = Field(default=32768, ge=8192, le=2097152)
     reasoningEffort: Literal["auto", "none", "low", "medium", "high"] = "auto"
@@ -1023,9 +1023,14 @@ async def encoded_stream(payload: dict) -> AsyncIterator[str]:
             encoder = adapter
 
         async def public_events():
+            loop = asyncio.get_running_loop()
+            step_window = max(float(RUN_TIMEOUT_SECONDS), config.timeoutMs / 1000.0) if RUN_TIMEOUT_SECONDS >= 1 else float(RUN_TIMEOUT_SECONDS)
+            hard_ceiling = loop.time() + (max(step_window * 5.0, 900.0) if RUN_TIMEOUT_SECONDS >= 1 else float(RUN_TIMEOUT_SECONDS))
             try:
-                async with asyncio.timeout(RUN_TIMEOUT_SECONDS):
+                async with asyncio.timeout(step_window) as deadline_cm:
                     async for event in event_source:
+                        if RUN_TIMEOUT_SECONDS >= 1:
+                            deadline_cm.reschedule(min(hard_ceiling, loop.time() + step_window))
                         if state.run_kind == "diagnostic" and getattr(event, "type", "") == "RUN_FINISHED":
                             yield AguiCustomEvent(name="hongtu.diagnostic", value={"toolCallPassed": state.diagnostic_ok,
                                 "protocol": "assistant-editor-query-v1"})
@@ -1034,7 +1039,7 @@ async def encoded_stream(payload: dict) -> AsyncIterator[str]:
                         else:
                             yield event
             except TimeoutError:
-                yield RunErrorEvent(message="助手已达到180秒总时限，停止本次请求。", code="ASSISTANT_TIMEOUT")
+                yield RunErrorEvent(message="助手长时间无响应已超时，停止本次请求。", code="ASSISTANT_TIMEOUT")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

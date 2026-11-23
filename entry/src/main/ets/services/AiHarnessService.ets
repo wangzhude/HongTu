@@ -1,6 +1,7 @@
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
-import { AiContext, AiModelConfig, ChatMessage, AiAgentTask, aiService } from './AiService';
+import { AiContext, AiModelConfig, ChatMessage, AiAgentTask, AiProcessStep, AiChatToolState, aiService } from './AiService';
+import { splitInlineThinking } from './AiAgentPresentation';
 import { pythonBridgeService } from './PythonBridgeService';
 import { AiBudgetMessage, aiHistoryMessages, buildAiContextBudget } from './AiContextBudget';
 import type { AiEditorQuery } from './AiWorkbenchQuery';
@@ -16,6 +17,8 @@ export interface HarnessArtifactInfo {
 }
 export interface AiHarnessResult {
   text: string; reasoning: string; tools: HarnessToolState[];
+  steps?: AiProcessStep[];
+  finalAnswer?: string;
   artifacts: HarnessArtifactInfo[]; commandsJson: string;
   contextUsage?: HarnessContextUsage;
   workflow?: HarnessWorkflow;
@@ -33,6 +36,7 @@ export interface AiHarnessCallbacks {
   onReasoning: (delta: string) => void;
   onTool: (state: HarnessToolState) => void;
   onStatus: (status: string) => void;
+  onProgress?: (steps: AiProcessStep[], liveAnswer: string) => void;
   onContextUsage?: (usage: HarnessContextUsage) => void;
   onHistoryInput?: (request: string, task: AiAgentTask | undefined, redact: (text: string) => string) => void;
   onEditorQuery?: (query: AiEditorQuery) => Promise<Object>;
@@ -299,7 +303,14 @@ export class AiHarnessService {
     const request = http.createHttp();
     this.activeRequest = request;
     const decoder = new util.TextDecoder('utf-8', { fatal: true });
-    const result: AiHarnessResult = { text: '', reasoning: '', tools: [], artifacts: [], commandsJson: '' };
+    const result: AiHarnessResult = { text: '', reasoning: '', tools: [], steps: [], finalAnswer: '', artifacts: [], commandsJson: '' };
+    const steps: AiProcessStep[] = [];
+    let stepSeq: number = 0;
+    let activeThinkingId: string = '';
+    let inlineThinkStepId: string = '';
+    let pendingNewThinking: boolean = false;
+    let currentSegmentText: string = '';
+    const completedSegments: string[] = [];
     let partial: string = '';
     let received: number = 0;
     let code: number = 0;
@@ -311,25 +322,98 @@ export class AiHarnessService {
     let textSeparatorPending: boolean = false;
     let reasoningSeparatorPending: boolean = false;
     const answeredQueries: Set<string> = new Set<string>();
+
+    const cloneToolCopy = (t: HarnessToolState): AiChatToolState => ({
+      id: t.id, name: t.name, status: t.status, arguments: t.arguments, result: t.result
+    });
+    const cloneSteps = (): AiProcessStep[] => steps.map((s: AiProcessStep): AiProcessStep => ({
+      id: s.id, kind: s.kind, title: s.title, text: s.text, status: s.status,
+      tool: s.tool === undefined ? undefined : cloneToolCopy(s.tool)
+    }));
+    const closeActiveThinking = (): void => {
+      if (activeThinkingId.length > 0) {
+        const idx: number = steps.findIndex((s: AiProcessStep): boolean => s.id === activeThinkingId);
+        if (idx >= 0 && steps[idx].status === 'running') {
+          steps[idx].status = 'completed';
+        }
+        activeThinkingId = '';
+      }
+      if (inlineThinkStepId.length > 0) {
+        const idx2: number = steps.findIndex((s: AiProcessStep): boolean => s.id === inlineThinkStepId);
+        if (idx2 >= 0 && steps[idx2].status === 'running') {
+          steps[idx2].status = 'completed';
+        }
+        inlineThinkStepId = '';
+      }
+    };
+    const computeLiveAnswer = (): string => {
+      const split = splitInlineThinking(currentSegmentText, '');
+      if (split.thinking.length > 0) {
+        if (inlineThinkStepId.length === 0) {
+          inlineThinkStepId = `think-${++stepSeq}`;
+          steps.push({
+            id: inlineThinkStepId,
+            kind: 'thinking',
+            title: '思考过程',
+            text: split.thinking,
+            status: split.isStreamingThink ? 'running' : 'completed'
+          });
+        } else {
+          const idx: number = steps.findIndex((s: AiProcessStep): boolean => s.id === inlineThinkStepId);
+          if (idx >= 0) {
+            steps[idx].text = split.thinking;
+            steps[idx].status = split.isStreamingThink ? 'running' : 'completed';
+          }
+        }
+      }
+      return split.answer;
+    };
+    const emitProgress = (): void => {
+      const liveAns: string = computeLiveAnswer();
+      result.steps = cloneSteps();
+      result.finalAnswer = liveAns.trim().length > 0
+        ? liveAns
+        : (completedSegments.length > 0 ? completedSegments[completedSegments.length - 1] : '');
+      callbacks.onProgress?.(result.steps, liveAns);
+    };
+
     return new Promise<AiHarnessResult>((resolve, reject) => {
       let idleTimer: number = -1;
       let totalTimer: number = -1;
+      let finishGraceTimer: number = -1;
+      const startedAtMs: number = Date.now();
+      const hardCeilingMs: number = 15 * 60 * 1000;
       const cleanup = (): void => {
-        clearTimeout(idleTimer); clearTimeout(totalTimer);
+        clearTimeout(idleTimer); clearTimeout(totalTimer); clearTimeout(finishGraceTimer);
         this.cancelRequest = null;
         try { request.off('dataReceive'); request.off('dataEnd'); request.destroy(); } catch (_) {}
         if (this.activeRequest === request) this.activeRequest = null;
       };
       const fail = (message: string): void => {
         if (finished) return;
+        if (runFinished && (code === 200 || code === 0)) {
+          dataEnded = true;
+          if (code === 0) code = 200;
+          finishIfReady();
+          return;
+        }
         finished = true; cleanup();
         // Credential-bearing transport input is never put into UI history or logs.
         const clean: string = redactRunHistory(message, apiKey, token);
         reject(new Error(clean));
       };
+      const resetProgressDeadline = (): void => {
+        if (runFinished) return;
+        clearTimeout(totalTimer);
+        const elapsed: number = Date.now() - startedAtMs;
+        const remainingCeiling: number = Math.max(15000, hardCeilingMs - elapsed);
+        const windowMs: number = Math.min(remainingCeiling, Math.max(180000, timeoutMs));
+        totalTimer = setTimeout(() => fail('助手长时间无新进展已超时'), windowMs);
+      };
       const resetIdle = (): void => {
+        if (runFinished) return;
         clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => fail('助手连接读取超时'), Math.min(45000, timeoutMs));
+        idleTimer = setTimeout(() => fail('助手连接读取超时'), Math.max(65000, timeoutMs));
       };
       let sawSseFrame: boolean = false;
       let nonSseSample: string = '';
@@ -402,29 +486,78 @@ export class AiHarnessService {
           (event.type === 'CUSTOM' && (event.name === 'hongtu.artifact' || event.name === 'hongtu.commands')))) {
           fail('会话压缩返回了未经允许的工具或编辑结果'); return;
         }
-        if (event.type === 'RUN_FINISHED') { runFinished = true; return; }
+        if (event.type === 'RUN_FINISHED') {
+          runFinished = true;
+          closeActiveThinking();
+          emitProgress();
+          clearTimeout(idleTimer);
+          clearTimeout(totalTimer);
+          finishGraceTimer = setTimeout(() => {
+            if (!finished && runFinished && (code === 200 || code === 0)) {
+              dataEnded = true;
+              if (code === 0) code = 200;
+              finishIfReady();
+            }
+          }, 1500);
+          return;
+        }
+        resetProgressDeadline();
         if (event.type === 'TEXT_MESSAGE_START') {
+          closeActiveThinking();
           textSeparatorPending = result.text.length > 0 && lastTextMessage !== event.messageId;
-          lastTextMessage = event.messageId ?? ''; return;
+          lastTextMessage = event.messageId ?? '';
+          return;
         }
         if (event.type === 'REASONING_MESSAGE_START') {
+          if (activeThinkingId.length > 0 && lastReasoningMessage !== (event.messageId ?? '')) {
+            closeActiveThinking();
+          }
           reasoningSeparatorPending = result.reasoning.length > 0 && lastReasoningMessage !== event.messageId;
-          lastReasoningMessage = event.messageId ?? ''; return;
+          lastReasoningMessage = event.messageId ?? '';
+          pendingNewThinking = true;
+          return;
         }
         if (event.type === 'TEXT_MESSAGE_CONTENT' || event.type === 'REASONING_MESSAGE_CONTENT') {
           if (typeof event.delta !== 'string') { fail('助手事件正文无效'); return; }
           if (event.type === 'TEXT_MESSAGE_CONTENT') {
+            if (activeThinkingId.length > 0) closeActiveThinking();
             if (event.delta.length > 0 && textSeparatorPending) {
-              textSeparatorPending = false; result.text += '\n\n'; callbacks.onText('\n\n');
+              textSeparatorPending = false;
+              result.text += '\n\n';
+              if (currentSegmentText.length > 0) currentSegmentText += '\n\n';
+              callbacks.onText('\n\n');
             }
             result.text += event.delta;
+            currentSegmentText += event.delta;
             if (compression && result.text.length > 6000) { fail('会话摘要超过 6000 字符，未替换原文'); return; }
             callbacks.onText(event.delta);
+            emitProgress();
           } else {
             if (event.delta.length > 0 && reasoningSeparatorPending) {
-              reasoningSeparatorPending = false; result.reasoning += '\n\n'; callbacks.onReasoning('\n\n');
+              reasoningSeparatorPending = false;
+              result.reasoning += '\n\n';
+              callbacks.onReasoning('\n\n');
             }
-            result.reasoning += event.delta; callbacks.onReasoning(event.delta);
+            if (activeThinkingId.length === 0 || pendingNewThinking) {
+              closeActiveThinking();
+              const thinkId: string = `think-${++stepSeq}`;
+              steps.push({
+                id: thinkId,
+                kind: 'thinking',
+                title: '思考过程',
+                text: '',
+                status: 'running'
+              });
+              activeThinkingId = thinkId;
+              pendingNewThinking = false;
+            }
+            const tIdx: number = steps.findIndex((s: AiProcessStep): boolean => s.id === activeThinkingId);
+            if (tIdx >= 0) {
+              steps[tIdx].text += event.delta;
+            }
+            result.reasoning += event.delta;
+            callbacks.onReasoning(event.delta);
+            emitProgress();
           }
           if (result.text.length + result.reasoning.length > 512 * 1024) fail('助手文本超过限制');
           return;
@@ -433,7 +566,23 @@ export class AiHarnessService {
           event.type === 'TOOL_CALL_END' || event.type === 'TOOL_CALL_RESULT') {
           const tool = updateTool(event);
           if (tool === undefined) return;
-          if (event.type === 'TOOL_CALL_START') callbacks.onStatus(`正在调用 ${tool.name}…`);
+          if (event.type === 'TOOL_CALL_START') {
+            closeActiveThinking();
+            const preText: string = computeLiveAnswer().trim();
+            if (preText.length > 0) {
+              completedSegments.push(preText);
+              steps.push({
+                id: `note-${++stepSeq}`,
+                kind: 'commentary',
+                title: '阶段说明',
+                text: preText,
+                status: 'completed'
+              });
+            }
+            currentSegmentText = '';
+            inlineThinkStepId = '';
+            callbacks.onStatus(`正在调用 ${tool.name}…`);
+          }
           if (event.type === 'TOOL_CALL_ARGS' && typeof event.delta === 'string') {
             tool.arguments += event.delta;
             if (tool.arguments.length > 65536) { fail('助手工具参数超过限制'); return; }
@@ -441,12 +590,8 @@ export class AiHarnessService {
           if (event.type === 'TOOL_CALL_RESULT') {
             tool.result = typeof event.content === 'string' ? event.content.substring(0, 16000) : '';
             tool.status = 'completed';
-            // Official SDK RetryPromptPart appends this public retry suffix to
-            // both tool exceptions and parameter validation errors.
             const retrySuffix: string = 'Fix the errors and try again.';
             if (typeof event.content === 'string' && event.content.trim().endsWith(retrySuffix)) tool.status = 'failed';
-            // Planning returns this exact business error as a successful tool
-            // transport result. Do not apply the wording to arbitrary tools.
             if (tool.name === 'update_task_status' && typeof event.content === 'string' &&
               event.content.endsWith(" not found.") && /^Step with id '[^'\r\n]+' not found\.$/.test(event.content)) {
               tool.status = 'failed';
@@ -456,7 +601,25 @@ export class AiHarnessService {
               if (status.success === false || status.status === 'failed' || typeof status.error === 'string') tool.status = 'failed';
             } catch (_) { /* Non-JSON SDK tool output remains a readable result. */ }
           }
-          publishTool(tool); return;
+          const stepId: string = `tool-${tool.id}`;
+          const existingStepIdx: number = steps.findIndex((s: AiProcessStep): boolean => s.id === stepId);
+          const mappedTool: AiChatToolState = cloneToolCopy(tool);
+          if (existingStepIdx < 0) {
+            steps.push({
+              id: stepId,
+              kind: 'tool',
+              title: tool.name,
+              text: '',
+              status: tool.status,
+              tool: mappedTool
+            });
+          } else {
+            steps[existingStepIdx].status = tool.status;
+            steps[existingStepIdx].tool = mappedTool;
+          }
+          publishTool(tool);
+          emitProgress();
+          return;
         }
         if (event.type === 'CUSTOM' && event.value !== undefined) {
           if (event.value === null || typeof event.value !== 'object') { fail('助手自定义事件无效'); return; }
@@ -514,7 +677,7 @@ export class AiHarnessService {
         try { consume(line); } catch (_) { fail('助手事件处理失败'); }
       };
       this.cancelRequest = (): void => fail('助手请求已取消');
-      totalTimer = setTimeout(() => fail('助手运行总时长超过 180 秒'), 180000);
+      resetProgressDeadline();
       resetIdle();
       try {
       request.on('dataReceive', (data: ArrayBuffer): void => {
@@ -541,7 +704,7 @@ export class AiHarnessService {
       request.requestInStream(url, {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
-        extraData: body, connectTimeout: Math.min(15000, timeoutMs), readTimeout: timeoutMs
+        extraData: body, connectTimeout: Math.min(15000, timeoutMs), readTimeout: 600000
       }).then((responseCode: number): void => {
         code = responseCode;
         if (code !== 200) {

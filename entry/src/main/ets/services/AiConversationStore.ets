@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatRole, AiChatToolState, AiTaskCheckpoint, AiProjectKnowledge } from './AiService';
+import type { ChatMessage, ChatRole, AiChatToolState, AiProcessStep, AiTaskCheckpoint, AiProjectKnowledge } from './AiService';
 import { cloneStructured } from '../common/CloneUtils';
 
 export interface AiConversationSummary {
@@ -237,6 +237,19 @@ export class AiConversationStore {
     if (message.tools !== undefined) {
       if (!Array.isArray(message.tools) || message.tools.length > 64) throw new Error('会话工具记录超过限制');
       for (const tool of message.tools) this.validateTool(tool);
+    }
+    if (message.steps !== undefined) {
+      if (!Array.isArray(message.steps) || message.steps.length > 128) throw new Error('会话步骤记录超过限制');
+      for (const step of message.steps) {
+        if (!step || typeof step.id !== 'string' || step.id.length === 0 || step.id.length > 160 ||
+          !['thinking', 'tool', 'commentary'].includes(step.kind) ||
+          typeof step.title !== 'string' || step.title.length > 256 ||
+          typeof step.text !== 'string' || step.text.length > 524288 ||
+          !['running', 'completed', 'failed'].includes(step.status)) {
+          throw new Error('会话步骤记录无效');
+        }
+        if (step.tool !== undefined) this.validateTool(step.tool);
+      }
     }
     const task = message.task;
     if (task !== undefined && (!task || message.role !== 'user' || typeof task.originalRequest !== 'string' ||

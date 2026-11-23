@@ -10,7 +10,12 @@ import { AiService, parseAiModelCatalog, inferAiModelContextWindow, AiProvider }
 import { queryAiWorkbench } from '../main/ets/services/AiWorkbenchQuery';
 import { parseLyp, mergeLypIntoLayers, entriesFromUiLayers, formatLyp } from '../main/ets/services/LypService';
 import { splitMarkdownSegments, repairStreamingMarkdown, describeAiToolCall, matchAiSlashCommands, buildAgentCanvasHudModel, parseAiTokenMeter, computeDraftAwareTokenMeter, splitInlineThinking,
-  splitStreamingMarkdownBlocks, formatCompactTokens, AI_SLASH_COMMANDS } from '../main/ets/services/AiAgentPresentation';
+  splitStreamingMarkdownBlocks,
+  DshStreamingMarkdownBuffer,
+  summarizeProcessSteps,
+  publishAiLiveStream,
+  getAiLiveStreamSnapshot,
+  resetAiLiveStream, formatCompactTokens, AI_SLASH_COMMANDS } from '../main/ets/services/AiAgentPresentation';
 import type { LayoutPort, LayoutCrossSection, LayoutContextRecord } from '../main/ets/models/LayoutPort';
 import type { LayoutPropRecord, NativeShape } from '../main/cpp/types/libhongtu/Index';
 import { EditService, editService, EditStructureState } from '../main/ets/services/EditService';
@@ -942,6 +947,28 @@ export default function localUnitTest(): void {
       expect(codeStreaming.length).assertEqual(2);
       expect(codeStreaming[1].kind).assertEqual('code');
       expect(codeStreaming[1].language).assertEqual('python');
+
+      const dshBuf: DshStreamingMarkdownBuffer = new DshStreamingMarkdownBuffer();
+      const u1 = dshBuf.update('第一段分析中');
+      expect(u1.changed).assertTrue();
+      expect(u1.appended.length).assertEqual(0);
+      expect(u1.tail).assertEqual('第一段分析中');
+      const u2 = dshBuf.update('第一段分析中，已完成。\n\n第二段正在流式生成');
+      expect(u2.appended.length).assertEqual(1);
+      expect(u2.tail).assertEqual('第二段正在流式生成');
+
+      publishAiLiveStream(true, '正在调用 query_editor…', [
+        { id: 'think-1', kind: 'thinking', title: '思考过程', text: '先查看顶层单元', status: 'completed' },
+        { id: 'tool-1', kind: 'tool', title: 'query_editor', text: '', status: 'completed',
+          tool: { id: 'c1', name: 'query_editor', status: 'completed', arguments: '{"kind":"shapes"}', result: '{"total":4}' } },
+        { id: 'think-2', kind: 'thinking', title: '思考过程', text: '继续核对间距', status: 'running' }
+      ], '');
+      const liveSnap = getAiLiveStreamSnapshot();
+      expect(liveSnap.running).assertTrue();
+      expect(liveSnap.steps.length).assertEqual(3);
+      expect(liveSnap.activeThinkId).assertEqual('think-2');
+      expect(summarizeProcessSteps(liveSnap.steps, false)).assertEqual('2 步思考 · 1 步工具调用');
+      resetAiLiveStream();
     });
   });
 }

@@ -20,8 +20,11 @@ import { hongTuThemeState, Radius } from '../../store/ThemeStore';
 import type { AiChatToolState } from '../../services/AiService';
 import {
   AgentCanvasHudModel,
-  buildAgentCanvasHudModel
+  AiLiveStreamSnapshot,
+  buildAgentCanvasHudModel,
+  getAiLiveStreamSnapshot
 } from '../../services/AiAgentPresentation';
+import type { AiProcessStep } from '../../services/AiService';
 import { DrawnStatusIcon } from '../DrawnStatusIcon';
 import { WorkbenchIcon } from './WorkbenchIcon';
 
@@ -82,7 +85,7 @@ export struct AgentCanvasAuraOverlay {
   }
 
   private activeBorderColor(): string {
-    if (!this.isLoading) {
+    if (!this.isLoading && !this.liveRunning) {
       return withAlpha('#14B8A6', 0.85);
     }
     if (this.reduceMotion) {
@@ -246,12 +249,36 @@ export struct AgentLiveStatusHud {
   cancelPreviewAction: () => void = () => {};
   dismissNoticeAction: () => void = () => {};
 
+  @StorageLink('hongtu_ai_live_rev') @Watch('onLiveStreamTick') liveStreamRev: number = 0;
+  @State liveRunning: boolean = false;
+  @State liveStatusText: string = '';
+  @State liveAnswerText: string = '';
+  @State liveTools: AiChatToolState[] = [];
   @State nowMs: number = Date.now();
   private clockTimer: number = -1;
   private disposed: boolean = false;
 
   aboutToAppear(): void {
     this.disposed = false;
+    this.onLiveStreamTick();
+    this.syncClock();
+  }
+
+  onLiveStreamTick(): void {
+    if (this.disposed) return;
+    const snap: AiLiveStreamSnapshot = getAiLiveStreamSnapshot();
+    this.liveRunning = snap.running;
+    this.liveStatusText = snap.statusText;
+    this.liveAnswerText = snap.answerText.length > 0 ? snap.answerText : snap.activeThinkText;
+    const tools: AiChatToolState[] = [];
+    for (let i = 0; i < snap.steps.length; i++) {
+      const s: AiProcessStep = snap.steps[i];
+      if (s.kind === 'tool' && s.tool !== undefined) {
+        tools.push(s.tool);
+      }
+    }
+    this.liveTools = tools;
+    this.nowMs = Date.now();
     this.syncClock();
   }
 
@@ -276,7 +303,7 @@ export struct AgentLiveStatusHud {
   }
 
   private syncClock(): void {
-    if (!this.isLoading) {
+    if (!this.isLoading && !this.liveRunning) {
       this.stopClock();
       return;
     }
@@ -293,14 +320,18 @@ export struct AgentLiveStatusHud {
   }
 
   private hudModel(): AgentCanvasHudModel {
+    const activeLoading: boolean = this.liveRunning || this.isLoading;
+    const activeTools: AiChatToolState[] = this.liveTools.length > 0 ? this.liveTools : this.toolCalls;
+    const activeStatus: string = this.liveStatusText.length > 0 ? this.liveStatusText : this.generationStatus;
+    const activeText: string = this.liveAnswerText.length > 0 ? this.liveAnswerText : this.streamingText;
     return buildAgentCanvasHudModel(
-      this.isLoading,
+      activeLoading,
       this.pendingSummary,
       this.minimizedNotice,
       this.showAiPanel,
-      this.toolCalls,
-      this.generationStatus,
-      this.streamingText,
+      activeTools,
+      activeStatus,
+      activeText,
       this.runStartedAt,
       this.nowMs
     );

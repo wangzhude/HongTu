@@ -1,3 +1,4 @@
+import asyncio
 """Task policy checks through the actual SDK; no provider or user service."""
 import json
 import unittest
@@ -8,6 +9,7 @@ from test_assistant import collect, parse_sse, request_payload, tool_model
 import test_assistant_http as http_fixture
 from test_assistant_http import decode_sse
 from pydantic_ai.messages import RetryPromptPart
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 
@@ -285,6 +287,32 @@ class AssistantTaskPolicyHTTP(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(any(e.get("name") == "hongtu.commands" for e in decode_sse(raw)))
         self.assert_slot_available()
+
+    def test_timeout_ms_accepts_up_to_600_seconds(self):
+        cfg = mod.ModelConfig(
+            provider="openai_compatible",
+            endpoint="http://127.0.0.1:7863/v1",
+            modelName="cn:deepseek-v4.1-flash",
+            timeoutMs=300000,
+        )
+        self.assertEqual(cfg.timeoutMs, 300000)
+
+    def test_active_streaming_reply_reschedules_deadline_without_false_timeout(self):
+        async def steady_stream(messages, info):
+            for idx in range(4):
+                await asyncio.sleep(0.35)
+                yield f"第{idx + 1}段正常流式回复。"
+        class Client:
+            async def close(self): pass
+        payload = request_payload("解释当前选中的图形")
+        payload["forwardedProps"]["modelConfig"]["timeoutMs"] = 1000
+        with patch.object(mod, "_model_client", return_value=(FunctionModel(stream_function=steady_stream), Client(), {})), patch.object(mod, "RUN_TIMEOUT_SECONDS", 1.0):
+            status, _, raw = self.request(body=json.dumps(payload).encode("utf-8"))
+        self.assertEqual(status, 200)
+        decoded = decode_sse(raw)
+        self.assertFalse(any(e.get("code") == "ASSISTANT_TIMEOUT" for e in decoded))
+        self.assertEqual(decoded[-1]["type"], "RUN_FINISHED")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -550,10 +550,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             thread.start()
             started = time.monotonic()
+            last_active = started
             sent = 0
-            while time.monotonic() - started < 185:
+            while time.monotonic() - last_active < 190 and time.monotonic() - started < 905:
                 try:
                     value = output.get(timeout=5)
+                    if value is not end:
+                        last_active = time.monotonic()
                 except queue.Empty:
                     value = b": hongtu heartbeat\n\n"
                 if value is end:

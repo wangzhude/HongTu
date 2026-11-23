@@ -100,6 +100,8 @@ import { layoutCompareService, LayoutCompareRun } from '../services/LayoutCompar
 import { layerStackExportService } from '../services/LayerStackExportService';
 import { pythonWorkspaceService, PythonWorkspaceBundle, PythonEditorDraft, PythonTemplate } from '../services/PythonWorkspaceService';
 import { aiHarnessService, AiHarnessResult, HarnessToolState, HarnessContextUsage } from '../services/AiHarnessService';
+import { publishAiLiveStream, resetAiLiveStream, splitInlineThinking } from '../services/AiAgentPresentation';
+import type { AiProcessStep } from '../services/AiService';
 import { WorkspaceTabs } from '../components/workbench/WorkspaceTabs';
 import { ProjectPanel, ProjectRecoveryEntry } from '../components/workbench/ProjectPanel';
 import { fileRecoveryService } from '../services/FileRecoveryService';
@@ -585,6 +587,8 @@ struct Index {
   private aiStreamFlushTimer: number = -1;
   private aiStreamBufferedText: string = '';
   private aiStreamBufferedReasoning: string = '';
+  private aiStreamBufferedSteps: AiProcessStep[] = [];
+  private aiStreamBufferedAnswer: string = '';
   private aiPythonPhase: string = '';
   private aiGeneratedFitAction: (() => void) | null = null;
   private aiGeneratedFitTimer: number = -1;
@@ -8856,8 +8860,9 @@ struct Index {
       this.aiStore.aiCanCancel = true;
       this.aiStore.aiError = '';
       this.aiStore.aiLastResult = '';
-      // AI-15: 流式增量显示——清空 streamingText 与节流缓冲
+      // AI-15: 流式增量显示——清空 streamingText 与节流缓冲，并立即开启 V1 实时流状态
       this.clearAiStreamUiBuffer(true);
+      publishAiLiveStream(true, this.panelStore.statusText, [], '');
       this.aiStore.aiToolCalls = [];
       await aiService.ensureReady();
       this.assertAiRequestCurrent(ticket, requestContext);
@@ -8992,10 +8997,38 @@ struct Index {
     }
     this.aiStreamBufferedText = '';
     this.aiStreamBufferedReasoning = '';
+    this.aiStreamBufferedSteps = [];
+    this.aiStreamBufferedAnswer = '';
     if (resetStore) {
       this.aiStore.aiStreamingText = '';
       this.aiStore.aiReasoningText = '';
+      resetAiLiveStream();
     }
+  }
+
+  private commitAiLiveSnapshot(): void {
+    if (this.aiStore.aiStreamingText !== this.aiStreamBufferedText) {
+      this.aiStore.aiStreamingText = this.aiStreamBufferedText;
+    }
+    if (this.aiStore.aiReasoningText !== this.aiStreamBufferedReasoning) {
+      this.aiStore.aiReasoningText = this.aiStreamBufferedReasoning;
+    }
+    let steps: AiProcessStep[] = this.aiStreamBufferedSteps;
+    let ans: string = this.aiStreamBufferedAnswer;
+    if (steps.length === 0 && (this.aiStreamBufferedText.length > 0 || this.aiStreamBufferedReasoning.length > 0)) {
+      const split = splitInlineThinking(this.aiStreamBufferedText, this.aiStreamBufferedReasoning);
+      if (split.thinking.length > 0) {
+        steps = [{
+          id: 'direct-think-1',
+          kind: 'thinking',
+          title: '思考过程',
+          text: split.thinking,
+          status: split.isStreamingThink ? 'running' : 'completed'
+        }];
+      }
+      ans = split.answer;
+    }
+    publishAiLiveStream(this.aiStore.aiLoading, this.panelStore.statusText, steps, ans);
   }
 
   private flushAiStreamUiNow(): void {
@@ -9003,20 +9036,11 @@ struct Index {
       clearTimeout(this.aiStreamFlushTimer);
       this.aiStreamFlushTimer = -1;
     }
-    if (this.aiStore.aiStreamingText !== this.aiStreamBufferedText) {
-      this.aiStore.aiStreamingText = this.aiStreamBufferedText;
-    }
-    if (this.aiStore.aiReasoningText !== this.aiStreamBufferedReasoning) {
-      this.aiStore.aiReasoningText = this.aiStreamBufferedReasoning;
-    }
+    if (!this.pageAlive) return;
+    this.commitAiLiveSnapshot();
   }
 
-  private appendAiStreamUiDelta(kind: 'text' | 'reasoning', delta: string): void {
-    if (kind === 'text') {
-      this.aiStreamBufferedText += delta;
-    } else {
-      this.aiStreamBufferedReasoning += delta;
-    }
+  private scheduleAiStreamUiCommit(): void {
     if (this.aiStreamFlushTimer >= 0) {
       return;
     }
@@ -9025,13 +9049,17 @@ struct Index {
       if (!this.pageAlive || !this.aiStore.aiLoading) {
         return;
       }
-      if (this.aiStore.aiStreamingText !== this.aiStreamBufferedText) {
-        this.aiStore.aiStreamingText = this.aiStreamBufferedText;
-      }
-      if (this.aiStore.aiReasoningText !== this.aiStreamBufferedReasoning) {
-        this.aiStore.aiReasoningText = this.aiStreamBufferedReasoning;
-      }
-    }, 32);
+      this.commitAiLiveSnapshot();
+    }, 24);
+  }
+
+  private appendAiStreamUiDelta(kind: 'text' | 'reasoning', delta: string): void {
+    if (kind === 'text') {
+      this.aiStreamBufferedText += delta;
+    } else {
+      this.aiStreamBufferedReasoning += delta;
+    }
+    this.scheduleAiStreamUiCommit();
   }
 
   private aiRequestContext(): string {
@@ -9155,6 +9183,7 @@ struct Index {
     let previousDraft: string | undefined;
     let capturedText: string = '', capturedReasoning: string = '';
     let capturedTools: AiChatToolState[] = [];
+    let capturedSteps: AiProcessStep[] = [];
     let checkpoint: AiTaskCheckpoint | undefined;
     const setLocalStage: (stage: string, status: 'running' | 'completed' | 'failed', detail: string) => void =
       (stage: string, status: 'running' | 'completed' | 'failed', detail: string): void => {
@@ -9166,6 +9195,15 @@ struct Index {
         const owned: AiChatToolState = { id: item.id, name: item.name, status: item.status, arguments: item.arguments, result: item.result };
         const position: number = capturedTools.findIndex((tool: AiChatToolState): boolean => tool.id === id);
         if (position < 0) capturedTools.push(owned); else capturedTools[position] = owned;
+        const stepId: string = `tool-${id}`;
+        const sPos: number = capturedSteps.findIndex((s: AiProcessStep): boolean => s.id === stepId);
+        if (sPos < 0) {
+          capturedSteps.push({ id: stepId, kind: 'tool', title: owned.name, text: '', status, tool: owned });
+        } else {
+          capturedSteps[sPos] = { id: stepId, kind: 'tool', title: owned.name, text: '', status, tool: owned };
+        }
+        this.aiStreamBufferedSteps = capturedSteps.slice();
+        this.flushAiStreamUiNow();
       };
     try { previousDraft = JSON.stringify(pythonWorkspaceService.draft() ?? null); } catch (_) {}
     try {
@@ -9248,8 +9286,19 @@ struct Index {
             if (index < 0) next.push(copy); else next[index] = copy;
             this.aiStore.aiToolCalls = next;
           },
+          onProgress: (steps: AiProcessStep[], liveAnswer: string): void => {
+            capturedSteps = steps.slice();
+            if (isCurrentPage() && ticket === this.aiRequestGeneration && requestContext === this.aiRequestContext()) {
+              this.aiStreamBufferedSteps = steps.slice();
+              this.aiStreamBufferedAnswer = liveAnswer;
+              this.scheduleAiStreamUiCommit();
+            }
+          },
           onStatus: (status: string): void => {
-            if (ticket === this.aiRequestGeneration && requestContext === this.aiRequestContext()) this.panelStore.statusText = status;
+            if (ticket === this.aiRequestGeneration && requestContext === this.aiRequestContext()) {
+              this.panelStore.statusText = status;
+              this.flushAiStreamUiNow();
+            }
           },
           onContextUsage: (usage: HarnessContextUsage): void => {
             if (isCurrentPage() && ticket === this.aiRequestGeneration) this.aiStore.aiReportedContextUsage =
@@ -9257,10 +9306,18 @@ struct Index {
           }
         }, task.requiredValidationProfile, conversationId, '', task, resumeTask);
       capturedTools = reply.tools.slice();
+      if (reply.steps !== undefined && reply.steps.length > 0) {
+        capturedSteps = reply.steps.slice();
+      }
+      const answerBody: string = (reply.finalAnswer !== undefined && reply.finalAnswer.trim().length > 0)
+        ? reply.finalAnswer
+        : reply.text;
       this.assertAiRequestCurrent(ticket, requestContext);
-      this.clearAiStreamUiBuffer(false);
-      this.aiStore.aiStreamingText = reply.text;
-      this.aiStore.aiReasoningText = reply.reasoning;
+      this.aiStreamBufferedText = answerBody;
+      this.aiStreamBufferedReasoning = reply.reasoning;
+      this.aiStreamBufferedSteps = capturedSteps.slice();
+      this.aiStreamBufferedAnswer = answerBody;
+      this.flushAiStreamUiNow();
       this.aiStore.aiToolCalls = reply.tools.slice();
       if (reply.artifacts.length > 0 && reply.commandsJson.trim().length > 0) {
         throw new Error('助手同时返回新文档和当前文档编辑方案，未自动应用，请分开请求');
@@ -9322,7 +9379,7 @@ struct Index {
           check = '当前规则检查未完成，请手动复检';
           setLocalStage('drc', 'failed', check);
         }
-        message = `${reply.text}${reply.text.length > 0 ? '\n\n' : ''}` +
+        message = `${answerBody}${answerBody.length > 0 ? '\n\n' : ''}` +
           `已载入 ${published} 个独立版图：${artifacts.map((artifact: PythonLayoutArtifact): string => artifact.name).join('、')}。` +
           `${check}。通用几何示例，未作工艺签核；原文档保留在原标签页。`;
         businessSummary = `已载入 ${published} 个独立版图。${check}。`;
@@ -9358,10 +9415,10 @@ struct Index {
         this.prepareAiReview(commands);
         this.pendingAiRunId = checkpoint?.id ?? '';
         commandStatus = 'pending';
-        message = `${reply.text}${reply.text.length > 0 ? '\n\n' : ''}编辑方案已生成，确认后应用；版图尚未修改。`;
+        message = `${answerBody}${answerBody.length > 0 ? '\n\n' : ''}编辑方案已生成，确认后应用；版图尚未修改。`;
         businessSummary = `${commands.length} 项操作待确认，版图未修改`;
       } else {
-        message = reply.text || '助手运行结束，未返回可显示的正文或版图结果。';
+        message = answerBody || reply.text || '助手运行结束，未返回可显示的正文或版图结果。';
         businessSummary = 'AI 回复已就绪';
       }
       success = true;
@@ -9370,6 +9427,23 @@ struct Index {
       capturedTools = capturedTools.map((tool: AiChatToolState): AiChatToolState => tool.status === 'running'
         ? { id: tool.id, name: tool.name, status: 'failed', arguments: tool.arguments,
           result: ticket !== this.aiRequestGeneration ? '已取消等待，步骤未完成；后台工具可能仍在收尾' : '步骤未完成，请查看答复说明' } : tool);
+      capturedSteps = capturedSteps.map((step: AiProcessStep): AiProcessStep => {
+        if (step.status !== 'running') return step;
+        return {
+          id: step.id,
+          kind: step.kind,
+          title: step.title,
+          text: step.text,
+          status: 'failed',
+          tool: step.tool === undefined ? undefined : {
+            id: step.tool.id,
+            name: step.tool.name,
+            status: 'failed',
+            arguments: step.tool.arguments,
+            result: ticket !== this.aiRequestGeneration ? '已取消等待，步骤未完成；后台工具可能仍在收尾' : '步骤未完成，请查看答复说明'
+          }
+        };
+      });
       const detail: string = ticket !== this.aiRequestGeneration ? '已取消生成等待；后续结果不应用，后台工具可能仍在收尾' :
         `助手未完成：${error instanceof Error ? error.message : String(error)}`;
       if (isCurrentPage()) this.aiStore.aiToolCalls = capturedTools.slice();
@@ -9406,7 +9480,7 @@ struct Index {
         aiService.recordHarnessResult(historyPrompt, redactHistory(message), redactHistory(reply?.reasoning ?? capturedReasoning),
           capturedTools.map((tool: AiChatToolState): AiChatToolState => ({ id: tool.id, name: tool.name, status: tool.status,
             arguments: redactHistory(tool.arguments), result: redactHistory(tool.result) })),
-          success, commandStatus, conversationId, ticket !== this.aiRequestGeneration, historyTask);
+          success, commandStatus, conversationId, ticket !== this.aiRequestGeneration, historyTask, capturedSteps);
         if (isCurrentPage()) this.refreshAiConversation();
       } catch (error) {
         if (isCurrentPage()) {
