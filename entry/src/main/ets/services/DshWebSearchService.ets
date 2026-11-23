@@ -162,6 +162,27 @@ function decodeResultBody(result: string | Object | ArrayBuffer): string {
   return String(result);
 }
 
+function decodeBingTarget(encoded: string): string {
+  if (encoded.length > 4096 || encoded.length % 4 === 1) return '';
+
+  const alphabet: string = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  let bits: number = 0;
+  let buffer: number = 0;
+  let escaped: string = '';
+  for (let i = 0; i < encoded.length; i++) {
+    const digit: number = alphabet.indexOf(encoded[i]);
+    if (digit < 0) return '';
+    buffer = (buffer << 6) | digit;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      escaped += `%${(buffer >> bits).toString(16).padStart(2, '0')}`;
+      buffer &= (1 << bits) - 1;
+    }
+  }
+  return buffer === 0 ? decodeURIComponent(escaped).trim() : '';
+}
+
 export function unwrapSearchRedirectUrl(rawHref: string): string {
   let href: string = decodeHtmlEntities(rawHref).trim();
   if (href.startsWith('//')) {
@@ -176,14 +197,7 @@ export function unwrapSearchRedirectUrl(rawHref: string): string {
   const bingMatch: RegExpExecArray | null = /bing\.com\/ck\/a\?(?:[^#]*&)?u=a1([A-Za-z0-9_-]+)/i.exec(href);
   if (bingMatch !== null) {
     try {
-      let b64: string = bingMatch[1].replace(/-/g, '+').replace(/_/g, '/');
-      while (b64.length % 4 !== 0) {
-        b64 += '=';
-      }
-      const helper: util.Base64Helper = new util.Base64Helper();
-      const decodedBytes: Uint8Array = helper.decodeSync(b64);
-      const decoder = util.TextDecoder.create('utf-8', { ignoreBOM: true });
-      const target: string = decoder.decodeToString(decodedBytes).trim();
+      const target: string = decodeBingTarget(bingMatch[1]);
       if (/^https?:\/\//i.test(target)) {
         href = target;
       }
