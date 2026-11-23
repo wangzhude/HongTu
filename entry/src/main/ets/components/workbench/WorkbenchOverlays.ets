@@ -4890,11 +4890,17 @@ export struct AiAssistantPanel {
               .onKeyEvent((event: KeyEvent) => {
                 event.stopPropagation();
                 const keyName: string = canvasKeyName(event.keyCode, event.keyText);
-                const modShift: boolean = event.getModifierKeyState?.(['Shift']) === true;
-                const modCtrl: boolean = event.getModifierKeyState?.(['Ctrl']) === true || event.getModifierKeyState?.(['Meta']) === true;
                 if (keyName === 'SHIFT' || event.keyCode === 2047 || event.keyCode === 2048) {
                   this.composerShiftHeld = event.type === KeyType.Down;
                   return;
+                }
+                let modShift: boolean = this.composerShiftHeld;
+                let modCtrl: boolean = event.metaKey === 1;
+                try {
+                  modShift = event.getModifierKeyState?.(['Shift']) ?? modShift;
+                  modCtrl = modCtrl || event.getModifierKeyState?.(['Ctrl']) === true;
+                } catch (_) {
+                  // Keep the tracked Shift state and native Meta flag.
                 }
                 this.composerShiftHeld = modShift;
                 if (event.type === KeyType.Down && modCtrl && keyName === 'V') {
