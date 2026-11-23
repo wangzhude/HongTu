@@ -18,6 +18,143 @@ metal = layout.layer(1, 0)
 unit.shapes(metal).insert(db.Box(0, 0, 800, 400))
 top.insert(db.CellInstArray(unit.cell_index(), db.Trans(), db.Vector(1200, 0), db.Vector(0, 800), 6, 4))`;
 
+interface BuiltinPythonPreset {
+  key: string;
+  chipLabel: string;
+  title: string;
+  inputMode: PythonInputMode;
+  parameters: string;
+  requestText: string;
+  script: string;
+}
+
+const BUILTIN_PYTHON_PRESETS: BuiltinPythonPreset[] = [
+  {
+    key: 'phc_holes',
+    chipLabel: '圆孔光子晶体',
+    title: '圆孔光子晶体 5x5',
+    inputMode: 'new',
+    parameters: '{"pitch":500,"radius":120,"nx":5,"ny":5}',
+    requestText: '生成 5x5 圆孔光子晶体阵列，周期 500nm，孔半径 120nm，位于图层 1/0，保留独立单元层级。',
+    script: `import hongtu as db
+import math
+
+pitch = int(params.get('pitch', 500))
+radius = int(params.get('radius', 120))
+nx = int(params.get('nx', 5))
+ny = int(params.get('ny', 5))
+
+layout = db.Layout()
+layout.dbu = 0.001
+top = layout.create_cell('PHC_ARRAY')
+hole = layout.create_cell('HOLE_UNIT')
+si_layer = layout.layer(db.LayerInfo(1, 0, 'SI_CORE'))
+
+pts = []
+for i in range(24):
+    ang = 2.0 * math.pi * i / 24.0
+    pts.append(db.Point(int(round(radius * math.cos(ang))), int(round(radius * math.sin(ang)))))
+hole.shapes(si_layer).insert(db.Polygon(pts))
+
+top.insert(db.CellInstArray(
+    hole.cell_index(),
+    db.Trans(),
+    db.Vector(pitch, 0),
+    db.Vector(0, pitch),
+    nx,
+    ny
+))`
+  },
+  {
+    key: 'wg_bend_90',
+    chipLabel: '90° 波导弯曲',
+    title: '90° 单模硅波导弯曲',
+    inputMode: 'new',
+    parameters: '{"width":450,"radius":5000,"segments":32}',
+    requestText: '生成单模硅波导 90 度圆弧弯曲，波导宽度 450nm，弯曲半径 5000nm，位于图层 1/0。',
+    script: `import hongtu as db
+import math
+
+width = int(params.get('width', 450))
+radius = int(params.get('radius', 5000))
+segments = int(params.get('segments', 32))
+
+layout = db.Layout()
+layout.dbu = 0.001
+top = layout.create_cell('WG_BEND_90')
+wg_layer = layout.layer(db.LayerInfo(1, 0, 'WG_SI'))
+
+pts = [db.Point(-1500, 0)]
+for i in range(segments + 1):
+    ang = -0.5 * math.pi + (0.5 * math.pi * i / segments)
+    cx = int(round(radius * math.cos(ang)))
+    cy = int(round(radius + radius * math.sin(ang)))
+    pts.append(db.Point(cx, cy))
+pts.append(db.Point(radius, radius + 1500))
+
+top.shapes(wg_layer).insert(db.Path(pts, width))`
+  },
+  {
+    key: 'cmos_inv',
+    chipLabel: 'CMOS 反相器',
+    title: '标准 CMOS 反相器单元',
+    inputMode: 'new',
+    parameters: '{"wn":600,"wp":1200,"lg":180}',
+    requestText: '生成标准 CMOS 反相器单元，包含有源区、多晶硅栅极、金属互连与接触孔。',
+    script: `import hongtu as db
+
+wn = int(params.get('wn', 600))
+wp = int(params.get('wp', 1200))
+lg = int(params.get('lg', 180))
+
+layout = db.Layout()
+layout.dbu = 0.001
+top = layout.create_cell('CMOS_INV')
+
+l_nwell = layout.layer(db.LayerInfo(6, 0, 'NWELL'))
+l_aa = layout.layer(db.LayerInfo(5, 0, 'AA'))
+l_poly = layout.layer(db.LayerInfo(4, 0, 'POLY'))
+l_m1 = layout.layer(db.LayerInfo(1, 0, 'M1'))
+l_via = layout.layer(db.LayerInfo(10, 0, 'CONT'))
+
+top.shapes(l_nwell).insert(db.Box(-700, 500, 700, 500 + wp + 600))
+top.shapes(l_aa).insert(db.Box(-500, -200 - wn, 500, -200))
+top.shapes(l_aa).insert(db.Box(-500, 800, 500, 800 + wp))
+
+gate_reg = db.Region(db.Box(-lg // 2, -350 - wn, lg // 2, 950 + wp))
+pad_reg = db.Region(db.Box(-220, 150, -lg // 2 + 40, 450))
+merged_poly = (gate_reg | pad_reg).merged()
+top.shapes(l_poly).insert(merged_poly)
+
+top.shapes(l_m1).insert(db.Box(220, -200 - wn, 460, 800 + wp))
+top.shapes(l_via).insert(db.Box(280, -140 - wn // 2, 400, -20 - wn // 2))
+top.shapes(l_via).insert(db.Box(280, 800 + wp // 2 - 60, 400, 800 + wp // 2 + 60))`
+  },
+  {
+    key: 'doc_array_x',
+    chipLabel: '当前文档阵列化',
+    title: '当前文档 X 向阵列副本',
+    inputMode: 'document',
+    parameters: '{"cols":3,"pitch_x":2000}',
+    requestText: '在当前文档副本中将顶层图形沿 X 方向复制 3 列，列间距 2000nm。',
+    script: `import hongtu as db
+
+cols = int(params.get('cols', 3))
+pitch_x = int(params.get('pitch_x', 2000))
+
+src_cell = current_cell
+arr_top = layout.create_cell(src_cell.name + '_ARRAY')
+arr_top.insert(db.CellInstArray(
+    src_cell.cell_index(),
+    db.Trans(),
+    db.Vector(pitch_x, 0),
+    db.Vector(0, pitch_x),
+    cols,
+    1
+))`
+  }
+];
+
 /** Python is executed by the user's local CPython companion; the current document is untouched until load. */
 @Component
 export struct PythonLayoutPanel {
@@ -58,6 +195,8 @@ export struct PythonLayoutPanel {
   @State history: PythonRunRecord[] = [];
   @State showLibrary: boolean = false;
   @State showHistory: boolean = false;
+  @State showRemoteConfigForm: boolean = false;
+  private mainScroller: Scroller = new Scroller();
   private artifact: PythonLayoutArtifact | null = null;
   private cancelRequested: boolean = false;
   private active: boolean = true;
@@ -92,6 +231,7 @@ export struct PythonLayoutPanel {
       this.endpoint = config.endpoint;
       this.token = config.token;
       this.executionMode = config.executionMode ?? 'embedded';
+      this.showRemoteConfigForm = this.executionMode === 'remote';
       this.showSettings = this.openConnectionSettings && this.executionMode === 'remote';
     }).catch((error: Error) => { if (this.active && generation === this.panelGeneration) this.status = error.message; });
   }
@@ -238,9 +378,32 @@ export struct PythonLayoutPanel {
     finally { if (this.active && generation === this.panelGeneration) this.busy = false; }
   }
 
+  private applyBuiltinPreset(preset: BuiltinPythonPreset): void {
+    if (this.busy) return;
+    this.inputMode = preset.inputMode;
+    this.requestText = preset.requestText;
+    this.parametersText = preset.parameters;
+    this.templateName = preset.title;
+    this.sweepName = '';
+    this.sweepValues = '';
+    this.script = preset.script;
+    this.showSettings = false;
+    this.showLibrary = false;
+    this.showHistory = false;
+    this.invalidatePreview();
+    this.status = `已载入「${preset.title}」参数化脚本与默认参数，点击「运行脚本」即可端侧离线生成`;
+    this.persistDraft();
+  }
+
   private showArtifact(artifact: PythonLayoutArtifact): void {
     this.artifact = artifact; this.readyPath = artifact.path; this.readyName = artifact.name;
     this.previewPath = artifact.previewPath; this.previewSummary = artifact.summary; this.output = artifact.stdout;
+    setTimeout(() => {
+      if (!this.active) return;
+      try {
+        this.mainScroller.scrollEdge(Edge.Bottom);
+      } catch (_) {}
+    }, 32);
   }
   private invalidatePreview(): void {
     this.artifact = null; this.readyPath = ''; this.readyName = ''; this.previewPath = '';
@@ -371,7 +534,7 @@ export struct PythonLayoutPanel {
         this.SectionTab('模板', 'templates')
         this.SectionTab('历史', 'history')
       }.width('100%').padding({ left: 16, right: 16, top: 4, bottom: 0 }).border({ width: { bottom: 1 }, color: COLORS.border })
-      Scroll() {
+      Scroll(this.mainScroller) {
         Column({ space: 16 }) {
           if (this.showSettings) {
             this.ConnectionSection()
@@ -430,6 +593,7 @@ export struct PythonLayoutPanel {
             .borderRadius(UI.controlRadius)
             .onClick(() => {
               this.executionMode = 'embedded';
+              this.showRemoteConfigForm = false;
               pythonBridgeService.setExecutionMode('embedded');
               this.status = '已切换至端侧内置 Python 3 引擎（离线可用，无需桌面伴随服务）';
             })
@@ -441,6 +605,7 @@ export struct PythonLayoutPanel {
             .borderRadius(UI.controlRadius)
             .onClick(() => {
               this.executionMode = 'remote';
+              this.showRemoteConfigForm = true;
               pythonBridgeService.setExecutionMode('remote');
               this.status = '已切换至远程伴随端模式，请在下方配置服务地址与令牌';
             })
@@ -451,39 +616,75 @@ export struct PythonLayoutPanel {
           .fontSize(11).fontColor(COLORS.muted).width('100%').lineHeight(17)
       }.width('100%').padding(12).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
 
-      Text('远程桌面伴随服务配置（仅远程模式需要）').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
-      Text('CPython · KLayout 桌面重型签核节点').fontSize(UI.fontCaption).fontColor(COLORS.muted)
-      Column({ space: 6 }) {
-        Text('服务地址').fontSize(UI.fontBody).fontColor(COLORS.ink)
-        TextInput({ text: this.endpoint, placeholder: 'http://127.0.0.1:7865' })
-          .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink).placeholderColor(COLORS.muted)
-          .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius).enabled(!this.busy && !this.running && !this.connectionInUse)
-          .onKeyEvent((event: KeyEvent) => event.stopPropagation()).onChange((value: string) => this.endpoint = value)
-      }.width('100%').alignItems(HorizontalAlign.Start)
-      Column({ space: 6 }) {
-        Text('访问令牌').fontSize(UI.fontBody).fontColor(COLORS.ink)
-        TextInput({ text: this.token, placeholder: '本机服务的访问令牌' }).type(InputType.Password)
-          .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink).placeholderColor(COLORS.muted)
-          .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius).enabled(!this.busy && !this.running && !this.connectionInUse)
-          .onKeyEvent((event: KeyEvent) => event.stopPropagation()).onChange((value: string) => this.token = value)
-      }.width('100%').alignItems(HorizontalAlign.Start)
-      Text('脚本在隔离副本中运行，结果确认后载入。').fontSize(UI.fontCaption).fontColor(COLORS.muted).lineHeight(18)
-      Text('断开会清除本机保存的访问令牌并恢复默认地址。').fontSize(UI.fontCaption).fontColor(COLORS.muted).lineHeight(18)
-      Row({ space: 8 }) {
-        Button('断开并清除连接', { type: ButtonType.Normal }).height(UI.controlHeight).layoutWeight(1)
-          .fontSize(UI.fontBody).borderRadius(UI.controlRadius).backgroundColor(COLORS.dangerSoft).fontColor(COLORS.danger)
-          .enabled(!this.busy && !this.running && !this.connectionInUse).onClick(() => this.clearConnection())
-        Button('保存并连接', { type: ButtonType.Normal }).height(UI.controlHeight).layoutWeight(1)
-          .fontSize(UI.fontBody).borderRadius(UI.controlRadius).backgroundColor(COLORS.primary).fontColor(Color.White)
-          .enabled(!this.busy && !this.running && !this.connectionInUse).onClick(() => this.saveConnection())
-      }.width('100%').padding({ top: 16 }).border({ width: { top: 1 }, color: COLORS.border })
+      if (this.executionMode === 'remote' || this.showRemoteConfigForm) {
+        Column({ space: 12 }) {
+          Row() {
+            Text('远程桌面伴随服务配置（仅远程模式需要）').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).layoutWeight(1)
+            if (this.executionMode !== 'remote') {
+              Button('收起', { type: ButtonType.Normal }).height(24).padding({ left: 8, right: 8 }).fontSize(11)
+                .fontColor(COLORS.muted).backgroundColor(Color.Transparent).onClick(() => { this.showRemoteConfigForm = false; })
+            }
+          }.width('100%')
+          Text('CPython · KLayout 桌面重型签核节点').fontSize(UI.fontCaption).fontColor(COLORS.muted)
+          Column({ space: 6 }) {
+            Text('服务地址').fontSize(UI.fontBody).fontColor(COLORS.ink)
+            TextInput({ text: this.endpoint, placeholder: 'http://127.0.0.1:7865' })
+              .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink).placeholderColor(COLORS.muted)
+              .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius).enabled(!this.busy && !this.running && !this.connectionInUse)
+              .onKeyEvent((event: KeyEvent) => event.stopPropagation()).onChange((value: string) => this.endpoint = value)
+          }.width('100%').alignItems(HorizontalAlign.Start)
+          Column({ space: 6 }) {
+            Text('访问令牌').fontSize(UI.fontBody).fontColor(COLORS.ink)
+            TextInput({ text: this.token, placeholder: '本机服务的访问令牌' }).type(InputType.Password)
+              .height(UI.fieldHeight).fontSize(UI.fontBody).fontColor(COLORS.ink).placeholderColor(COLORS.muted)
+              .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius).enabled(!this.busy && !this.running && !this.connectionInUse)
+              .onKeyEvent((event: KeyEvent) => event.stopPropagation()).onChange((value: string) => this.token = value)
+          }.width('100%').alignItems(HorizontalAlign.Start)
+          Text('断开会清除本机保存的访问令牌并恢复默认地址。').fontSize(UI.fontCaption).fontColor(COLORS.muted).lineHeight(18)
+          Row({ space: 8 }) {
+            Button('断开并清除连接', { type: ButtonType.Normal }).height(UI.controlHeight).layoutWeight(1)
+              .fontSize(UI.fontBody).borderRadius(UI.controlRadius).backgroundColor(COLORS.dangerSoft).fontColor(COLORS.danger)
+              .enabled(!this.busy && !this.running && !this.connectionInUse).onClick(() => this.clearConnection())
+            Button('保存并连接', { type: ButtonType.Normal }).height(UI.controlHeight).layoutWeight(1)
+              .fontSize(UI.fontBody).borderRadius(UI.controlRadius).backgroundColor(COLORS.primary).fontColor(Color.White)
+              .enabled(!this.busy && !this.running && !this.connectionInUse).onClick(() => this.saveConnection())
+          }.width('100%').padding({ top: 12 }).border({ width: { top: 1 }, color: COLORS.border })
+        }.width('100%').alignItems(HorizontalAlign.Start)
+      } else {
+        Button('配置可选的远程桌面伴随服务…', { type: ButtonType.Normal })
+          .height(32).padding({ left: 12, right: 12 }).fontSize(12)
+          .fontColor(COLORS.muted).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
+          .onClick(() => { this.showRemoteConfigForm = true; })
+      }
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
   @Builder
   TemplateSection() {
     Column({ space: 16 }) {
-      Text('个人模板').fontSize(UI.titleSize).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
+      Text('内置标准模板（4）').fontSize(UI.titleSize).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
+      Text('点击即可一键载入可离线运行的完整参数化脚本与默认参数。').fontSize(UI.fontCaption).fontColor(COLORS.muted).lineHeight(18)
+      ForEach(BUILTIN_PYTHON_PRESETS, (preset: BuiltinPythonPreset) => {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 10 }) {
+            WorkbenchIcon({ name: 'python', iconSize: 18, color: COLORS.primary })
+            Column({ space: 3 }) {
+              Text(preset.title).fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
+                .width('100%').textAlign(TextAlign.Start)
+              Text(`${preset.inputMode === 'new' ? '生成新文档' : '当前文档副本'} · 参数 ${preset.parameters}`)
+                .fontSize(UI.fontCaption).fontColor(COLORS.muted).width('100%').textAlign(TextAlign.Start)
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            Text('载入').fontSize(12).fontColor(COLORS.primary).fontWeight(FontWeight.Medium)
+          }.width('100%').alignItems(VerticalAlign.Center)
+        }
+        .width('100%').padding(12).enabled(!this.busy)
+        .backgroundColor(this.templateName === preset.title ? COLORS.primarySoft : COLORS.surface)
+        .border({ width: 1, color: this.templateName === preset.title ? COLORS.primary : COLORS.border })
+        .borderRadius(UI.controlRadius)
+        .onClick(() => this.applyBuiltinPreset(preset))
+      }, (preset: BuiltinPythonPreset) => preset.key)
+      Text('个人模板').fontSize(UI.titleSize).fontWeight(FontWeight.Medium).fontColor(COLORS.ink).margin({ top: 6 })
       Text('保存当前脚本、参数与运行方式，便于下次复用。').fontSize(UI.fontCaption).fontColor(COLORS.muted).lineHeight(18)
       Row({ space: 8 }) {
         TextInput({ text: this.templateName, placeholder: '模板名称' }).height(UI.fieldHeight).layoutWeight(1)
@@ -574,35 +775,18 @@ export struct PythonLayoutPanel {
         Text('描述版图需求').fontSize(UI.fontBody).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
         Scroll() {
           Row({ space: 6 }) {
-            Button('圆孔光子晶体', { type: ButtonType.Normal }).height(26).padding({ left: 10, right: 10 }).fontSize(11)
-              .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(999).enabled(!this.busy)
-              .onClick(() => {
-                this.inputMode = 'new';
-                this.requestText = '生成 5x5 圆孔光子晶体阵列，周期 500nm，孔半径 120nm，位于图层 1/0，保留独立单元层级。';
-                this.persistDraft();
-              })
-            Button('90° 波导弯曲', { type: ButtonType.Normal }).height(26).padding({ left: 10, right: 10 }).fontSize(11)
-              .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(999).enabled(!this.busy)
-              .onClick(() => {
-                this.inputMode = 'new';
-                this.requestText = '生成单模硅波导 90 度圆弧弯曲，波导宽度 450nm，弯曲半径 5000nm，位于图层 1/0。';
-                this.persistDraft();
-              })
-            Button('CMOS 反相器', { type: ButtonType.Normal }).height(26).padding({ left: 10, right: 10 }).fontSize(11)
-              .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(999).enabled(!this.busy)
-              .onClick(() => {
-                this.inputMode = 'new';
-                this.requestText = '生成标准 CMOS 反相器单元，包含有源区、多晶硅栅极、金属互连与接触孔。';
-                this.persistDraft();
-              })
-            Button('当前文档阵列化', { type: ButtonType.Normal }).height(26).padding({ left: 10, right: 10 }).fontSize(11)
-              .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted).borderRadius(999).enabled(!this.busy)
-              .onClick(() => {
-                this.inputMode = 'document';
-                this.requestText = '在当前文档副本中将顶层图形沿 X 方向复制 3 列，列间距 2000nm。';
-                this.persistDraft();
-              })
-          }
+            ForEach(BUILTIN_PYTHON_PRESETS, (preset: BuiltinPythonPreset) => {
+              Button(preset.chipLabel, { type: ButtonType.Normal })
+                .height(26)
+                .padding({ left: 10, right: 10 })
+                .fontSize(11)
+                .fontColor(this.templateName === preset.title ? COLORS.primary : COLORS.ink)
+                .backgroundColor(this.templateName === preset.title ? COLORS.primarySoft : COLORS.surfaceMuted)
+                .borderRadius(999)
+                .enabled(!this.busy)
+                .onClick(() => { this.applyBuiltinPreset(preset); })
+            }, (preset: BuiltinPythonPreset) => `${preset.key}_${this.templateName}`)
+          }.padding({ right: 8 })
         }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
         TextArea({ text: this.requestText, placeholder: '例如：生成圆孔光子晶体阵列，周期 500nm，孔半径 120nm，保留 Cell 层级。' })
           .id('python-ai-request-input')
@@ -640,10 +824,10 @@ export struct PythonLayoutPanel {
           .backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
           .onKeyEvent((event: KeyEvent) => event.stopPropagation()).onChange((value: string) => { this.parametersText = value; this.invalidatePreview(); this.persistDraft(); })
         Row({ space: 8 }) {
-          TextInput({ text: this.sweepName, placeholder: '扫参名称（可空）' }).layoutWeight(1).height(UI.fieldHeight).fontSize(UI.fontBody)
+          TextInput({ text: this.sweepName, placeholder: '扫参变量（如 pitch）' }).layoutWeight(5).height(UI.fieldHeight).fontSize(UI.fontBody)
             .fontColor(COLORS.ink).placeholderColor(COLORS.muted).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
             .onKeyEvent((event: KeyEvent) => event.stopPropagation()).enabled(!this.busy).onChange((value: string) => { this.sweepName = value; this.persistDraft(); })
-          TextInput({ text: this.sweepValues, placeholder: '400,500,600' }).layoutWeight(2).height(UI.fieldHeight).fontSize(UI.fontBody)
+          TextInput({ text: this.sweepValues, placeholder: '扫参序列，如 400,500,600' }).layoutWeight(7).height(UI.fieldHeight).fontSize(UI.fontBody)
             .fontColor(COLORS.ink).placeholderColor(COLORS.muted).backgroundColor(COLORS.surfaceMuted).borderRadius(UI.controlRadius)
             .onKeyEvent((event: KeyEvent) => event.stopPropagation()).enabled(!this.busy).onChange((value: string) => { this.sweepValues = value; this.persistDraft(); })
         }.width('100%')

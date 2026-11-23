@@ -389,8 +389,8 @@ export struct ShapePropertiesPopover {
 
         if (this.coordMode === 0) {
           Row({ space: 6 }) {
-            this.compactCoordCell('中心CX', 'centerX')
-            this.compactCoordCell('中心CY', 'centerY')
+            this.compactCoordCell('中心 X', 'centerX')
+            this.compactCoordCell('中心 Y', 'centerY')
           }.width('100%')
           Row({ space: 6 }) {
             this.compactCoordCell('宽 W', 'widthCenter')
@@ -398,8 +398,8 @@ export struct ShapePropertiesPopover {
           }.width('100%')
         } else if (this.coordMode === 1) {
           Row({ space: 6 }) {
-            this.compactCoordCell('左下X', 'x')
-            this.compactCoordCell('左下Y', 'y')
+            this.compactCoordCell('左下 X', 'x')
+            this.compactCoordCell('左下 Y', 'y')
           }.width('100%')
           Row({ space: 6 }) {
             this.compactCoordCell('宽 W', 'width')
@@ -417,8 +417,8 @@ export struct ShapePropertiesPopover {
         }
       } else if (this.hasField('x') && this.hasField('y')) {
         Row({ space: 6 }) {
-          this.compactCoordCell('锚点X', 'x')
-          this.compactCoordCell('锚点Y', 'y')
+          this.compactCoordCell('锚点 X', 'x')
+          this.compactCoordCell('锚点 Y', 'y')
         }.width('100%')
       }
 

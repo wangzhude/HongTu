@@ -157,7 +157,7 @@ function decodeResultBody(result: string | Object | ArrayBuffer): string {
   return String(result);
 }
 
-function unwrapRedirectUrl(rawHref: string): string {
+export function unwrapSearchRedirectUrl(rawHref: string): string {
   let href: string = decodeHtmlEntities(rawHref).trim();
   if (href.startsWith('//')) {
     href = `https:${href}`;
@@ -168,7 +168,53 @@ function unwrapRedirectUrl(rawHref: string): string {
       href = decodeURIComponent(uddgMatch[1]);
     } catch (_) {}
   }
+  const bingMatch: RegExpExecArray | null = /bing\.com\/ck\/a\?(?:[^#]*&)?u=a1([A-Za-z0-9_-]+)/i.exec(href);
+  if (bingMatch !== null) {
+    try {
+      let b64: string = bingMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4 !== 0) {
+        b64 += '=';
+      }
+      const helper: util.Base64Helper = new util.Base64Helper();
+      const decodedBytes: Uint8Array = helper.decodeSync(b64);
+      const decoder = util.TextDecoder.create('utf-8', { ignoreBOM: true });
+      const target: string = decoder.decodeToString(decodedBytes).trim();
+      if (/^https?:\/\//i.test(target)) {
+        href = target;
+      }
+    } catch (_) {}
+  }
   return href;
+}
+
+export function filterRelevantSearchItems(query: string, items: DshWebSearchItem[]): DshWebSearchItem[] {
+  const tokens: string[] = query
+    .toLowerCase()
+    .split(/[\s,.;:!?/\\|()\[\]{}"']+/)
+    .map((t: string): string => t.trim())
+    .filter((t: string): boolean => t.length >= 2);
+  if (tokens.length === 0 || items.length <= 1) {
+    return items;
+  }
+  const scored: Array<{ item: DshWebSearchItem; score: number }> = [];
+  for (let i = 0; i < items.length; i++) {
+    const it: DshWebSearchItem = items[i];
+    const hay: string = `${it.title} ${it.url} ${it.snippet}`.toLowerCase();
+    let hits: number = 0;
+    for (let k = 0; k < tokens.length; k++) {
+      if (hay.includes(tokens[k])) {
+        hits++;
+      }
+    }
+    const isNoiseDict: boolean = /(?:dict\.youdao\.com|iciba\.com|fanyi\.baidu\.com)/i.test(it.url);
+    const score: number = hits - (isNoiseDict ? 2 : 0);
+    scored.push({ item: it, score });
+  }
+  const strong: DshWebSearchItem[] = scored
+    .filter((entry): boolean => entry.score > 0)
+    .sort((a, b): number => b.score - a.score)
+    .map((entry): DshWebSearchItem => entry.item);
+  return strong.length > 0 ? strong : items;
 }
 
 export function parseBingRssItems(xml: string, maxResults: number): DshWebSearchItem[] {
@@ -180,7 +226,9 @@ export function parseBingRssItems(xml: string, maxResults: number): DshWebSearch
     const tMatch: RegExpExecArray | null = /<title>([\s\S]*?)<\/title>/i.exec(block);
     const lMatch: RegExpExecArray | null = /<link>([\s\S]*?)<\/link>/i.exec(block);
     const dMatch: RegExpExecArray | null = /<description>([\s\S]*?)<\/description>/i.exec(block);
-    const rawUrl: string = lMatch !== null ? decodeHtmlEntities(lMatch[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')).trim() : '';
+    const rawUrl: string = lMatch !== null
+      ? unwrapSearchRedirectUrl(lMatch[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1'))
+      : '';
     const title: string = tMatch !== null
       ? decodeHtmlEntities(tMatch[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim()
       : '';
@@ -203,7 +251,7 @@ export function parseBingHtmlItems(html: string, maxResults: number): DshWebSear
     const block: string = match[1];
     const aMatch: RegExpExecArray | null = /<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
     if (aMatch !== null) {
-      const url: string = unwrapRedirectUrl(aMatch[1]);
+      const url: string = unwrapSearchRedirectUrl(aMatch[1]);
       const title: string = decodeHtmlEntities(aMatch[2].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
       const pMatch: RegExpExecArray | null = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(block);
       const snippet: string = pMatch !== null
@@ -223,7 +271,7 @@ export function parseDuckDuckGoHtmlItems(html: string, maxResults: number): DshW
   const linkRegex: RegExp = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]{0,1200})/gi;
   let match: RegExpExecArray | null = linkRegex.exec(html);
   while (match !== null && out.length < maxResults) {
-    const url: string = unwrapRedirectUrl(match[1]);
+    const url: string = unwrapSearchRedirectUrl(match[1]);
     const title: string = decodeHtmlEntities(match[2].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
     const tail: string = match[3];
     const snipMatch: RegExpExecArray | null = /class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div|span)>/i.exec(tail);
@@ -364,11 +412,12 @@ export class DshWebSearchService {
       }
     }
 
+    const filtered: DshWebSearchItem[] = filterRelevantSearchItems(query, merged).slice(0, cappedLimit);
     return {
       query,
       engine: usedEngines.length > 0 ? usedEngines.join(' + ') : 'unavailable',
-      results: merged,
-      errorMessage: merged.length === 0 && errors.length > 0 ? errors.join('; ') : undefined
+      results: filtered,
+      errorMessage: filtered.length === 0 && errors.length > 0 ? errors.join('; ') : undefined
     };
   }
 

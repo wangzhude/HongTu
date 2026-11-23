@@ -3,7 +3,7 @@ import { COLORS } from './constants';
 import { UI } from './UiTokens';
 import { hongTuThemeState } from '../store/ThemeStore';
 import { LuminousRenderMode } from '../store/LuminousMaterial';
-import { buildLuminousMenuOptions, resolveFallbackBlurStyleForPreset } from '../store/LuminousSurfaceOptions';
+import { buildLuminousMenuOptions } from '../store/LuminousSurfaceOptions';
 
 /** One semantic symbol family for all native action menus, including submenus. */
 function menuSymbol(name: string): Resource {
@@ -25,6 +25,8 @@ function menuSymbol(name: string): Resource {
     case 'macro': return $r('sys.symbol.code_square');
     case 'view': return $r('sys.symbol.arrow_up_left_and_arrow_down_right');
     case 'edit': return $r('sys.symbol.pencil_line');
+    case 'photo': return $r('sys.symbol.rectangle_on_rectangle');
+    case 'snapshot': return $r('sys.symbol.square_dashed');
     case 'eye': return $r('sys.symbol.eye');
     case 'eyeOff': return $r('sys.symbol.eye_slash');
     case 'sidebar': return $r('sys.symbol.rectangle_lefthalf_inset_filled');
@@ -180,10 +182,7 @@ class WorkbenchMenuStyle implements AttributeModifier<MenuAttribute> {
     // API 26 官材激活时不叠加 backgroundBlurStyle，交给宿主 buildLuminousMenuOptions 统一承载折射。
     if (!hongTuThemeState.useSystemImmersiveMaterial()) {
       if (hongTuThemeState.resolveLuminousRenderMode() === LuminousRenderMode.MATERIAL) {
-        menu.backgroundBlurStyle(resolveFallbackBlurStyleForPreset(hongTuThemeState.luminousIntensityPreset), {
-          colorMode: hongTuThemeState.isDark ? ThemeColorMode.DARK : ThemeColorMode.LIGHT,
-          adaptiveColor: AdaptiveColor.AVERAGE
-        });
+        menu.backgroundBlurStyle(BlurStyle.NONE);
       } else {
         menu.backgroundBlurStyle(BlurStyle.NONE);
       }

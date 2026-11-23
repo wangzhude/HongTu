@@ -846,7 +846,7 @@ export struct LayoutCanvasView {
         pickAllowed: this.currentTool === ActiveTool.Select && !this.keyboardBlocked,
         onPick: (endpoint: PortEndpoint): void => this.onPickPort(endpoint) })
 
-      if ((!this.glEnabled || !this.glActive) && this.sceneCapacityOverflow()) {
+      if (!this.glEnabled && this.sceneCapacityOverflow()) {
         Text(this.renderSceneProvider !== null ? this.sceneDrawResult().message : '内置绘制的视口图元过多，请放大局部或降低层级')
           .fontSize(15)
           .fontColor(canvasOverlayInk())

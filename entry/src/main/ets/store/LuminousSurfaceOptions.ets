@@ -86,13 +86,20 @@ export function resolveFallbackBlurStyleForPreset(preset: LuminousIntensityPrese
 
 function resolveFallbackSheetBackdropColor(isDark: boolean, mismatchWithSystem: boolean = false): ResourceColor {
   if (mismatchWithSystem) {
-    return isDark ? 'rgba(16, 23, 33, 0.96)' : 'rgba(250, 252, 255, 0.97)';
+    return isDark ? 'rgba(16, 23, 33, 0.96)' : 'rgba(248, 250, 254, 0.98)';
   }
-  return isDark ? 'rgba(18, 25, 36, 0.88)' : 'rgba(250, 252, 255, 0.94)';
+  return isDark ? 'rgba(18, 25, 36, 0.90)' : 'rgba(248, 250, 254, 0.97)';
 }
 
-function resolveFallbackMenuBackdropColor(isDark: boolean): ResourceColor {
-  return isDark ? 'rgba(20, 28, 40, 0.88)' : 'rgba(246, 250, 254, 0.90)';
+function buildFallbackMenuBackgroundEffect(isDark: boolean, preset: LuminousIntensityPreset): BackgroundEffectOptions {
+  const radius: number = preset === 'weak' ? 18 : (preset === 'strong' ? 32 : 26);
+  return {
+    radius: radius,
+    saturation: isDark ? 1.25 : 1.35,
+    brightness: isDark ? 0.90 : 1.04,
+    color: isDark ? 'rgba(20, 28, 40, 0.92)' : 'rgba(252, 253, 255, 0.95)',
+    adaptiveColor: AdaptiveColor.DEFAULT
+  };
 }
 
 export function buildLuminousSheetOptions(
@@ -119,11 +126,11 @@ export function buildLuminousSheetOptions(
       base.shadow = undefined;
       base.systemMaterial = buildSystemImmersiveMaterial(resolveImmersiveStyleForPreset(preset), false);
     } else {
-      // SheetOptions 无独立 blurStyleOptions.colorMode，当应用内浅色/深色与系统深浅色不一致时，
-      // 系统级 BACKGROUND_ULTRA_THICK 会叠加系统深灰底导致浅色半模态发灰；此时采用高纯度柔光透白基底避免串色
+      // API < 26 下 SheetOptions 的 BACKGROUND_ULTRA_THICK 在浅色模式会混入冷灰系统遮罩（#CFD3D9 发脏），
+      // 浅色统一采用高明度瓷白柔光基底（BlurStyle.NONE），深色采用 COMPONENT_THICK 深邃磨砂
       const schemeMismatch: boolean = hongTuThemeState.isDark !== hongTuThemeState.systemIsDark;
       base.backgroundColor = resolveFallbackSheetBackdropColor(hongTuThemeState.isDark, schemeMismatch);
-      base.blurStyle = schemeMismatch ? BlurStyle.NONE : resolveFallbackBlurStyleForPreset(preset);
+      base.blurStyle = (!hongTuThemeState.isDark || schemeMismatch) ? BlurStyle.NONE : BlurStyle.COMPONENT_THICK;
       base.borderWidth = 0.8;
       base.borderColor = tokens.floatingBorderColor;
       base.shadow = undefined;
@@ -171,12 +178,10 @@ export function buildLuminousMenuOptions(
       target.backgroundEffect = undefined;
       target.systemMaterial = buildSystemImmersiveMaterial(resolveImmersiveStyleForPreset(preset), false);
     } else {
-      target.backgroundColor = resolveFallbackMenuBackdropColor(hongTuThemeState.isDark);
-      target.backgroundBlurStyle = resolveFallbackBlurStyleForPreset(preset);
-      target.backgroundBlurStyleOptions = {
-        colorMode: hongTuThemeState.isDark ? ThemeColorMode.DARK : ThemeColorMode.LIGHT
-      };
-      target.backgroundEffect = undefined;
+      target.backgroundColor = Color.Transparent;
+      target.backgroundBlurStyle = BlurStyle.NONE;
+      target.backgroundBlurStyleOptions = undefined;
+      target.backgroundEffect = buildFallbackMenuBackgroundEffect(hongTuThemeState.isDark, preset);
       target.systemMaterial = getEmptySystemMaterial();
     }
   } else {
@@ -213,12 +218,10 @@ export function buildLuminousContextMenuOptions(
       target.backgroundEffect = undefined;
       target.systemMaterial = buildSystemImmersiveMaterial(resolveImmersiveStyleForPreset(preset), false);
     } else {
-      target.backgroundColor = resolveFallbackMenuBackdropColor(hongTuThemeState.isDark);
-      target.backgroundBlurStyle = resolveFallbackBlurStyleForPreset(preset);
-      target.backgroundBlurStyleOptions = {
-        colorMode: hongTuThemeState.isDark ? ThemeColorMode.DARK : ThemeColorMode.LIGHT
-      };
-      target.backgroundEffect = undefined;
+      target.backgroundColor = Color.Transparent;
+      target.backgroundBlurStyle = BlurStyle.NONE;
+      target.backgroundBlurStyleOptions = undefined;
+      target.backgroundEffect = buildFallbackMenuBackgroundEffect(hongTuThemeState.isDark, preset);
       target.systemMaterial = getEmptySystemMaterial();
     }
   } else {

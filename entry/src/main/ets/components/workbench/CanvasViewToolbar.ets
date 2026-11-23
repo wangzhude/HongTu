@@ -513,7 +513,7 @@ export struct CanvasViewToolbar {
         }
       }
       .height(40)
-      .padding({ left: 8, right: 6 })
+      .padding({ left: 8, right: 16 })
       .alignItems(VerticalAlign.Center)
     }
     .scrollable(ScrollDirection.Horizontal)

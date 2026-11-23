@@ -3594,8 +3594,10 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"listPCells", nullptr, NapiSafe<NapiListPCells>, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"generatePCell", nullptr, NapiSafe<NapiGeneratePCell>, nullptr, nullptr, nullptr, napi_default, nullptr},
 
-        // Version
+        // Version & On-Device Embedded Python 3 Runtime (PocketPy 2.2.0 + Clipper2 + CPython dlopen)
         {"version", nullptr, NapiSafe<NapiVersion>, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getEmbeddedPythonInfo", nullptr, NapiSafe<NapiGetEmbeddedPythonInfo>, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"runEmbeddedPythonAsync", nullptr, NapiSafe<NapiRunEmbeddedPythonAsync>, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
 
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

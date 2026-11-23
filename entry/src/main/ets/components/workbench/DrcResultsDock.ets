@@ -22,6 +22,7 @@ export struct DrcResultsDock {
   @Prop collapsed: boolean = false;
   @Prop exportRdbEnabled: boolean = false;
   @Prop exportRdbBusy: boolean = false;
+  @Prop rightInsetVp: number = 0;
   @State severityFilter: string = 'all';
   @State displayByRule: boolean = false;
   @State noticesExpanded: boolean = false;
@@ -43,6 +44,7 @@ export struct DrcResultsDock {
   locateIssueAction: (issue: DrcIssue) => void = () => {};
   openRulesAction: () => void = () => {};
   toggleCollapsedAction: () => void = () => {};
+  closeAction: () => void = () => {};
 
   aboutToAppear(): void {
     this.refreshGroups();
@@ -320,8 +322,9 @@ export struct DrcResultsDock {
   }
 
   build() {
+    Row() {
     Column() {
-      Row({ space: 10 }) {
+      Row({ space: 8 }) {
         Text('验证结果').fontSize(UI.titleSize).fontWeight(FontWeight.Bold).fontColor(COLORS.ink)
         Text(this.hasRun ? (this.groupRanOnce ? `${this.groupRuleViolations} 项违例` : `${this.issues.length} 项问题`) : '尚未检查')
           .fontSize(11)
@@ -369,6 +372,16 @@ export struct DrcResultsDock {
         .accessibilityText(this.collapsed ? '展开验证结果' : '收起验证结果')
         .bindTips(this.collapsed ? '展开验证结果' : '收起验证结果')
         .onClick(this.toggleCollapsedAction)
+        Button({ type: ButtonType.Circle }) {
+          WorkbenchIcon({ name: 'close', iconSize: 15, color: COLORS.muted })
+        }
+        .width(UI.compactControlHeight)
+        .height(UI.compactControlHeight)
+        .padding(0)
+        .backgroundColor(COLORS.surfaceMuted)
+        .accessibilityText('关闭验证停靠栏并返回版图')
+        .bindTips('关闭验证栏')
+        .onClick(this.closeAction)
       }
       .width('100%')
       .height(52)
@@ -447,9 +460,12 @@ export struct DrcResultsDock {
         }
       }
     }
-    .width('100%')
+    .layoutWeight(1)
     .height(this.dockHeight())
     .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'regular', hongTuThemeState.elevation('lg')))
+    }
+    .width('100%')
+    .padding({ right: Math.max(0, this.rightInsetVp) })
     .transition(panelTransition(TransitionEdge.BOTTOM))
   }
 }

@@ -1615,10 +1615,52 @@ struct Index {
     return getShapeBounds(shape);
   }
 
+  private desktopRightFloatingReserveVp(): number {
+    if (!this.isDesktopWorkspace()) {
+      return 0;
+    }
+    const dockedInspector: number = (this.panelStore.inspectorVisible && this.inspectorContainerType() === SideBarContainerType.Embed)
+      ? this.inspectorWidth()
+      : 0;
+    if (this.panelStore.showPythonPanel) {
+      const pyW: number = Math.min(620, this.panelStore.windowWidthVp - 32) + 24;
+      return Math.max(0, pyW - dockedInspector);
+    }
+    if (this.panelStore.showAiPanel) {
+      const aiW: number = Math.min(460, Math.max(320, this.panelStore.windowWidthVp - 24)) + 24;
+      return Math.max(0, aiW - dockedInspector);
+    }
+    return 0;
+  }
+
+  private desktopFloatingPanelTopVp(): number {
+    const safeTop: number = Math.max(0, this.safeAreaTopVp);
+    if (!this.isDesktopWorkspace()) {
+      const extraTabs: number = (this.viewportStore.currentModule !== WorkModule.Data && this.docStore.workspaceTabs.length > 1) ? 38 : 0;
+      return safeTop + 54 + extraTabs;
+    }
+    let topVp: number = safeTop + 46;
+    if (this.viewportStore.currentModule !== WorkModule.Data) {
+      topVp += 44;
+      if (this.viewportStore.instanceScopeLabel.length > 0) {
+        topVp += 36;
+      }
+    }
+    return topVp + 8;
+  }
+
+  private desktopFloatingPanelHeightVp(): number {
+    const topVp: number = this.desktopFloatingPanelTopVp();
+    const bottomReserve: number = this.isDesktopWorkspace()
+      ? (Math.max(0, this.safeAreaBottomVp) + UI.controlHeight + 8)
+      : (Math.max(8, this.safeAreaBottomVp) + 84);
+    return Math.max(260, this.panelStore.windowHeightVp - topVp - bottomReserve);
+  }
+
   private propertyX(): number {
     const minLeft: number = this.isDesktopWorkspace() ? 76 : 12;
-    const aiOverlayReserve: number = (this.isDesktopWorkspace() && this.panelStore.showAiPanel) ? 476 : 0;
-    const maxX: number = Math.max(minLeft, this.viewportStore.canvasViewportWidth - aiOverlayReserve - 324);
+    const rightOverlayReserve: number = this.desktopRightFloatingReserveVp();
+    const maxX: number = Math.max(minLeft, this.viewportStore.canvasViewportWidth - rightOverlayReserve - 324);
     if (this.panelStore.propertyPanelPinned) return maxX;
     const shape: Shape | undefined = this.shapes.find((item: Shape) => item.id === this.viewportStore.selectedShapeId);
     if (shape === undefined) return maxX;
@@ -2998,7 +3040,7 @@ struct Index {
               renderSceneProvider: (): ViewSceneSource[] => this.viewWorkspaceRenderScene(),
               projectedPorts: unwrapObserved(this.viewportStore.projectedPorts),
               onPickPort: (endpoint: PortEndpoint): void => {
-                if (this.canvasKeyboardBlocked() || this.docStore.activeNativeJobId.length > 0 || this.importInProgress) return;
+                if (this.canvasModalBlocked() || this.docStore.activeNativeJobId.length > 0 || this.importInProgress) return;
                 this.pickedPortEndpoint = clonePortEndpointModel(endpoint) as PortEndpoint;
                 this.openCanvasDialog(this.portManagerController);
               },
@@ -3176,8 +3218,8 @@ struct Index {
               })
             }
             AgentCanvasAuraOverlay({
-              isLoading: this.aiStore.aiLoading,
-              pendingActive: this.aiStore.aiPendingSummary.length > 0
+              isLoading: this.aiStore.aiLoading && this.aiStore.aiPendingAskUser === null,
+              pendingActive: this.aiStore.aiPendingSummary.length > 0 || (this.aiStore.aiLoading && this.aiStore.aiPendingAskUser !== null)
             })
             if (this.isDesktopWorkspace()) {
               DrawingToolbar({
@@ -3235,13 +3277,15 @@ struct Index {
               lastDrcElapsed: this.verifyStore.lastDrcElapsed,
               hasRun: this.verifyStore.drcHasRun,
               collapsed: this.verifyStore.drcDockCollapsed,
+              rightInsetVp: this.desktopRightFloatingReserveVp(),
               runDrcAction: () => this.runDrcBackground(),
               exportRdbEnabled: this.canExportDrcRdb(),
               exportRdbBusy: this.verifyStore.drcRdbExportBusy,
               exportRdbAction: () => { this.exportDrcRdb(); },
               locateIssueAction: (issue: DrcIssue) => this.locateIssue(issue),
               openRulesAction: () => { this.verifyStore.showDrcRules = !this.verifyStore.showDrcRules; this.panelStore.showAiPanel = false; },
-              toggleCollapsedAction: () => { this.verifyStore.drcDockCollapsed = !this.verifyStore.drcDockCollapsed; }
+              toggleCollapsedAction: () => { this.verifyStore.drcDockCollapsed = !this.verifyStore.drcDockCollapsed; },
+              closeAction: () => { this.selectModule(WorkModule.Layout, '版图'); }
             })
           }
             }.width('100%').height('100%')
@@ -3599,8 +3643,9 @@ struct Index {
     const stageW: number = this.agentCanvasStageWidthVp();
     if (this.isDesktopWorkspace()) {
       const leftReserved: number = 204;
-      const rightReserved: number = this.panelStore.showAiPanel
-        ? 484
+      const floatingReserve: number = this.desktopRightFloatingReserveVp();
+      const rightReserved: number = floatingReserve > 0
+        ? floatingReserve + 12
         : (this.floatingShapePropertiesVisible() ? 268 : 20);
       const available: number = Math.max(248, stageW - leftReserved - rightReserved);
       return Math.min(480, available);
@@ -3613,8 +3658,9 @@ struct Index {
     const w: number = this.agentHudWidthVp();
     if (this.isDesktopWorkspace()) {
       const leftReserved: number = 204;
-      const rightReserved: number = this.panelStore.showAiPanel
-        ? 484
+      const floatingReserve: number = this.desktopRightFloatingReserveVp();
+      const rightReserved: number = floatingReserve > 0
+        ? floatingReserve + 12
         : (this.floatingShapePropertiesVisible() ? 268 : 20);
       const corridor: number = Math.max(w, stageW - leftReserved - rightReserved);
       return Math.max(76, Math.min(Math.max(76, stageW - w - 12), leftReserved + Math.round((corridor - w) / 2)));
@@ -3633,6 +3679,7 @@ struct Index {
       Column() {
         AgentLiveStatusHud({
           isLoading: this.aiStore.aiLoading,
+          waitingForUser: this.aiStore.aiPendingAskUser !== null,
           canCancel: this.aiStore.aiCanCancel,
           pendingSummary: this.aiStore.aiPendingSummary,
           minimizedNotice: this.aiStore.aiMinimizedNotice,
@@ -4042,7 +4089,7 @@ struct Index {
           verificationAction: () => { this.openExclusiveUtilitySheet('verification'); },
           isCompact: this.isCompact(),
           isDesktop: this.isDesktopWorkspace(),
-          narrowWindow: this.panelStore.windowWidthVp < 1180,
+          narrowWindow: this.panelStore.windowWidthVp < 1340,
           zoomPercent: this.viewportStore.zoomPercent,
           canUndo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanUndo,
           canRedo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanRedo,
@@ -4145,9 +4192,7 @@ struct Index {
               panelWidth: this.isDesktopWorkspace()
                 ? Math.min(460, Math.max(320, this.panelStore.windowWidthVp - 24))
                 : Math.min(480, Math.max(280, this.panelStore.windowWidthVp - 20)),
-              panelHeight: this.isDesktopWorkspace()
-                ? Math.max(320, this.panelStore.windowHeightVp - 88)
-                : Math.max(300, this.panelStore.windowHeightVp - Math.max(0, this.safeAreaTopVp) - 138),
+              panelHeight: this.desktopFloatingPanelHeightVp(),
               sessionMode: this.aiStore.aiPermissionMode === 'readonly' ? 'readonly' : 'agent',
               permissionMode: this.aiStore.aiPermissionMode,
               changePermissionModeAction: (mode: DshPermissionMode) => {
@@ -4252,7 +4297,7 @@ struct Index {
               x: this.isDesktopWorkspace()
                 ? Math.max(16, this.panelStore.windowWidthVp - Math.min(460, Math.max(320, this.panelStore.windowWidthVp - 24)) - 16)
                 : Math.max(10, Math.round((this.panelStore.windowWidthVp - Math.min(480, Math.max(280, this.panelStore.windowWidthVp - 20))) / 2)),
-              y: this.isDesktopWorkspace() ? 64 + Math.max(0, this.safeAreaTopVp) : 52 + Math.max(0, this.safeAreaTopVp)
+              y: this.desktopFloatingPanelTopVp()
             })
             .transition(this.floatingTransition(TransitionEdge.END))
       }
@@ -4262,7 +4307,7 @@ struct Index {
           openConnectionSettings: this.panelStore.pythonOpenConnectionSettings,
           connectionInUse: this.aiStore.aiLoading,
           panelWidth: Math.min(620, this.panelStore.windowWidthVp - 32),
-          panelHeight: Math.max(320, this.panelStore.windowHeightVp - 122),
+          panelHeight: this.desktopFloatingPanelHeightVp(),
           contextProvider: () => this.buildAiContext(),
           documentProvider: (mode: PythonInputMode) => this.createPythonSnapshot(mode),
           documentIdentityProvider: () => this.docStore.activeWorkspaceId,
@@ -4273,14 +4318,17 @@ struct Index {
           backAction: () => this.returnToAiPanel(),
           closeAction: () => this.closeAssistantPanel('python'),
         })
-          .position({ x: Math.max(16, this.panelStore.windowWidthVp - 638), y: 68 })
+          .position({
+            x: Math.max(16, this.panelStore.windowWidthVp - Math.min(620, this.panelStore.windowWidthVp - 32) - 16),
+            y: this.desktopFloatingPanelTopVp()
+          })
           .transition(this.floatingTransition(TransitionEdge.END))
       }
 
       if (this.panelStore.showRdbReviewPanel) {
         RdbReviewPanel({ state: unwrapObserved(this.verifyStore.rdbReviewUi), status: this.verifyStore.rdbReviewStatus, busy: this.verifyStore.rdbReviewBusy,
           canUseCurrentDrc: this.canExportDrcRdb(), panelWidth: Math.min(1100, this.panelStore.windowWidthVp - 32),
-          panelHeight: Math.max(240, this.panelStore.windowHeightVp - 140),
+          panelHeight: this.desktopFloatingPanelHeightVp(),
           fileAction: (kind: string): void => this.rdbReviewFileAction(kind),
           reportActivateAction: (id: string, workspace: string, context: string): boolean => this.activateRdbReport(id, workspace, context),
           reportCloseAction: (id: string, workspace: string, context: string): void => this.closeRdbReport(id, workspace, context),
@@ -4312,7 +4360,7 @@ struct Index {
           draftAction: (dirty: boolean): void => { this.rdbReviewDraftDirty = dirty; },
           closeAction: (): void => this.closeRdbReview(),
         })
-          .position({ x: Math.max(16, (this.panelStore.windowWidthVp - Math.min(1100, this.panelStore.windowWidthVp - 32)) / 2), y: 68 })
+          .position({ x: Math.max(16, (this.panelStore.windowWidthVp - Math.min(1100, this.panelStore.windowWidthVp - 32)) / 2), y: this.desktopFloatingPanelTopVp() })
           .transition(this.modalTransition())
       }
       if (this.verifyStore.engineeringRestorePreview !== undefined) {
@@ -4555,13 +4603,17 @@ struct Index {
     return '';
   }
 
-  private canvasKeyboardBlocked(): boolean {
+  private canvasModalBlocked(): boolean {
     return this.panelStore.activeDialogCount > 0 || this.lvsSheetOpen || this.workspaceCloseConfirming ||
-      this.viewportStore.currentModule === WorkModule.Data || this.panelStore.showAiPanel || this.panelStore.showPythonPanel ||
+      this.viewportStore.currentModule === WorkModule.Data ||
       this.verifyStore.showDrcRules || this.panelStore.showMacroPanel || this.panelStore.showLvsPanel || this.panelStore.showFilePanel ||
       this.panelStore.showShortcutPanel || this.panelStore.showLayerStylePanel || this.panelStore.showProjectPanel || this.panelStore.showSearchPanel ||
       this.panelStore.showLibraryPanel || this.panelStore.showViewWorkspacePanel || this.panelStore.showRdbReviewPanel || this.verifyStore.engineeringRestorePreview !== undefined ||
       this.panelStore.showComparePanel || this.panelStore.showTechnologyPanel || this.panelStore.showLayerStackPanel || this.panelStore.showVerificationPanel || this.showAppearanceSheet;
+  }
+
+  private canvasKeyboardBlocked(): boolean {
+    return this.canvasModalBlocked() || this.panelStore.showAiPanel || this.panelStore.showPythonPanel;
   }
 
   private dispatchMnemonicAction(action: ShortcutAction, param?: Object): void {
@@ -4949,7 +5001,7 @@ struct Index {
   }
 
   private selectedPropertiesEditable(): boolean {
-    if (!this.docStore.workspaceReady || this.viewportStore.currentViewMode !== ViewMode.EDIT || this.canvasKeyboardBlocked()) return false;
+    if (!this.docStore.workspaceReady || this.viewportStore.currentViewMode !== ViewMode.EDIT || this.canvasModalBlocked()) return false;
     const selected: Shape[] = editService.getSelectedShapes();
     if (selected.length === 0 || selected.some((shape: Shape): boolean =>
       !editService.isShapeInCurrentCell(shape) || !editService.canEditLayer(shape.layerNumber, shape.datatype))) return false;
@@ -10033,7 +10085,7 @@ struct Index {
     const used: Set<number> = new Set<number>(this.docStore.layers.map((l: UiLayer): number => l.layerNumber));
     while (used.has(nextNum) && nextNum < 32767) nextNum++;
     const color: string = this.layerColor(this.docStore.layers.length);
-    this.ensureDshLayerExists(nextNum, 0, `LAYER_${nextNum}`, `自定义层 ${nextNum}`, color);
+    this.ensureDshLayerExists(nextNum, 0, `L${nextNum}`, `自定义层 ${nextNum}`, color);
     this.viewportStore.selectedLayerNumber = nextNum;
     this.viewportStore.selectedDatatype = 0;
     this.docStore.editorRevision++;
@@ -10183,8 +10235,35 @@ struct Index {
             captureMethod = 'componentSnapshot(workbench)';
           }
         } else {
-          pixmap = await componentSnapshot.get('hongtu-canvas-stage');
-          captureMethod = 'componentSnapshot(canvas)';
+          // XComponent(SURFACE) OpenGL ES 硬件帧由 Rosen 直接合成，componentSnapshot 仅能截取 ArkUI 节点会导致画布空白；
+          // 统一通过 window.snapshot() 抓取合成帧，并按 getRectangleById('hongtu-canvas-stage') 的窗口像素区域精确裁剪！
+          try {
+            const win = await window.getLastWindow(context);
+            pixmap = await win.snapshot();
+            captureMethod = 'window.snapshot+crop(canvas)';
+            try {
+              const stageRect = this.getUIContext().getComponentUtils().getRectangleById('hongtu-canvas-stage');
+              const imgInfo = await pixmap.getImageInfo();
+              const fullW: number = imgInfo.size.width;
+              const fullH: number = imgInfo.size.height;
+              const cropX: number = Math.max(0, Math.min(fullW - 1, Math.round(stageRect.windowOffset.x)));
+              const cropY: number = Math.max(0, Math.min(fullH - 1, Math.round(stageRect.windowOffset.y)));
+              const cropW: number = Math.min(fullW - cropX, Math.round(stageRect.size.width));
+              const cropH: number = Math.min(fullH - cropY, Math.round(stageRect.size.height));
+              if (cropW >= 64 && cropH >= 64 && (cropW < fullW || cropH < fullH)) {
+                await pixmap.crop({
+                  x: cropX,
+                  y: cropY,
+                  size: { width: cropW, height: cropH }
+                });
+              }
+            } catch (_) {
+              captureMethod = 'window.snapshot(full_fallback)';
+            }
+          } catch (_) {
+            pixmap = await componentSnapshot.get('hongtu-canvas-stage');
+            captureMethod = 'componentSnapshot(canvas)';
+          }
         }
         if (pixmap !== null) {
           capturedAttachment = await aiAttachmentService.savePixelMapAsAttachment(

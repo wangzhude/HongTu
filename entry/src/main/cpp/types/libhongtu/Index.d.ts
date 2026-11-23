@@ -195,6 +195,9 @@ export interface RenderStats {
   drawCalls?: number;
   prepareTime?: number;
   uploadedBytes?: number;
+  lodProxies?: number;
+  lodDeduped?: number;
+  lodScale?: number;
 }
 
 /** Small display table for native hierarchy-to-surface submission, with no geometry serialization. */

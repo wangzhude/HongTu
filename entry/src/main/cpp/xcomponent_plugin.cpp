@@ -5,6 +5,7 @@
  */
 
 #include "xcomponent_plugin.h"
+#include "hierarchy_render_batches.h"
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 #include <hilog/log.h>
@@ -942,6 +943,14 @@ static napi_value NapiGetRenderStats(napi_env env, napi_callback_info /*info*/) 
     napi_set_named_property(env, obj, "drawCalls", drawCallsVal);
     napi_set_named_property(env, obj, "prepareTime", prepareTimeVal);
     napi_set_named_property(env, obj, "uploadedBytes", uploadedBytesVal);
+    const HierarchyLodStatsSnapshot lodStats = ReadHierarchyLodStats();
+    napi_value lodProxiesVal = nullptr, lodDedupedVal = nullptr, lodScaleVal = nullptr;
+    napi_create_double(env, static_cast<double>(lodStats.proxiedCount), &lodProxiesVal);
+    napi_create_double(env, static_cast<double>(lodStats.dedupedCount), &lodDedupedVal);
+    napi_create_double(env, lodStats.maxLodScale, &lodScaleVal);
+    napi_set_named_property(env, obj, "lodProxies", lodProxiesVal);
+    napi_set_named_property(env, obj, "lodDeduped", lodDedupedVal);
+    napi_set_named_property(env, obj, "lodScale", lodScaleVal);
 
     return obj;
 }

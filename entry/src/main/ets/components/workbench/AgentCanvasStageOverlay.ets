@@ -233,6 +233,7 @@ export struct AgentCanvasAuraOverlay {
 @Component
 export struct AgentLiveStatusHud {
   @Prop @Watch('onStateChanged') isLoading: boolean = false;
+  @Prop @Watch('onStateChanged') waitingForUser: boolean = false;
   @Prop canCancel: boolean = false;
   @Prop @Watch('onStateChanged') pendingSummary: string = '';
   @Prop @Watch('onStateChanged') minimizedNotice: string = '';
@@ -333,7 +334,8 @@ export struct AgentLiveStatusHud {
       activeStatus,
       activeText,
       this.runStartedAt,
-      this.nowMs
+      this.nowMs,
+      this.waitingForUser
     );
   }
 
@@ -347,9 +349,9 @@ export struct AgentLiveStatusHud {
             .color(COLORS.primary)
         } else {
           DrawnStatusIcon({
-            kind: this.hudModel().phase === 'preview' ? 'active' : 'success',
+            kind: (this.hudModel().phase === 'preview' || this.hudModel().phase === 'waiting') ? 'active' : 'success',
             iconSize: 18,
-            strokeColor: this.hudModel().phase === 'preview' ? '#14B8A6' : COLORS.success,
+            strokeColor: (this.hudModel().phase === 'preview' || this.hudModel().phase === 'waiting') ? '#14B8A6' : COLORS.success,
             showSoftPlate: true
           })
         }

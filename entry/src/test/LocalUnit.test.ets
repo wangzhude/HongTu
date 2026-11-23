@@ -52,7 +52,9 @@ import {
 import {
   validatePublicWebUrl,
   extractReadableTextFromHtml,
-  parseBingRssItems
+  parseBingRssItems,
+  unwrapSearchRedirectUrl,
+  filterRelevantSearchItems
 } from '../main/ets/services/DshWebSearchService';
 import {
   classifyAttachmentByName,
@@ -1090,6 +1092,29 @@ export default function localUnitTest(): void {
       expect(snapDesc.title.length > 0).assertTrue();
       expect(matchAiSlashCommands('/screenshot').length).assertEqual(1);
       expect(matchAiSlashCommands('/search').length).assertEqual(1);
+
+      // v9 MateBook retest regression suite: waitingForUser HUD + Bing redirect unwrap + relevance filter
+      const hudWaiting = buildAgentCanvasHudModel(true, '', '', true, [{
+        id: 'ask-1',
+        name: 'ask_user',
+        status: 'running',
+        arguments: '{"question":"请选择版图优化方向"}',
+        result: ''
+      }], '', '', 1000, 5000, true);
+      expect(hudWaiting.phase).assertEqual('waiting');
+      expect(hudWaiting.badge).assertEqual('等待确认');
+
+      const unwrappedBing: string = unwrapSearchRedirectUrl(
+        'https://www.bing.com/ck/a?!&&p=123&u=a1aHR0cHM6Ly9rbGF5b3V0LmRlL2RvYy9tYW51YWwvZHJjX2Jhc2ljLmh0bWw&ntb=1'
+      );
+      expect(unwrappedBing).assertEqual('https://klayout.de/doc/manual/drc_basic.html');
+
+      const filteredHits = filterRelevantSearchItems('KLayout DRC rule', [
+        { title: '有道词典 layout', url: 'https://dict.youdao.com/w/layout', snippet: 'layout 布局', source: 'Bing' },
+        { title: 'KLayout DRC Reference', url: 'https://klayout.de/doc/manual/drc_basic.html', snippet: 'KLayout DRC rule syntax', source: 'Bing' }
+      ]);
+      expect(filteredHits.length).assertEqual(1);
+      expect(filteredHits[0].url).assertEqual('https://klayout.de/doc/manual/drc_basic.html');
     });
   });
 }

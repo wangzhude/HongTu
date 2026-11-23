@@ -817,6 +817,12 @@ export struct DshAskUserCard {
     }
   }
 
+  private cleanQuestionText(): string {
+    return (this.request.question || '')
+      .replace(/[（(]\s*(?:可多选|多选|单选)\s*[）)]\s*([？?:：]?)$/u, '$1')
+      .trim();
+  }
+
   private canConfirm(): boolean {
     return this.selectedLabels.length > 0 || this.customInput.trim().length > 0;
   }
@@ -856,7 +862,7 @@ export struct DshAskUserCard {
           .borderRadius(999)
       }.width('100%').alignItems(VerticalAlign.Center)
 
-      Text(this.request.question)
+      Text(this.cleanQuestionText())
         .fontSize(13)
         .fontWeight(FontWeight.Medium)
         .fontColor(DshDesign.textPrimary(this.dark()))
@@ -878,6 +884,7 @@ export struct DshAskUserCard {
               Row({ space: 8 }) {
                 if (this.request.multiSelect) {
                   Checkbox({ name: `ask_chk_${idx}`, group: `ask_grp_${this.request.id}` })
+                    .shape(CheckBoxShape.ROUNDED_SQUARE)
                     .select(this.isSelected(opt.label))
                     .selectedColor(COLORS.primary)
                     .width(16)
@@ -1012,7 +1019,7 @@ export struct DshAttachmentGrid {
             Row({ space: 6 }) {
               SymbolGlyph(
                 att.kind === 'image'
-                  ? $r('sys.symbol.eye')
+                  ? $r('sys.symbol.rectangle_on_rectangle')
                   : (att.kind === 'layout' ? $r('sys.symbol.square_grid_2x2') : $r('sys.symbol.doc_text'))
               )
                 .fontSize(14)
@@ -1107,7 +1114,7 @@ export struct DshWebSourcesRow {
               }
             })
           }, (src: DshWebSearchItem, idx: number): string => `${idx}:${src.url}`)
-        }.alignItems(VerticalAlign.Center)
+        }.padding({ right: 12 }).alignItems(VerticalAlign.Center)
       }
       .width('100%')
       .scrollable(ScrollDirection.Horizontal)

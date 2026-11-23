@@ -199,6 +199,7 @@ export struct GlCanvas {
   onDataChange(): void {
     this.geometryCacheValid = false;
     this.dataDirty = true;
+    this.surfaceRecoveryAttempts = 0;
     if (this.renderMode !== RenderMode.GL) return;
     this.scheduleDataFlush();
   }
@@ -329,7 +330,7 @@ export struct GlCanvas {
         XComponent({ id: this.xcomponentId, type: XComponentType.SURFACE, libraryname: 'hongtu' })
           .width('100%')
           .height('100%')
-          .opacity(this.capacityFallbackActive ? 0 : 1)
+          .opacity(this.capacityFallbackActive && !this.surfacePendingRecovery ? 0 : 1)
           .backgroundColor(this.lightBackground ? '#FFFFFF' : '#070A10')
           .onLoad((context?: object) => {
             this.onXComponentLoad(context);
@@ -419,7 +420,6 @@ export struct GlCanvas {
     if (this.surfaceRecoveryTimer !== -1 || this.disappearing) {
       return;
     }
-    this.surfaceRecoveryAttempts = 0;
     const poll = () => {
       this.surfaceRecoveryTimer = -1;
       if (this.disappearing || !this.useGL || this.renderMode !== RenderMode.GL) {
@@ -429,8 +429,9 @@ export struct GlCanvas {
         return;
       }
       this.surfaceRecoveryAttempts++;
-      if (this.surfaceRecoveryAttempts < 30) {
-        this.surfaceRecoveryTimer = setTimeout(poll, 16);
+      if (this.surfaceRecoveryAttempts < 180) {
+        const delayMs: number = this.surfaceRecoveryAttempts < 45 ? 16 : 32;
+        this.surfaceRecoveryTimer = setTimeout(poll, delayMs);
       }
     };
     this.surfaceRecoveryTimer = setTimeout(poll, 16);
@@ -645,9 +646,21 @@ export struct GlCanvas {
       const overscanVp: WorldViewport = sceneViewportFromCamera(this.canvasWidth, this.canvasHeight,
         this.zoomScale, this.offsetX, this.offsetY, this.computeOverscanMarginPx());
 
+      const sourceHasDashGeometry = (source: ViewSceneSource): boolean => {
+        if (source.opacity <= 0 || source.shapes.length === 0) return false;
+        return source.layers.some((l: UiLayer): boolean =>
+          l.visible !== false &&
+          layerRenderStyle(l).dashArray.length > 0 &&
+          source.shapes.some((sh: Shape): boolean =>
+            sh.type !== ShapeType.INSTANCE && sh.layerNumber === l.layerNumber && sh.datatype === l.datatype)
+        );
+      };
+      const hasInstanceHierarchy: boolean = sources.some((source: ViewSceneSource): boolean =>
+        source.shapes.some((sh: Shape): boolean => sh.type === ShapeType.INSTANCE)
+      );
+
       // 单活动文档未编辑直通快路径：直接复用 C++ g_layout 零拷贝提交，免除 ReadonlySceneCache 双份 Layout 内存（省 ~110MB）
-      const hasVisibleDashLayer: boolean = sources.length === 1 &&
-        sources[0].layers.some((l: UiLayer): boolean => l.visible !== false && layerRenderStyle(l).dashArray.length > 0);
+      const hasVisibleDashLayer: boolean = sources.length === 1 && sourceHasDashGeometry(sources[0]);
       const singleCleanMain: boolean =
         sources.length === 1 &&
         !sources[0].readOnly &&
@@ -659,7 +672,7 @@ export struct GlCanvas {
         sources[0].transform.d === 1 &&
         sources[0].transform.tx === 0 &&
         sources[0].transform.ty === 0 &&
-        (!hasVisibleDashLayer || sources[0].shapes.length > 2000);
+        (!hasVisibleDashLayer || hasInstanceHierarchy || sources[0].shapes.length > 2000);
       if (singleCleanMain) {
         const s0: ViewSceneSource = sources[0];
         this.sceneStyleLimited = hasVisibleDashLayer || s0.layers.some((l: UiLayer): boolean => l.visible && l.animated === true);
@@ -683,6 +696,12 @@ export struct GlCanvas {
           this.refreshRenderStats();
           return;
         }
+        const directStats: RenderStats = this.nativeModule.getRenderStats();
+        if (direct === false && directStats.ready !== true && this.surfaceRecoveryAttempts < 180 && !this.disappearing) {
+          this.renderError = '';
+          this.scheduleSurfaceRecovery();
+          return;
+        }
       }
 
       this.cachedSingleCleanMain = false;
@@ -690,9 +709,7 @@ export struct GlCanvas {
       this.sceneStyleLimited = sources.some((source: ViewSceneSource): boolean => source.opacity > 0 &&
         source.layers.some((l: UiLayer): boolean => l.visible &&
           l.animated === true));
-      const potentialStyledGeometry: boolean = sources.some((source: ViewSceneSource): boolean => source.opacity > 0 &&
-        source.layers.some((l: UiLayer): boolean => l.visible !== false &&
-          layerRenderStyle(l).dashArray.length > 0));
+      const potentialStyledGeometry: boolean = sources.some((source: ViewSceneSource): boolean => sourceHasDashGeometry(source));
       const styledScene: ViewSceneDrawResult | undefined = potentialStyledGeometry
         ? this.sceneService.draw(sources, tightVp, 2000, this.zoomScale) : undefined;
       // 仅当视口图元在 ArkUI 2000 节点容量内且确实存在虚线描边时才走 ArkUI 样式叠层；超出容量时优先保住 OpenGL 完整几何
@@ -741,13 +758,9 @@ export struct GlCanvas {
       const stats: RenderStats = this.nativeModule.getRenderStats();
       const surfaceNotReady: boolean = !needsArkUiTight && nativeError.length === 0 && stats.ready !== true;
 
-      // 当原生 XComponent Surface 正在异步初始化（首帧约 2~16ms）且版图超过 2000 图元时，
-      // 严禁回退执行主线程 50 万节点 JS 遍历或闪出“超过 2000 图元预算”报错，直接等待下一帧 EGL 就绪自愈！
-      let totalSourceShapes: number = 0;
-      for (let i = 0; i < sources.length; i++) {
-        totalSourceShapes += sources[i].shapes.length;
-      }
-      if (surfaceNotReady && totalSourceShapes > 2000 && this.surfaceRecoveryAttempts < 30 && !this.disappearing) {
+      // 当原生 XComponent Surface 正在异步初始化或窗口切换重建时，直接挂起等待 EGL 就绪自愈，
+      // 严禁在含 AREF 阵列或大版图上误触主线程 2000 图元回退与双报错横幅！
+      if (surfaceNotReady && this.surfaceRecoveryAttempts < 180 && !this.disappearing) {
         this.renderError = '';
         this.scheduleSurfaceRecovery();
         return;
@@ -755,7 +768,8 @@ export struct GlCanvas {
 
       this.clearSceneSurface();
       const fallback = styledScene ?? this.sceneService.draw(sources, tightVp, 2000, this.zoomScale);
-      this.renderError = fallback.overflow ? fallback.message : (nativeError.length > 0 ? nativeError :
+      const cleanOverflowMsg: string = fallback.message.replace(/^当前场景未完整绘制[：:]\s*Error:\s*/i, '当前场景未完整绘制：').replace(/^Error:\s*/i, '');
+      this.renderError = fallback.overflow ? cleanOverflowMsg : (nativeError.length > 0 ? nativeError :
         (needsArkUiTight || surfaceNotReady ? '' : '原生场景不可用，使用内置绘制'));
       if (!this.capacityFallbackActive) this.onGlActiveChange(false);
       this.capacityFallbackActive = true;
@@ -789,6 +803,9 @@ export struct GlCanvas {
         primitives: stats.primitives,
         vertices: stats.vertices,
         frameTimeMs: stats.frameTimeMs,
+        lodProxies: stats.lodProxies,
+        lodDeduped: stats.lodDeduped,
+        lodScale: stats.lodScale,
       };
     } catch (e) {
       console.error('[GlCanvas] 获取渲染统计失败:', e);

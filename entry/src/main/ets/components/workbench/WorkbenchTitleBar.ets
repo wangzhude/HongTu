@@ -61,8 +61,23 @@ export struct WorkbenchTitleBar {
   @Prop zoomPercent: number = 100;
   @Prop canUndo: boolean = false;
   @Prop canRedo: boolean = false;
-  @Prop tabs: WorkspaceTab[] = [];
-  @Prop activeTabId: string = '';
+  @Prop @Watch('onTabsOrActiveTabChanged') tabs: WorkspaceTab[] = [];
+  @Prop @Watch('onTabsOrActiveTabChanged') activeTabId: string = '';
+  private tabScroller: Scroller = new Scroller();
+
+  onTabsOrActiveTabChanged(): void {
+    const activeIdx: number = this.tabs.findIndex((t: WorkspaceTab): boolean => t.id === this.activeTabId);
+    if (activeIdx < 0) return;
+    setTimeout(() => {
+      try {
+        if (activeIdx === this.tabs.length - 1) {
+          this.tabScroller.scrollEdge(Edge.End);
+        } else if (activeIdx === 0) {
+          this.tabScroller.scrollEdge(Edge.Start);
+        }
+      } catch (_) {}
+    }, 16);
+  }
 
   undoAction: () => void = () => {};
   redoAction: () => void = () => {};
@@ -406,84 +421,90 @@ export struct WorkbenchTitleBar {
 
   @Builder
   private inlineDocumentTabs() {
-    Scroll() {
-      Row({ space: 4 }) {
-        ForEach(this.tabs, (tab: WorkspaceTab) => {
-          Row({ space: 2 }) {
-            Button({ type: ButtonType.Normal }) {
-              Row({ space: 5 }) {
-                WorkbenchIcon({
-                  name: 'layout',
-                  iconSize: 13,
-                  color: tab.id === this.activeTabId ? COLORS.primary : COLORS.muted
-                })
-                Text(tab.title)
-                  .fontSize(12)
-                  .fontWeight(tab.id === this.activeTabId ? FontWeight.Bold : FontWeight.Medium)
-                  .fontColor(tab.id === this.activeTabId ? COLORS.primary : COLORS.ink)
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .constraintSize({ maxWidth: 148 })
-                if (tab.dirty) {
-                  DrawnStatusIcon({ kind: 'dirty', iconSize: 8, strokeColor: COLORS.warning, showSoftPlate: false })
-                }
-              }.alignItems(VerticalAlign.Center)
-            }
-            .height(30)
-            .padding({ left: 9, right: 4 })
-            .backgroundColor(Color.Transparent)
-            .focusable(false)
-            .accessibilityText(`切换文档 ${tab.title}`)
-            .onClick(() => this.selectTabAction(tab.id))
-
-            if (this.tabs.length > 1) {
+    Row({ space: 5 }) {
+      Scroll(this.tabScroller) {
+        Row({ space: 4 }) {
+          ForEach(this.tabs, (tab: WorkspaceTab) => {
+            Row({ space: 2 }) {
               Button({ type: ButtonType.Normal }) {
-                WorkbenchIcon({ name: 'close', iconSize: 11, color: COLORS.muted })
+                Row({ space: 5 }) {
+                  WorkbenchIcon({
+                    name: 'layout',
+                    iconSize: 13,
+                    color: tab.id === this.activeTabId ? COLORS.primary : COLORS.muted
+                  })
+                  Text(tab.title)
+                    .fontSize(12)
+                    .fontWeight(tab.id === this.activeTabId ? FontWeight.Bold : FontWeight.Medium)
+                    .fontColor(tab.id === this.activeTabId ? COLORS.primary : COLORS.ink)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .constraintSize({ maxWidth: tab.id === this.activeTabId ? 196 : 144 })
+                  if (tab.dirty) {
+                    DrawnStatusIcon({ kind: 'dirty', iconSize: 8, strokeColor: COLORS.warning, showSoftPlate: false })
+                  }
+                }.alignItems(VerticalAlign.Center)
               }
-              .width(22)
-              .height(22)
-              .padding(0)
-              .margin({ right: 3 })
+              .height(30)
+              .padding({ left: 9, right: 4 })
               .backgroundColor(Color.Transparent)
-              .borderRadius(5)
               .focusable(false)
-              .accessibilityText(`关闭 ${tab.title}`)
-              .onClick(() => this.closeTabAction(tab.id))
-            } else {
-              Row().width(4)
-            }
-          }
-          .height(32)
-          .alignItems(VerticalAlign.Center)
-          .backgroundColor(tab.id === this.activeTabId ? COLORS.primarySoft : COLORS.surfaceMuted)
-          .border({
-            width: 0.8,
-            color: tab.id === this.activeTabId ? COLORS.primary : COLORS.border
-          })
-          .borderRadius(UI.controlRadius)
-        }, (tab: WorkspaceTab): string => `${tab.id}:${tab.title}:${tab.dirty}:${this.activeTabId}:${this.tabs.length}`)
+              .accessibilityText(`切换文档 ${tab.title}`)
+              .bindTips(tab.title)
+              .onClick(() => this.selectTabAction(tab.id))
 
-        Button({ type: ButtonType.Normal }) {
-          WorkbenchIcon({ name: 'plus', iconSize: 15, color: COLORS.muted })
+              if (this.tabs.length > 1) {
+                Button({ type: ButtonType.Normal }) {
+                  WorkbenchIcon({ name: 'close', iconSize: 11, color: COLORS.muted })
+                }
+                .width(22)
+                .height(22)
+                .padding(0)
+                .margin({ right: 3 })
+                .backgroundColor(Color.Transparent)
+                .borderRadius(5)
+                .focusable(false)
+                .accessibilityText(`关闭 ${tab.title}`)
+                .onClick(() => this.closeTabAction(tab.id))
+              } else {
+                Row().width(4)
+              }
+            }
+            .height(32)
+            .alignItems(VerticalAlign.Center)
+            .backgroundColor(tab.id === this.activeTabId ? COLORS.primarySoft : COLORS.surfaceMuted)
+            .border({
+              width: 0.8,
+              color: tab.id === this.activeTabId ? COLORS.primary : COLORS.border
+            })
+            .borderRadius(UI.controlRadius)
+          }, (tab: WorkspaceTab): string => `${tab.id}:${tab.title}:${tab.dirty}:${this.activeTabId}:${this.tabs.length}`)
         }
-        .width(30)
-        .height(30)
-        .padding(0)
-        .backgroundColor(COLORS.surfaceMuted)
-        .border({ width: 0.8, color: COLORS.border })
-        .borderRadius(UI.controlRadius)
-        .focusable(false)
-        .accessibilityText('新建或切换工程版图')
-        .bindTips('新建版图 / 工程与历史')
-        .onClick(() => this.newFileAction())
+        .padding({ right: 4 })
+        .alignItems(VerticalAlign.Center)
       }
-      .alignItems(VerticalAlign.Center)
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+      .layoutWeight(1)
+      .align(Alignment.Start)
+
+      Button({ type: ButtonType.Normal }) {
+        WorkbenchIcon({ name: 'plus', iconSize: 15, color: COLORS.muted })
+      }
+      .width(30)
+      .height(30)
+      .padding(0)
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border })
+      .borderRadius(UI.controlRadius)
+      .focusable(false)
+      .accessibilityText('新建或切换工程版图')
+      .bindTips('新建版图 / 工程与历史')
+      .onClick(() => this.newFileAction())
     }
-    .scrollable(ScrollDirection.Horizontal)
-    .scrollBar(BarState.Off)
-    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
     .layoutWeight(1)
-    .align(Alignment.Start)
+    .alignItems(VerticalAlign.Center)
     .margin({ left: 10, right: 8 })
   }
 

@@ -218,11 +218,6 @@ private:
     float lastPrepareTime_ = 0;
     float maxSupportedLineWidth_;
 
-    const char* vertexShaderSource_ = nullptr;
-    const char* fragmentShaderSource_ = nullptr;
-    const char* lineVertexShaderSource_ = nullptr;
-    const char* lineFragmentShaderSource_ = nullptr;
-
     GLuint compileShader(GLenum type, const char* source);
     GLuint linkProgram(GLuint vertShader, GLuint fragShader);
     void updateMVP(GLint location);

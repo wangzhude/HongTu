@@ -251,7 +251,7 @@ const DSH_LAYOUT_SYSTEM_PROMPT: string =
   '   - 端侧内置 Python 3 引擎：调用 execute_klayout_python 可直接在鸿蒙端侧内置 Python 3 虚拟机中离线运行 import hongtu as db / import klayout.db as db / import pya 及 db.Region 布尔脚本，无需任何外部桌面伴随服务；\n' +
   '   - 自动化操控软件界面：调用 automate_workbench_ui 可自动切换工作台模块、编辑/查看模式、绘图工具、开关任意面板/侧栏、操控相机缩放聚焦、模拟画布点选/框选并自动复检截图。\n' +
   '4. 【主动澄清 ask_user】当工艺参数、层号、尺寸规格或删除范围存在关键歧义时，调用 ask_user 弹出结构化单选/多选卡片向用户确认，收到答复后立即继续执行。\n' +
-  '5. 【联网检索与可验证引用】涉及外部 PDK 规范、器件论文参数、鸿蒙/EDA 技术资料或最新信息时，调用 web_search 与 web_fetch 检索核实，并在正文中附带 Markdown 可点击链接 [来源标题](URL)。\n' +
+  '5. 【按需联网检索】仅当用户明确要求搜索网络，或涉及外部 PDK 设计标准、器件论文参数、公开 EDA/鸿蒙技术文档时才调用 web_search 与 web_fetch（纯本地版图盘点、修改与 DRC 检查严禁无故触发联网搜索），引用外部资料时附带 Markdown 可点击链接 [来源标题](URL)。\n' +
   '6. 【附件与产物交付】用户上传或粘贴的图片、GDSII/OASIS 版图、网表与代码文件可通过 manage_attachments_and_files 读取或导入画布；需要向用户交付 PNG/SVG 截图、GDSII/OASIS 版图或 SPICE 网表文件时，调用 manage_attachments_and_files(action="export_deliverable_to_chat") 直接生成带一键复制与另存按钮的对话文件卡片。';
 
 function buildDshTools(permission: DshPermissionMode, webSearchEnabled: boolean): OpenAiToolDef[] {
@@ -329,7 +329,7 @@ function buildDshTools(permission: DshPermissionMode, webSearchEnabled: boolean)
         type: 'function',
         function: {
           name: 'web_search',
-          description: '实时搜索互联网公开技术资料、PDK 设计规则、光子/CMOS 论文参数或鸿蒙开发文档，返回标题、摘要与真实可点击 URL。',
+          description: '仅当需要查询外部公开技术规范、PDK 标准、论文参数或用户明确要求联网检索时调用；纯本地版图检查与几何编辑请勿调用。返回标题、摘要与真实可点击 URL。',
           parameters: parseSchema('{"type":"object","properties":{"query":{"type":"string"},"maxResults":{"type":"integer","minimum":1,"maximum":10,"default":6}},"required":["query"]}')
         }
       },

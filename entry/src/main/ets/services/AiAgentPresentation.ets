@@ -72,7 +72,7 @@ export interface AiSlashCommandSpec {
 }
 
 export interface AgentCanvasHudModel {
-  phase: 'drawing' | 'preview' | 'completed' | 'hidden';
+  phase: 'drawing' | 'waiting' | 'preview' | 'completed' | 'hidden';
   badge: string;
   title: string;
   detail: string;
@@ -1014,8 +1014,19 @@ export function buildAgentCanvasHudModel(
   generationStatus: string,
   streamingText: string,
   startedAt: number,
-  nowMs: number
+  nowMs: number,
+  waitingForUser: boolean = false
 ): AgentCanvasHudModel {
+  if (isLoading && waitingForUser) {
+    return {
+      phase: 'waiting',
+      badge: '等待确认',
+      title: 'Agent 等待你的选择',
+      detail: showAiPanel ? '请在右侧对话卡片中勾选选项以继续执行' : '请展开窗口并在提问卡片中确认选项',
+      stepText: toolCalls.length > 0 ? `第 ${toolCalls.length} 步` : '待确认',
+      elapsedText: ''
+    };
+  }
   if (isLoading) {
     let activeToolLabel: string = '';
     for (let i: number = toolCalls.length - 1; i >= 0; i--) {

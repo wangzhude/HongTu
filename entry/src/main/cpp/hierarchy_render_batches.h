@@ -4,6 +4,7 @@
 #include "scene_graph.h"
 #include "gl_renderer.h"
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -32,6 +33,32 @@ struct HierarchyRenderOrigin {
     double x = 0.0;
     double y = 0.0;
 };
+
+struct HierarchyLodStatsSnapshot {
+    uint64_t proxiedCount = 0;
+    uint64_t dedupedCount = 0;
+    double maxLodScale = 1.0;
+};
+
+inline std::atomic<uint64_t>& GlobalLodProxiedCounter() noexcept {
+    static std::atomic<uint64_t> c{0};
+    return c;
+}
+inline std::atomic<uint64_t>& GlobalLodDedupedCounter() noexcept {
+    static std::atomic<uint64_t> c{0};
+    return c;
+}
+inline std::atomic<int>& GlobalLodScaleTimes10() noexcept {
+    static std::atomic<int> s{10};
+    return s;
+}
+inline HierarchyLodStatsSnapshot ReadHierarchyLodStats() noexcept {
+    HierarchyLodStatsSnapshot out;
+    out.proxiedCount = GlobalLodProxiedCounter().load(std::memory_order_relaxed);
+    out.dedupedCount = GlobalLodDedupedCounter().load(std::memory_order_relaxed);
+    out.maxLodScale = static_cast<double>(GlobalLodScaleTimes10().load(std::memory_order_relaxed)) / 10.0;
+    return out;
+}
 
 // Shared across every source: adaptive sub-pixel coarsening kicks in well before
 // approaching GPU vertex limits so large chip scenes never crash back to JS fallback.
@@ -246,6 +273,9 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
     if (pixelSpanNm > 0.0) {
         subpixelOccupied.reserve(32768);
     }
+    uint64_t localLodProxied = 0;
+    uint64_t localLodDeduped = 0;
+    double peakLodMul = 1.0;
 
     // Adaptive LOD scale: if primitive count already exceeds 1.5M on ultra-dense full-chip views,
     // progressively coarsen sub-pixel grid cell size (1x -> 2x -> 4x) so OpenGL stays fast and complete
@@ -338,6 +368,7 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
 
     auto emitSubpixelProxyBox = [&](LayerKey lk, const HierarchyLayerStyle& st, const BBox& worldBox) {
         const double lodMul = currentLodMultiplier();
+        if (lodMul > peakLodMul) peakLodMul = lodMul;
         const double cellNm = baseSubpixelCellNm * lodMul;
         const double maxDim = std::max((worldBox.maxX - worldBox.minX), (worldBox.maxY - worldBox.minY));
         const double cx = 0.5 * (worldBox.minX + worldBox.maxX);
@@ -349,9 +380,11 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
                                      (uint64_t(uint16_t(lk.datatype)) << 32) |
                                      ((uint64_t(uint32_t(gx)) * 2654435761ULL) ^ uint64_t(uint32_t(gy)));
             if (!subpixelOccupied.insert(cellKey).second) {
+                ++localLodDeduped;
                 return;
             }
         }
+        ++localLodProxied;
         const double minHalf = 0.40 * pixelSpanNm;
         const double halfW = std::max(0.5 * (worldBox.maxX - worldBox.minX), minHalf);
         const double halfH = std::max(0.5 * (worldBox.maxY - worldBox.minY), minHalf);
@@ -692,6 +725,14 @@ inline std::vector<RenderBatch> BuildHierarchyRenderBatches(const Layout& layout
         traversalViewport, nullptr, nullptr, &onStoppedInstanceBox,
         localSubpixelInstanceSpanNm,
         localSubpixelInstanceSpanNm > 0.0 ? &onSubpixelInstance : nullptr);
+    if (!source || source->sourceOrder == 0) {
+        GlobalLodProxiedCounter().store(localLodProxied, std::memory_order_relaxed);
+        GlobalLodDedupedCounter().store(localLodDeduped, std::memory_order_relaxed);
+        GlobalLodScaleTimes10().store(static_cast<int>(std::llround(peakLodMul * 10.0)), std::memory_order_relaxed);
+    } else {
+        GlobalLodProxiedCounter().fetch_add(localLodProxied, std::memory_order_relaxed);
+        GlobalLodDedupedCounter().fetch_add(localLodDeduped, std::memory_order_relaxed);
+    }
     return batches;
 }
 

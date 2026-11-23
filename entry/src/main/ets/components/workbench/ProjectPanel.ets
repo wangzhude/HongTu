@@ -41,6 +41,15 @@ export struct ProjectPanel {
       default: return '未确认';
     }
   }
+  private filteredActionStatus(): string {
+    const raw: string = (this.actionStatus || '').trim();
+    if (raw.length === 0) return '';
+    if (raw.startsWith('视图已适配') || raw.startsWith('当前工具') || raw.startsWith('已切换当前绘图层') || raw === '就绪') {
+      return '';
+    }
+    return raw;
+  }
+
   private createDocument(): void {
     const dbu: number = Number(this.dbu);
     if (!/^[A-Za-z_][A-Za-z0-9_$?]{0,31}$/.test(this.library) || !/^[A-Za-z_][A-Za-z0-9_$?]{0,31}$/.test(this.topCell) ||
@@ -76,26 +85,17 @@ export struct ProjectPanel {
                 .onKeyEvent((event: KeyEvent) => event.stopPropagation())
             }.width(this.panelWidth < 480 ? '100%' : (this.panelWidth - UI.panelPadding * 4 - 12) / 2).alignSelf(ItemAlign.Start)
             if (this.error.length > 0) { Text(this.error).fontSize(12).fontColor(COLORS.danger).width('100%') }
-            if (this.panelWidth >= 480) {
-              Row({ space: 8 }) {
-                Button('新建版图', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).backgroundColor(COLORS.primary).fontColor(Color.White).border({ width: 1, color: COLORS.primary }).borderRadius(UI.controlRadius).onClick(() => this.createDocument())
-                Button('保存工程', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.saveProjectAction())
-                Button('打开工程', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.openProjectAction())
-                Button('创建版本', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.checkpointAction())
-              }.width('100%')
-            } else {
-              Row({ space: 8 }) {
-                Button('新建版图', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).backgroundColor(COLORS.primary).fontColor(Color.White).border({ width: 1, color: COLORS.primary }).borderRadius(UI.controlRadius).onClick(() => this.createDocument())
-                Button('保存工程', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.saveProjectAction())
-              }.width('100%')
-              Row({ space: 8 }) {
-                Button('打开工程', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.openProjectAction())
-                Button('创建版本', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.checkpointAction())
-              }.width('100%')
-            }
-            Button('工程另存…', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).width('100%').onClick(() => this.saveProjectAsAction())
+            Row({ space: 8 }) {
+              Button('新建版图', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).backgroundColor(COLORS.primary).fontColor(Color.White).border({ width: 1, color: COLORS.primary }).borderRadius(UI.controlRadius).onClick(() => this.createDocument())
+              Button('打开工程', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.openProjectAction())
+            }.width('100%')
+            Row({ space: 8 }) {
+              Button('保存工程', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.saveProjectAction())
+              Button('工程另存…', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.saveProjectAsAction())
+              Button('创建版本', { type: ButtonType.Normal }).utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier()).layoutWeight(1).onClick(() => this.checkpointAction())
+            }.width('100%')
             if (this.recoveryStatus.length > 0) { Text(this.recoveryStatus).fontSize(12).fontColor(COLORS.primary).width('100%') }
-            if (this.actionStatus.length > 0) { Text(this.actionStatus).fontSize(12).fontColor(COLORS.ink).width('100%') }
+            if (this.filteredActionStatus().length > 0) { Text(this.filteredActionStatus()).fontSize(12).fontColor(COLORS.ink).width('100%') }
           }.utilitySection()
           Column({ space: 10 }) {
             Row({ space: 8 }) {

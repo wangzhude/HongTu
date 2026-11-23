@@ -42,7 +42,7 @@ target_include_directories(hongtu PRIVATE
 )
 target_compile_definitions(hongtu PRIVATE PK_ENABLE_WATCHDOG=1 PK_ENABLE_OS=1)
 set_source_files_properties(vendor/pocketpy/pocketpy.c PROPERTIES
-    COMPILE_OPTIONS "-Wno-unused-parameter;-Wno-sign-compare"
+    COMPILE_OPTIONS "-w"
 )
 
 # 链接鸿蒙 NAPI 运行时 + OpenGL ES + EGL + XComponent + NativeVSync + 日志 + zlib(OASIS CBLOCK)

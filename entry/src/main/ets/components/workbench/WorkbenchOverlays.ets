@@ -4155,9 +4155,9 @@ export struct AiAssistantPanel {
 
   private attachmentMenuSizing(): MenuItemOptions[] {
     return [
-      { content: '从相册选择照片…', symbolStartIcon: menuIcon('eye') },
+      { content: '从相册选择照片…', symbolStartIcon: menuIcon('photo') },
       { content: '选择版图 / 脚本 / 文档文件…', symbolStartIcon: menuIcon('open') },
-      { content: '截取当前版图画布快照', symbolStartIcon: menuIcon('select') },
+      { content: '截取当前版图画布快照', symbolStartIcon: menuIcon('snapshot') },
       { content: '读取剪贴板图片或文件', labelInfo: 'Ctrl+V', symbolStartIcon: menuIcon('paste') }
     ];
   }
@@ -4166,13 +4166,13 @@ export struct AiAssistantPanel {
   AttachmentAddMenu() {
     Menu() {
       MenuItemGroup({ header: '添加多模态附件' }) {
-        MenuItem({ content: '从相册选择照片…', symbolStartIcon: menuIcon('eye') })
+        MenuItem({ content: '从相册选择照片…', symbolStartIcon: menuIcon('photo') })
           .attributeModifier(MENU_ITEM_STYLE)
           .onClick(() => { this.pickPhotoAttachmentAction(); })
         MenuItem({ content: '选择版图 / 脚本 / 文档文件…', symbolStartIcon: menuIcon('open') })
           .attributeModifier(MENU_ITEM_STYLE)
           .onClick(() => { this.pickFileAttachmentAction(); })
-        MenuItem({ content: '截取当前版图画布快照', symbolStartIcon: menuIcon('select') })
+        MenuItem({ content: '截取当前版图画布快照', symbolStartIcon: menuIcon('snapshot') })
           .attributeModifier(MENU_ITEM_STYLE)
           .onClick(() => { this.captureCanvasAttachmentAction(); })
         MenuItem({ content: '读取剪贴板图片或文件', labelInfo: 'Ctrl+V', symbolStartIcon: menuIcon('paste') })
@@ -4637,18 +4637,8 @@ export struct AiAssistantPanel {
       .accessibilityText('上下文管理')
       .onClick(() => this.openManagement('context'))
 
-      Button(`上下文 ${this.tokenMeterState().percent}%`, { type: ButtonType.Normal })
-        .height(26)
-        .padding({ left: 8, right: 8 })
-        .fontSize(11)
-        .fontColor(this.tokenMeterState().nearThreshold ? COLORS.warning : COLORS.muted)
-        .backgroundColor(COLORS.surfaceMuted)
-        .borderRadius(RADIUS.capsule)
-        .enabled(!this.isLoading && !this.configBusy)
-        .onClick(() => this.openManagement('context'))
-
-      if (aiService.getConfig().provider !== AiProvider.DEMO_MODE) {
-        Button('连接设置', { type: ButtonType.Normal })
+      if (pythonBridgeService.getExecutionMode() === 'remote') {
+        Button('伴随连接', { type: ButtonType.Normal })
           .height(26)
           .padding({ left: 8, right: 8 })
           .fontSize(11)
@@ -4827,16 +4817,15 @@ export struct AiAssistantPanel {
             this.ArrayTaskTemplate()
           }
 
-          if (this.showQuickActions && !this.showTaskTemplate && this.pendingSummary.length === 0 &&
+          if (this.showQuickActions && this.messages.length > 0 && !this.showTaskTemplate && this.pendingSummary.length === 0 &&
             this.pendingAskUser === null && this.visibleSlashCommands().length === 0) {
             Scroll() {
               Row({ space: 6 }) {
                 this.QuickPrompt('截图自检', '请先对当前工作台截图并检查视图与图层情况，再给出优化建议')
-                this.QuickPrompt('检查版图', '检查当前版图并说明需要关注的问题')
                 this.QuickPrompt('清理空图层', '检查并清理当前版图中所有没有图元的空图层')
-                this.QuickPrompt('画5×5光子晶体阵列', '新建一个子 Cell 画半径 120nm 圆孔，再回到 TOP 排成 5×5 步进 400nm 的 AREF 阵列并截图验收')
-                this.QuickPrompt('画反相器', '使用内置 Python 生成一个标准 CMOS 反相器单元并适配全图')
-              }.alignItems(VerticalAlign.Center)
+                this.QuickPrompt('5×5 光子晶体阵列', '新建一个子 Cell 画半径 120nm 圆孔，再回到 TOP 排成 5×5 步进 400nm 的 AREF 阵列并截图验收')
+                this.QuickPrompt('一键 DRC 复检', '运行当前规则检查并汇总违例详情')
+              }.padding({ right: 8 }).alignItems(VerticalAlign.Center)
             }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
               .clip(true)
           }
@@ -4851,7 +4840,7 @@ export struct AiAssistantPanel {
                       prefixSymbol: {
                         normal: new SymbolGlyphModifier(
                           att.kind === 'image'
-                            ? $r('sys.symbol.eye')
+                            ? $r('sys.symbol.rectangle_on_rectangle')
                             : (att.kind === 'layout' ? $r('sys.symbol.square_grid_2x2') : $r('sys.symbol.doc_text'))
                         ).fontSize(12).fontColor([COLORS.primary])
                       },
