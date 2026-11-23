@@ -47,6 +47,7 @@ import {
   AiSlashCommandSpec,
   AiTokenMeterState,
   AiToolField,
+  AiPlanStepView,
   AiToolPresentation,
   computeDraftAwareTokenMeter,
   describeAiToolCall,

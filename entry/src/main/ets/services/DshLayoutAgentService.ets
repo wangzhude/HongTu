@@ -127,6 +127,24 @@ interface WireChatMessage {
   tool_call_id?: string;
 }
 
+interface WireThinkingConfig {
+  type: string;
+}
+
+interface WireChatRequest {
+  model: string;
+  messages: WireChatMessage[];
+  tools: OpenAiToolDef[];
+  tool_choice: string;
+  stream: boolean;
+  temperature: number;
+  max_completion_tokens?: number;
+  max_tokens?: number;
+  thinking?: WireThinkingConfig;
+  enable_thinking?: boolean;
+  reasoning_effort?: string;
+}
+
 interface StreamToolCallAccumulator {
   index: number;
   id: string;
@@ -703,8 +721,8 @@ export class DshLayoutAgentService {
           throw new Error('当前处于「只读问答」权限模式，无法修改版图；请在输入框左下角切换为「自动执行」或「审阅确认」。');
         }
         const opsRaw: Object | undefined = args['operations'];
-        if (!Array.isArray(opsRaw) || (opsRaw as Object[]).length === 0) {
-          throw new Error('operations 必须是非空操作数组');
+        if (!Array.isArray(opsRaw) || (opsRaw as Object[]).length === 0 || (opsRaw as Object[]).length > 256) {
+          throw new Error('operations 必须包含 1 到 256 项操作');
         }
         return await host.editLayout(opsRaw as DshEditOperation[], permission);
       }
@@ -713,8 +731,8 @@ export class DshLayoutAgentService {
         if (name.length === 0) {
           throw new Error('请提供要调用的原生工具名称 name');
         }
-        const subArgs: Object = args['arguments'] ?? {};
-        return await host.callNativeTool(name, JSON.stringify(subArgs), permission);
+        const subArgs: Object | undefined = args['arguments'];
+        return await host.callNativeTool(name, subArgs === undefined ? '{}' : JSON.stringify(subArgs), permission);
       }
       case 'execute_klayout_python': {
         if (permission === 'readonly') {
@@ -726,6 +744,9 @@ export class DshLayoutAgentService {
         }
         const modeRaw: string = typeof args['applyMode'] === 'string' ? (args['applyMode'] as string) : 'replace';
         const applyMode: 'replace' | 'merge' = modeRaw === 'merge' ? 'merge' : 'replace';
+        if (permission === 'review') {
+          return await host.callNativeTool('python.run', JSON.stringify({ script, inputMode: 'document', applyMode, parameters: '{}' }), permission);
+        }
         return await host.executeKlayoutPython(script, applyMode);
       }
       default:
@@ -751,30 +772,30 @@ export class DshLayoutAgentService {
     const modelLower: string = config.modelName.toLowerCase();
     const effort: string = config.reasoningEffort ?? 'auto';
 
-    const payload: Record<string, Object> = {
+    const payload: WireChatRequest = {
       model: config.modelName,
-      messages: messages as Object,
-      tools: tools as Object,
+      messages,
+      tools,
       tool_choice: 'auto',
       stream: true,
       temperature: config.temperature
     };
 
     if (/^(?:o[134](?:-|$)|gpt-[56](?:[.-]|$))/.test(modelLower)) {
-      payload['max_completion_tokens'] = effectiveMaxOut;
+      payload.max_completion_tokens = effectiveMaxOut;
     } else {
-      payload['max_tokens'] = effectiveMaxOut;
+      payload.max_tokens = effectiveMaxOut;
     }
 
     if (effort !== 'auto') {
       if (effort === 'none') {
         if (modelLower.includes('deepseek')) {
-          payload['thinking'] = { type: 'disabled' } as Record<string, string>;
+          payload.thinking = { type: 'disabled' };
         } else if (modelLower.includes('qwen3') || modelLower.includes('glm-4')) {
-          payload['enable_thinking'] = false;
+          payload.enable_thinking = false;
         }
       } else if (/(?:o[134]|gpt-[56]|deepseek|qwen3|qwq|glm|claude|gemini|bunny)/.test(modelLower)) {
-        payload['reasoning_effort'] = effort;
+        payload.reasoning_effort = effort;
       }
     }
 

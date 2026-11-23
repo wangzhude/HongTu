@@ -1,4 +1,6 @@
 import { describe, beforeEach, it, expect } from '@ohos/hypium';
+import { routingConstraintService } from '../main/ets/services/RoutingConstraintService';
+import { MeasureStore } from '../main/ets/common/UiStores';
 import { snapService } from '../main/ets/services/SnapService';
 import { Shape, ShapeType, Point, getShapeBounds, packShapesCoordinates, nativeShapesToShapes, hasKeyholeBridgeEdges, extractKeyholeCleanLoops } from '../main/ets/models/GdsiiData';
 import { cleanDbuNm } from '../main/ets/services/PrecisionService';

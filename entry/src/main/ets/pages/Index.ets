@@ -19,7 +19,7 @@ import { CursorStore, MeasureStore, VertexStore } from '../common/UiStores';
 import { CanvasFocusReturnFrame } from '../common/CanvasFocusReturnFrame';
 import type { LayoutPropRecord } from '../../cpp/types/libhongtu/Index';
 import { LayoutPort, LayoutCrossSection, LayoutContextRecord, LayoutPortDraft, PortEndpoint, ResolvedPort,
-  newLayoutIdentity, remapCellSemantics, mergeLayoutSemantics, reconcileGeneratedPorts, portDraft, portFromDraft, markCellLineage, appendCellSemantics } from '../models/LayoutPort';
+  newLayoutIdentity, remapCellSemantics, mergeLayoutSemantics, reconcileGeneratedPorts, portFromDraft, markCellLineage, appendCellSemantics } from '../models/LayoutPort';
 import { portService, PortRequest, PortResult, PortPreview, resolveLayoutPort } from '../services/PortService';
 import { PortManagerDialog } from '../components/dialogs/PortManagerDialog';
 import { PortConnectDialog } from '../components/dialogs/PortConnectDialog';
@@ -205,7 +205,7 @@ import type { AiTaskCheckpoint } from '../services/AiService';
 import { queryAiWorkbench, AiEditorQuery, AiEditorReply } from '../services/AiWorkbenchQuery';
 import { AiNativeCall, AiNativeResult, AiNativeData, aiNativeTool, aiNativeTools, parseAiNativeCall, validateAiNativeBatch, aiNativeResult, aiNativeData } from '../services/AiNativeTools';
 import { runAiNativeGeometry, selectAiNativeTargets, AiGeometryContext } from '../services/AiNativeGeometry';
-import type { CommandParams } from '../services/AiService';
+import type { AiLayerInfo, CommandParams } from '../services/AiService';
 import type { NativeLayoutCompareOptions } from '../../cpp/types/libhongtu/Index';
 import { groupAiEdits, acceptedAiEdits, AiReviewGroup } from '../services/AiReviewGroups';
 import { aiExecutor, AiCommandExecutor, CommandResult, ViewAction } from '../services/AiCommandParser';
@@ -297,11 +297,31 @@ interface IntegratedEngineeringCheckpoint {
   owned: boolean;
 }
 
-interface AiLayerInfo {
-  layerNumber: number;
+interface DshLayoutLayerSummary {
+  layer: number;
   datatype: number;
   chineseName: string;
-  englishName: string;
+  name: string;
+  visible: boolean;
+}
+
+interface DshLayoutActiveLayer {
+  layer: number;
+  datatype: number;
+}
+
+interface DshLayoutCellSummary {
+  id: number;
+  name: string;
+}
+
+interface DshDrcViolationSummary {
+  id: number;
+  ruleType: string;
+  severity: string;
+  message: string;
+  x: number;
+  y: number;
 }
 
 interface CanvasNavigationViewport {
@@ -9016,7 +9036,7 @@ struct Index {
         await this.runDshNativeAgentPrompt(prompt, ticket, effectivePerm);
         return;
       }
-      if (this.aiStore.aiPermissionMode === 'auto' && /^(?:画|生成|创建|绘制).*(?:cmos\s*)?(?:反相器|inverter)/i.test(prompt.trim())) {
+      if (!forceReadOnly && this.aiStore.aiPermissionMode === 'auto' && /^(?:画|生成|创建|绘制).*(?:cmos\s*)?(?:反相器|inverter)/i.test(prompt.trim())) {
         harnessStarted = true;
         await this.runDemoDirectInverter(prompt, ticket);
         return;
@@ -9434,20 +9454,26 @@ struct Index {
     this.ensureDshLayerExists(7, 0, 'METAL1', '金属1', '#2563EB');
     this.ensureDshLayerExists(8, 0, 'PIN_LABEL', '端口标签', '#0891B2');
 
-    const beforeMarker: Object | null = editService.getUndoMarker();
     const execCtx: AiContext = this.buildAiContext();
+    const before: EditStructureState = this.cellStructureState();
+    const after: EditStructureState = this.cellStructureState();
+    const beforeMarker: Object | null = editService.getUndoMarker();
+    const baseSession: EditSessionState = editService.captureSession();
+    const createdIds: number[] = [];
+    let nextShapes: Shape[] = [];
     editService.beginBatch();
-    let createdCount: number = 0;
     try {
       for (let i = 0; i < commands.length; i++) {
         const res: CommandResult = aiExecutor.execute(commands[i], execCtx);
-        if (res.success) {
-          createdCount += Math.max(1, res.affectedShapeIds.length);
-        }
+        if (!res.success) return { success: false, summary: res.message, payloadJson: JSON.stringify(res) };
+        createdIds.push(...res.affectedShapeIds);
       }
+      nextShapes = editService.getShapes().slice();
     } finally {
       editService.endBatch();
+      editService.restoreSession(baseSession);
     }
+    const createdCount: number = createdIds.length;
 
     // Add 4 semantic ports (IN, OUT, VSS, VDD) to current cell
     const ownerCell: number = editService.getCurrentCellId();
@@ -9457,36 +9483,28 @@ struct Index {
       ['VSS', -2 * unit, vssY + Math.floor(railH / 2), 180, railH],
       ['VDD', -2 * unit, vddY + Math.floor(railH / 2), 180, railH]
     ];
-    let addedPorts: number = 0;
-    for (let pi = 0; pi < portDefs.length; pi++) {
-      const pDef = portDefs[pi];
-      try {
-        const draft: LayoutPortDraft = portDraft(ownerCell);
-        draft.name = pDef[0];
-        draft.center = { x: pDef[1], y: pDef[2] };
-        draft.orientationDeg = pDef[3];
-        draft.widthNm = pDef[4];
-        draft.layerNumber = 7;
-        draft.datatype = 0;
-        draft.portType = 'electrical';
-        const existingIdx: number = this.docPorts.findIndex(
-          (p: LayoutPort): boolean => p.ownerCellId === ownerCell && p.name === pDef[0]
-        );
-        const builtPort: LayoutPort = portFromDraft(draft);
-        if (existingIdx >= 0) {
-          const copy: LayoutPort[] = this.docPorts.slice();
-          copy[existingIdx] = builtPort;
-          this.docPorts = copy;
-        } else {
-          this.docPorts = this.docPorts.concat([builtPort]);
-          addedPorts++;
-        }
-      } catch (_) {}
+    const ownerKey: string = (before.cellKeys ?? [])[ownerCell];
+    const ports: LayoutPort[] = this.docPorts.slice();
+    for (const pDef of portDefs) {
+      const draft: LayoutPortDraft = {
+        name: pDef[0], centerNm: { x: pDef[1], y: pDef[2] }, orientationDeg: pDef[3], widthNm: pDef[4],
+        layerNumber: 7, datatype: 0, portType: 'electrical', frameMirror: false, frameMagnification: 1, infoJson: '{}'
+      };
+      const existingIdx: number = ports.findIndex((p: LayoutPort): boolean => p.ownerCellId === ownerCell && p.name === draft.name);
+      if (existingIdx >= 0) {
+        ports[existingIdx] = portFromDraft(ports[existingIdx].id, ownerCell, ownerKey, draft);
+      } else {
+        ports.push(portFromDraft(newLayoutIdentity('port'), ownerCell, ownerKey, draft));
+      }
+    }
+    const addedPorts: number = ports.length - this.docPorts.length;
+    after.ports = ports;
+    if (!editService.applyDocumentStructure(nextShapes, before, after, '生成 CMOS 反相器', true, createdIds)) {
+      return { success: false, summary: '无法写入反相器图形或端口，请检查图层的可编辑状态', payloadJson: '{"success":false}' };
     }
 
     this.syncShapesFromEditService();
     this.rebuildCellTree();
-    this.refreshProjectedPorts();
     this.fitAllShapes();
     this.aiUndoMarker = editService.getUndoMarker();
     this.aiStore.aiCanUndo = this.aiUndoMarker !== beforeMarker;
@@ -9527,19 +9545,29 @@ struct Index {
     return {
       isPageCurrent: (): boolean => this.pageAlive && generation === this.pageGeneration && ticket === this.aiRequestGeneration,
       inspectLayout: (): string => {
+        if (!aiService.getContextOptions().includeLayout) {
+          return '{"layoutContextIncluded":false}';
+        }
         const ctx: AiContext = this.filteredAiContext(this.buildAiContext());
+        const currentCell: DshLayoutCellSummary = {
+          id: editService.getCurrentCellId(),
+          name: this.docStore.currentEditingCellName || ctx.currentCell?.name || ''
+        };
+        const activeLayer: DshLayoutActiveLayer = {
+          layer: this.viewportStore.selectedLayerNumber, datatype: this.viewportStore.selectedDatatype
+        };
         return JSON.stringify({
           documentId: this.docStore.activeWorkspaceId,
           title: this.currentFileDisplayName() || '未命名版图',
           libraryName: this.docStore.docLibName,
           topCell: this.docStore.docTopCellName,
-          currentCell: { id: editService.getCurrentCellId(), name: this.docStore.currentEditingCellName || ctx.currentCellName },
+          currentCell,
           dbuNm: cleanDbuNm(this.docStore.docPhysicalUnits),
           shapeCount: editService.getShapes().length,
-          selectedCount: this.viewportStore.selectedShapeCount,
-          selectedShapes: ctx.selectedShapes.slice(0, 16),
-          activeLayer: { layer: this.viewportStore.selectedLayerNumber, datatype: this.viewportStore.selectedDatatype },
-          layers: this.docStore.layers.map((l: UiLayer): Record<string, Object> => ({
+          selectedCount: ctx.coverage?.selectedTotal ?? 0,
+          selectedShapes: (ctx.selectedShapes ?? []).slice(0, 16),
+          activeLayer,
+          layers: this.docStore.layers.map((l: UiLayer): DshLayoutLayerSummary => ({
             layer: l.layerNumber,
             datatype: l.datatype,
             name: l.englishName,
@@ -9607,24 +9635,20 @@ struct Index {
           const op: DshEditOperation = operations[i];
           const layer: number = op.layer ?? this.viewportStore.selectedLayerNumber;
           const dt: number = op.datatype ?? this.viewportStore.selectedDatatype;
-          if (op.layer !== undefined) {
-            this.ensureDshLayerExists(layer, dt, op.layerName ?? `L${layer}`, op.layerName ?? `图层${layer}`, '#3B82F6');
-          }
           const cmdType: AiCommandType = op.action as AiCommandType;
           const pts: Point[] | undefined = op.points !== undefined
             ? op.points.map((pt: Record<string, number>): Point => ({ x: Number(pt['x'] ?? 0), y: Number(pt['y'] ?? 0) }))
             : undefined;
-          commands.push({
+          const command: ParsedCommand = {
             type: cmdType,
             params: {
               layer,
               datatype: dt,
               x: op.x,
               y: op.y,
-              width: op.width,
+              width: cmdType === AiCommandType.CREATE_PATH ? op.pathWidth ?? op.width : op.width,
               height: op.height,
               points: pts,
-              pathWidth: op.pathWidth,
               text: op.text,
               shapeIds: op.shapeIds,
               rows: op.rows,
@@ -9634,13 +9658,14 @@ struct Index {
               dx: op.dx,
               dy: op.dy,
               degrees: op.degrees,
-              horizontal: op.horizontal,
+              horizontal: op.horizontal === undefined ? undefined : (op.horizontal ? 1 : 0),
               scale: op.scale,
               centerX: op.centerX,
               centerY: op.centerY
             },
             description: `${op.action} (L${layer}/D${dt})`
-          });
+          };
+          commands.push(command);
         }
 
         if (permission === 'review') {
@@ -9664,6 +9689,12 @@ struct Index {
 
         if (!this.assertEditMode()) {
           this.setViewMode(ViewMode.EDIT);
+        }
+        for (const op of operations) {
+          if (op.layer !== undefined) {
+            this.ensureDshLayerExists(op.layer, op.datatype ?? this.viewportStore.selectedDatatype,
+              op.layerName ?? `L${op.layer}`, op.layerName ?? `图层${op.layer}`, '#3B82F6');
+          }
         }
         const beforeMarker: Object | null = editService.getUndoMarker();
         const beforeCount: number = editService.getShapes().length;
@@ -9710,12 +9741,13 @@ struct Index {
         };
       },
       runDrcCheck: async (): Promise<DshToolExecutionOutcome> => {
+        if (!aiService.getContextOptions().includeLayout) throw new Error('用户未发送版图资料');
         this.runDrc(true);
         const summary: string = this.aiDrcResultSummary();
         const last = drcService.getLastResult();
-        const sampleViolations = (last?.violations ?? []).slice(0, 24).map((v: DrcViolation): Record<string, Object> => ({
+        const sampleViolations = (last?.violations ?? []).slice(0, 24).map((v: DrcViolation): DshDrcViolationSummary => ({
           id: v.id,
-          ruleType: v.ruleType,
+          ruleType: v.type,
           severity: v.severity,
           message: v.message,
           x: v.x,
@@ -9740,6 +9772,7 @@ struct Index {
       callNativeTool: async (toolName: string, argumentsJson: string, permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
         const call: AiNativeCall = parseAiNativeCall(toolName, argumentsJson);
         const def = aiNativeTool(call.name);
+        if (def.requiresLayout && !aiService.getContextOptions().includeLayout) throw new Error('用户未发送版图资料');
         if (def.mode === 'read') {
           const readRes: AiNativeResult = this.readAiNativeTool(call);
           return { success: readRes.success, summary: readRes.message, payloadJson: JSON.stringify(readRes) };
@@ -9791,8 +9824,12 @@ struct Index {
         return { success: actRes.success, summary: actRes.message, payloadJson: JSON.stringify(actRes) };
       },
       executeKlayoutPython: async (script: string, applyMode: 'replace' | 'merge'): Promise<DshToolExecutionOutcome> => {
-        const connected: boolean = await pythonBridgeService.checkConnection(false);
-        if (!connected) {
+        if (!aiService.getContextOptions().includeLayout) throw new Error('用户未发送版图资料');
+        const documentId: string = this.docStore.activeWorkspaceId;
+        const revision: number = this.docStore.editorRevision;
+        try {
+          await pythonBridgeService.checkConnection(false);
+        } catch (_) {
           return {
             success: false,
             summary: '当前设备未连接桌面 Python 伴随服务，请直接改用 create_cmos_inverter / edit_layout / call_native_tool 原生绘制',
@@ -9802,16 +9839,19 @@ struct Index {
             })
           };
         }
+        if (!this.pageAlive || ticket !== this.aiRequestGeneration || generation !== this.pageGeneration ||
+          documentId !== this.docStore.activeWorkspaceId || revision !== this.docStore.editorRevision) {
+          throw new Error('文档已变化或请求已取消');
+        }
         const pyRes: AiNativeResult = await this.runAiNativePython(
           parseAiNativeCall('python.run', JSON.stringify({ script, inputMode: 'document', applyMode, parameters: '{}' }))
         );
         return {
           success: pyRes.success,
-          mutatedLayout: pyRes.success,
           addedShapes: pyRes.success ? 1 : 0,
           summary: pyRes.message,
           payloadJson: JSON.stringify(pyRes)
-        } as DshToolExecutionOutcome;
+        };
       }
     };
   }
@@ -9828,7 +9868,7 @@ struct Index {
     const toolItem: AiChatToolState = {
       id: `demo-inv-${Date.now()}`,
       name: 'create_cmos_inverter',
-      status: 'completed',
+      status: outcome.success ? 'completed' : 'failed',
       arguments: '{"cellName":"INVERTER","gateLengthNm":200,"nmosWidthNm":600,"pmosWidthNm":1200}',
       result: outcome.payloadJson
     };
@@ -9837,16 +9877,20 @@ struct Index {
       kind: 'tool',
       title: 'create_cmos_inverter',
       text: '',
-      status: 'completed',
+      status: outcome.success ? 'completed' : 'failed',
       tool: toolItem
     }];
-    const replyText: string =
-      `已在单元 **${this.docStore.currentEditingCellName}** 原生生成完整通用 CMOS 反相器版图（共 **${outcome.addedShapes ?? 32}** 个几何图元、**${outcome.addedPorts ?? 4}** 个电气端口 \`IN / OUT / VSS / VDD\`），并自动完成视图适配。\n\n- **图层结构**：\`1/0 NWELL\`、\`2/0 ACTIVE\`、\`3/0 POLY\`、\`4/0 NPLUS\`、\`5/0 PPLUS\`、\`6/0 CONTACT\`、\`7/0 METAL1\`、\`8/0 PIN_LABEL\`\n- **DRC 状态**：${outcome.drcSummary ?? '已完成检查'}\n- *说明：该版图为通用 CMOS 教学/工程示例，可随时点击下方「撤销」回退。*`;
-    this.aiStore.aiTurnChangeSummary = `本轮版图变更：+${outcome.addedShapes ?? 32} 图元 · +${outcome.addedPorts ?? 4} 端口 · ${outcome.drcSummary ?? ''}`;
+    const replyText: string = outcome.success
+      ? `已在单元 **${this.docStore.currentEditingCellName}** 原生生成完整通用 CMOS 反相器版图（共 **${outcome.addedShapes ?? 0}** 个几何图元、**${outcome.addedPorts ?? 0}** 个电气端口 \`IN / OUT / VSS / VDD\`），并自动完成视图适配。\n\n- **图层结构**：\`1/0 NWELL\`、\`2/0 ACTIVE\`、\`3/0 POLY\`、\`4/0 NPLUS\`、\`5/0 PPLUS\`、\`6/0 CONTACT\`、\`7/0 METAL1\`、\`8/0 PIN_LABEL\`\n- **DRC 状态**：${outcome.drcSummary ?? '已完成检查'}\n- *说明：该版图为通用 CMOS 教学/工程示例，可随时点击下方「撤销」回退。*`
+      : outcome.summary;
+    this.aiStore.aiTurnChangeSummary = outcome.success
+      ? `本轮版图变更：+${outcome.addedShapes ?? 0} 图元 · +${outcome.addedPorts ?? 0} 端口 · ${outcome.drcSummary ?? ''}`
+      : '';
     this.aiStore.aiLastResult = outcome.summary;
     this.panelStore.statusText = outcome.summary;
     const demoTask: AiAgentTask = aiService.createAgentTask(prompt, false, false);
-    aiService.recordHarnessResult(prompt, replyText, '', [toolItem], true, 'executed', conversationId, ticket !== this.aiRequestGeneration, demoTask, steps);
+    aiService.recordHarnessResult(prompt, replyText, '', [toolItem], outcome.success, outcome.success ? 'executed' : 'failed',
+      conversationId, ticket !== this.aiRequestGeneration, demoTask, steps);
     this.refreshAiConversation();
   }
 
@@ -11179,6 +11223,7 @@ struct Index {
         datatype: this.docStore.layers[i].datatype,
         chineseName: this.docStore.layers[i].chineseName,
         englishName: this.docStore.layers[i].englishName,
+        visible: this.docStore.layers[i].visible,
       };
       aiLayers.push(info);
     }

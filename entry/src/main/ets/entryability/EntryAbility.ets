@@ -233,15 +233,17 @@ export default class EntryAbility extends UIAbility {
       );
 
       if (deviceInfo.sdkApiVersion >= 15 && Math.abs(this.lastAppliedDensity - layout.density) > 0.005) {
-        this.lastAppliedDensity = layout.density;
         try {
           if (Math.abs(layout.effectiveScale - 1.0) < 0.01 && deviceInfo.sdkApiVersion >= 20) {
-            this.workspaceWindow.setDefaultDensityEnabled(true).catch((): void => {
-              this.workspaceWindow?.setCustomDensity(layout.density).catch((): void => {});
-            });
+            try {
+              this.workspaceStage.setDefaultDensityEnabled(true);
+            } catch (_) {
+              this.workspaceStage.setCustomDensity(layout.density);
+            }
           } else {
-            this.workspaceWindow.setCustomDensity(layout.density).catch((): void => {});
+            this.workspaceStage.setCustomDensity(layout.density);
           }
+          this.lastAppliedDensity = layout.density;
         } catch (_densityErr) {}
       }
 
