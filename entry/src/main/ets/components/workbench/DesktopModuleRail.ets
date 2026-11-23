@@ -7,7 +7,7 @@ import { WorkModule } from '../../workbench/WorkbenchModels';
 import { WorkbenchIcon } from './WorkbenchIcon';
 
 /**
- * Desktop-only narrow module rail for the canvas-first workbench.
+ * 桌面紧凑型左侧模块导航窄轨（压缩冗余高度与内边距，释放画布与侧栏视野）
  *
  * This file is part of HongTu, licensed under GPLv3.
  */
@@ -15,14 +15,14 @@ import { WorkbenchIcon } from './WorkbenchIcon';
 export struct DesktopModuleRail {
   @Prop currentModule: WorkModule = WorkModule.Layout;
   @Prop drcIssueCount: number = 0;
-  @Prop railWidth: number = UI.railWidth;
+  @Prop railWidth: number = 48;
   selectModuleAction: (module: WorkModule, label: string) => void = () => {};
   projectAction: () => void = () => {};
   shortcutAction: () => void = () => {};
   openAppearanceAction: () => void = () => {};
 
   build() {
-    Column() {
+    Column({ space: 4 }) {
       this.moduleButton(WorkModule.Layout, '版图', '版图编辑')
       this.moduleButton(WorkModule.Verify, '验证', '验证检查')
       this.moduleButton(WorkModule.Data, '数据', '数据管理')
@@ -33,7 +33,7 @@ export struct DesktopModuleRail {
     }
     .width(this.railWidth)
     .height('100%')
-    .padding({ left: 6, right: 6, top: 8, bottom: 8 })
+    .padding({ left: 4, right: 4, top: 6, bottom: 6 })
     .alignItems(HorizontalAlign.Center)
     .backgroundColor(hongTuThemeState.isLuminousBackgroundEnabled()
       ? hongTuThemeState.luminous.translucentCardColor
@@ -44,22 +44,22 @@ export struct DesktopModuleRail {
   @Builder
   private moduleButton(module: WorkModule, shortLabel: string, actionLabel: string) {
     Button({ type: ButtonType.Normal }) {
-      Column({ space: 4 }) {
+      Column({ space: 2 }) {
         Badge({
           count: module === WorkModule.Verify ? this.drcIssueCount : 0,
           maxCount: 99,
           position: BadgePosition.RightTop,
-          style: { badgeColor: COLORS.danger, fontSize: UI.fontCaption, badgeSize: 16, color: Color.White }
+          style: { badgeColor: COLORS.danger, fontSize: 9, badgeSize: 14, color: Color.White }
         }) {
           Row() {
             this.moduleIcon(module)
           }
-          .width(40)
-          .height(32)
+          .width(34)
+          .height(24)
           .justifyContent(FlexAlign.Center)
         }
         Text(shortLabel)
-          .fontSize(12)
+          .fontSize(11)
           .fontWeight(this.currentModule === module ? FontWeight.Bold : FontWeight.Medium)
           .fontColor(this.currentModule === module ? COLORS.primary : COLORS.ink)
       }
@@ -67,7 +67,7 @@ export struct DesktopModuleRail {
       .alignItems(HorizontalAlign.Center)
     }
     .width('100%')
-    .height(68)
+    .height(50)
     .padding(0)
     .borderRadius(UI.controlRadius)
     .animation(null)
@@ -83,19 +83,18 @@ export struct DesktopModuleRail {
     .accessibilitySelected(this.currentModule === module)
     .bindTips(actionLabel)
     .onClick(() => this.selectModuleAction(module, actionLabel))
-    .margin({ bottom: 8 })
   }
 
   @Builder
   private utilityButton(icon: string, label: string, accessibleLabel: string, action: () => void) {
     Button({ type: ButtonType.Normal }) {
-      Column({ space: 6 }) {
-        WorkbenchIcon({ name: icon, iconSize: 20, color: COLORS.muted })
-        Text(label).fontSize(11).fontColor(COLORS.muted)
+      Column({ space: 3 }) {
+        WorkbenchIcon({ name: icon, iconSize: 18, color: COLORS.muted })
+        Text(label).fontSize(10).fontColor(COLORS.muted)
       }.justifyContent(FlexAlign.Center)
     }
     .width('100%')
-    .height(54)
+    .height(44)
     .padding(0)
     .borderRadius(UI.controlRadius)
     .backgroundColor(Color.Transparent)
@@ -110,7 +109,7 @@ export struct DesktopModuleRail {
   private moduleIcon(module: WorkModule) {
     WorkbenchIcon({
       name: module === WorkModule.Layout ? 'layout' : module === WorkModule.Verify ? 'verify' : 'data',
-      iconSize: 24,
+      iconSize: 20,
       color: this.currentModule === module ? COLORS.primary : COLORS.ink
     })
   }

@@ -296,6 +296,8 @@ export class AiAssistantStore {
   @Trace aiReviewGroups: AiReviewGroup[] = [];
   @Trace aiRunStartedAt: number = 0;
   @Trace aiSessionMode: 'agent' | 'readonly' = 'agent';
+  @Trace aiPermissionMode: 'auto' | 'review' | 'readonly' = 'auto';
+  @Trace aiTurnChangeSummary: string = '';
   @Trace aiMinimizedNotice: string = '';
 }
 

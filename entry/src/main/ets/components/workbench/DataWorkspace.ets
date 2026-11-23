@@ -64,6 +64,7 @@ export struct DataWorkspace {
   @StorageProp(RESPONSIVE_FONT_SCALE_KEY) private fontScale: number = 1;
   @Prop @Watch('syncSelection') files: RecentFile[] = [];
   @Prop @Watch('syncSelection') currentFilePath: string = '';
+  @Prop activeDocumentTitle: string = '未命名版图';
   @Prop docLibName: string = '';
   @Prop docCellCount: number = 0;
   @Prop docElementCount: number = 0;
@@ -582,8 +583,51 @@ export struct DataWorkspace {
         this.fileHeader()
       }
       if (this.files.length === 0) {
+        Column({ space: 12 }) {
+          Row({ space: 12 }) {
+            Column() {
+              DataGlyph({ name: 'file', iconSize: 22, colorValue: COLORS.primary })
+            }
+            .width(40)
+            .height(40)
+            .justifyContent(FlexAlign.Center)
+            .backgroundColor(COLORS.primarySoft)
+            .borderRadius(10)
+
+            Column({ space: 3 }) {
+              Text(`当前工作区：${this.activeDocumentTitle}`)
+                .fontSize(14)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(COLORS.ink)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              Text(`库 ${this.docLibName || 'UNTITLED_LIB'} · 顶层 ${this.docTopCellName || 'TOP'} · ${this.docCellCount} Cell · ${this.docElementCount} 图形`)
+                .fontSize(11)
+                .fontColor(COLORS.muted)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+
+            Button('进入版图', { type: ButtonType.Normal })
+              .height(34)
+              .padding({ left: 12, right: 12 })
+              .fontSize(12)
+              .fontColor(COLORS.primary)
+              .backgroundColor(COLORS.primarySoft)
+              .borderRadius(UI.controlRadius)
+              .onClick(() => this.showLayoutAction())
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(COLORS.surfaceMuted)
+          .border({ width: 0.8, color: COLORS.border })
+          .borderRadius(12)
+        }
+        .width('100%')
+        .padding({ left: 14, right: 14, top: 14 })
+
         this.emptyState({
-          title: this.activeTab === DataTab.History ? '暂无导入记录' : '暂无版图文件',
+          title: this.activeTab === DataTab.History ? '尚无外部文件导入记录' : '打开外部 GDSII / OASIS / DXF 版图文件',
           canOpen: true
         })
       } else if (this.filteredFiles().length === 0) {
@@ -897,18 +941,13 @@ export struct DataWorkspace {
 
   build() {
     if (this.compact) {
-      AppNavigationShell({
-        title: '数据管理',
-        subTitle: '',
-        largeTitle: false,
-        showBottomContent: true,
-        bottomContentHeight: 48,
-        menuItems: this.buildNavigationMenuItems(),
-        scrollables: [this.filesListScroller, this.cellsListScroller, this.historyListScroller],
-        bottomContent: (): void => { this.buildNavBottomSwitcher(); }
-      }) {
+      Column({ space: 4 }) {
+        this.buildNavBottomSwitcher()
         this.compactBody()
       }
+      .width('100%')
+      .layoutWeight(1)
+      .padding({ top: 6 })
     } else {
       Column() {
         Row({ space: 12 }) {

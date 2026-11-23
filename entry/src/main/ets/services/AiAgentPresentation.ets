@@ -26,6 +26,12 @@ export class AiMarkdownSegment {
   table: AiGfmTable = new AiGfmTable();
 }
 
+export interface AiPlanStepView {
+  id: string;
+  content: string;
+  status: string;
+}
+
 export interface AiToolField {
   label: string;
   value: string;
@@ -517,16 +523,22 @@ function recordBool(rec: Record<string, Object> | null, raw: string, key: string
 export function mapAiToolDisplayTitle(name: string): string {
   switch (name) {
     case 'inspect_layout': return '读取当前版图';
+    case 'query_layout':
     case 'query_editor': return '查询版图明细';
     case 'list_native_tools': return '查询软件工具目录';
     case 'read_native_tool': return '读取原生工具数据';
+    case 'call_native_tool': return '执行原生专业工具';
+    case 'edit_layout': return '编辑当前版图几何';
+    case 'run_drc': return '运行 DRC 规则检查';
     case 'propose_native_tools': return '提交原生工具方案';
     case 'prepare_native_workflow': return '准备专业编辑流程';
     case 'check_tool_protocol': return '诊断工具调用协议';
     case 'create_cmos_inverter': return '生成 CMOS 反相器';
+    case 'execute_klayout_python':
     case 'execute_layout_python': return '运行参数化版图脚本';
     case 'propose_editor_commands': return '准备版图修改方案';
     case 'read_plan': return '读取执行计划';
+    case 'todo_write':
     case 'write_plan': return '制定执行计划';
     case 'update_plan': return '更新执行计划';
     case 'update_task_status':
@@ -572,7 +584,7 @@ export function describeAiToolCall(tool: AiChatToolState, isLiveRunning: boolean
   const fields: AiToolField[] = [];
   const summaryParts: string[] = [];
 
-  if (tool.name === 'query_editor') {
+  if (tool.name === 'query_editor' || tool.name === 'query_layout') {
     const kind: string = recordStr(argsRec, tool.arguments, 'kind') || recordStr(resRec, tool.result, 'source');
     const layer: number | undefined = recordNum(argsRec, tool.arguments, 'layer');
     const datatype: number | undefined = recordNum(argsRec, tool.arguments, 'datatype');
@@ -658,7 +670,54 @@ export function describeAiToolCall(tool: AiChatToolState, isLiveRunning: boolean
       summaryParts.push(`${calls.length} 项调用`);
       fields.push({ label: '批量调用', value: `${calls.length} 项原生操作`, accent: true });
     }
-  } else if (tool.name === 'execute_layout_python' || tool.name === 'create_cmos_inverter') {
+  } else if (tool.name === 'create_cmos_inverter') {
+    const cName: string = recordStr(argsRec, tool.arguments, 'cellName') || recordStr(resRec, tool.result, 'cellName') || 'INVERTER';
+    const gl: number | undefined = recordNum(argsRec, tool.arguments, 'gateLengthNm');
+    const nw: number | undefined = recordNum(argsRec, tool.arguments, 'nmosWidthNm');
+    const pw: number | undefined = recordNum(argsRec, tool.arguments, 'pmosWidthNm');
+    const added: number | undefined = recordNum(resRec, tool.result, 'addedShapes');
+    const drcStr: string = recordStr(resRec, tool.result, 'drcSummary');
+    summaryParts.push(cName);
+    if (gl !== undefined) summaryParts.push(`L=${gl}nm`);
+    if (added !== undefined && added > 0) summaryParts.push(`+${added} 图元`);
+    fields.push({ label: '目标单元', value: cName, accent: true });
+    if (gl !== undefined || nw !== undefined || pw !== undefined) {
+      fields.push({ label: '器件尺寸', value: `Lg=${gl ?? 200}nm, Wn=${nw ?? 600}nm, Wp=${pw ?? 1200}nm`, accent: false });
+    }
+    if (drcStr.length > 0) {
+      fields.push({ label: 'DRC 复检', value: drcStr, accent: true });
+    }
+  } else if (tool.name === 'edit_layout') {
+    const opCount: number = argsRec !== null && Array.isArray(argsRec['operations']) ? (argsRec['operations'] as Object[]).length : 0;
+    const added: number | undefined = recordNum(resRec, tool.result, 'addedShapes');
+    const summaryStr: string = recordStr(resRec, tool.result, 'summary');
+    if (opCount > 0) {
+      summaryParts.push(`${opCount} 项几何操作`);
+      fields.push({ label: '批次规模', value: `${opCount} 项原子操作`, accent: true });
+    }
+    if (added !== undefined && added > 0) {
+      fields.push({ label: '变更图元', value: `${added} 个图形`, accent: true });
+    }
+    if (summaryStr.length > 0) {
+      fields.push({ label: '执行结果', value: summaryStr, accent: false });
+    }
+  } else if (tool.name === 'run_drc') {
+    const drcSummary: string = recordStr(resRec, tool.result, 'summary') || recordStr(resRec, tool.result, 'drcSummary');
+    if (drcSummary.length > 0) {
+      summaryParts.push(drcSummary.length > 28 ? `${drcSummary.substring(0, 27)}…` : drcSummary);
+      fields.push({ label: '检查结论', value: drcSummary, accent: true });
+    }
+  } else if (tool.name === 'call_native_tool') {
+    const subName: string = recordStr(argsRec, tool.arguments, 'name');
+    const resMsg: string = recordStr(resRec, tool.result, 'message') || recordStr(resRec, tool.result, 'summary');
+    if (subName.length > 0) {
+      summaryParts.push(subName);
+      fields.push({ label: '调用工具', value: subName, accent: true });
+    }
+    if (resMsg.length > 0) {
+      fields.push({ label: '执行回执', value: resMsg, accent: false });
+    }
+  } else if (tool.name === 'execute_layout_python' || tool.name === 'execute_klayout_python') {
     const script: string = recordStr(argsRec, tool.arguments, 'script');
     if (script.length > 0) {
       const lineCount: number = script.split('\n').length;
@@ -677,11 +736,17 @@ export function describeAiToolCall(tool: AiChatToolState, isLiveRunning: boolean
       summaryParts.push(wf);
       fields.push({ label: '工作流', value: wf, accent: true });
     }
-  } else if (tool.name === 'write_plan' || tool.name === 'read_plan' || tool.name === 'update_task_status') {
-    const planStepMatch: RegExpExecArray | null = /Plan updated:\s*(\d+)\s*step/i.exec(tool.result);
-    if (planStepMatch !== null) {
-      summaryParts.push(`${planStepMatch[1]} 步`);
-      fields.push({ label: '计划步骤', value: `${planStepMatch[1]} 步`, accent: false });
+  } else if (tool.name === 'todo_write' || tool.name === 'write_plan' || tool.name === 'read_plan' || tool.name === 'update_task_status') {
+    const planSteps: AiPlanStepView[] = extractAiPlan([tool]);
+    if (planSteps.length > 0) {
+      summaryParts.push(`${planSteps.length} 步计划`);
+      fields.push({ label: '计划步骤', value: `${planSteps.length} 步`, accent: false });
+    } else {
+      const planStepMatch: RegExpExecArray | null = /Plan updated:\s*(\d+)\s*step/i.exec(tool.result);
+      if (planStepMatch !== null) {
+        summaryParts.push(`${planStepMatch[1]} 步`);
+        fields.push({ label: '计划步骤', value: `${planStepMatch[1]} 步`, accent: false });
+      }
     }
   } else if (tool.result.length > 0 && tool.result.length <= 96 && !tool.result.includes('{')) {
     summaryParts.push(tool.result.trim());
@@ -704,6 +769,57 @@ export function describeAiToolCall(tool: AiChatToolState, isLiveRunning: boolean
     formattedArgs: prettyJsonIfPossible(tool.arguments),
     formattedResult: prettyJsonIfPossible(tool.result)
   };
+}
+
+export function extractAiPlan(tools: AiChatToolState[]): AiPlanStepView[] {
+  let latest: AiPlanStepView[] = [];
+  for (let i = 0; i < tools.length; i++) {
+    const tool: AiChatToolState = tools[i];
+    if (tool.name === 'todo_write' || tool.name === 'write_plan' || tool.name === 'update_plan') {
+      const argsRec: Record<string, Object> | null = asRecord(tool.arguments);
+      const resRec: Record<string, Object> | null = asRecord(tool.result);
+      const rawList: Object | undefined =
+        (argsRec !== null ? (argsRec['todos'] ?? argsRec['steps']) : undefined) ??
+        (resRec !== null ? (resRec['todos'] ?? resRec['steps']) : undefined);
+      if (Array.isArray(rawList)) {
+        const arr: Object[] = rawList as Object[];
+        const parsed: AiPlanStepView[] = [];
+        for (let k = 0; k < arr.length; k++) {
+          const item: Object = arr[k];
+          if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+            const rec: Record<string, Object> = item as Record<string, Object>;
+            const content: string = typeof rec['content'] === 'string'
+              ? (rec['content'] as string).trim()
+              : (typeof rec['title'] === 'string' ? (rec['title'] as string).trim() : '');
+            const status: string = typeof rec['status'] === 'string' ? (rec['status'] as string) : 'pending';
+            const id: string = typeof rec['id'] === 'string' && (rec['id'] as string).length > 0
+              ? (rec['id'] as string)
+              : `step-${k + 1}`;
+            if (content.length > 0) {
+              parsed.push({ id, content, status });
+            }
+          } else if (typeof item === 'string' && (item as string).trim().length > 0) {
+            parsed.push({ id: `step-${k + 1}`, content: (item as string).trim(), status: 'pending' });
+          }
+        }
+        if (parsed.length > 0) {
+          latest = parsed;
+        }
+      }
+    } else if ((tool.name === 'update_task_status' || tool.name === 'update_task_statuses') && latest.length > 0) {
+      const argsRec: Record<string, Object> | null = asRecord(tool.arguments);
+      if (argsRec !== null) {
+        const sid: string = typeof argsRec['id'] === 'string' ? (argsRec['id'] as string) : '';
+        const st: string = typeof argsRec['status'] === 'string' ? (argsRec['status'] as string) : '';
+        if (sid.length > 0 && st.length > 0) {
+          latest = latest.map((p: AiPlanStepView): AiPlanStepView =>
+            p.id === sid ? { id: p.id, content: p.content, status: st } : p
+          );
+        }
+      }
+    }
+  }
+  return latest;
 }
 
 export function parseAiTokenMeter(

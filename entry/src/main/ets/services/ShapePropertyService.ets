@@ -23,7 +23,6 @@ export function decodePCellProperty(property: LayoutPropRecord): DecodedPCellPro
     let decoded: string = '';
     for (let i: number = 1; i < text.length; i += 2) {
       const byte: number = Number.parseInt(text.substring(i, i + 2), 16);
-      // preparePCellDefinition escapes non-ASCII JSON characters before writing GDS.
       if (byte > 126) return undefined;
       decoded += String.fromCharCode(byte);
     }
@@ -32,7 +31,7 @@ export function decodePCellProperty(property: LayoutPropRecord): DecodedPCellPro
   }
   if (text.endsWith('\0')) {
     if (!hexCarrier || text.length % 2 !== 0) return undefined;
-    text = text.substring(0, text.length - 1); // One legal GDS even-byte padding byte.
+    text = text.substring(0, text.length - 1);
   }
   if (text.length > 65530) return undefined;
   const prefix: string = text.startsWith('HONGTU_PCELL_V1:') ? 'HONGTU_PCELL_V1:' :
@@ -98,14 +97,28 @@ export function mergeBooleanSourceProperties(
   return merged.length > 0 ? merged : undefined;
 }
 
+function cleanCoordStr(val: number): string {
+  if (!Number.isFinite(val)) return '0';
+  const rounded: number = Math.round(val * 1000) / 1000;
+  return `${rounded}`;
+}
+
 /** Values are explicit so ArkTS never relies on dynamic object indexing. */
 export function shapePropertyValue(s: Shape, key: string): string {
   const b = getShapeBounds(s);
   switch (key) {
-    case 'x': return `${b.minX}`;
-    case 'y': return `${b.minY}`;
-    case 'width': return `${b.maxX - b.minX}`;
-    case 'height': return `${b.maxY - b.minY}`;
+    case 'x':
+    case 'minXEdge': return `${b.minX}`;
+    case 'y':
+    case 'minYEdge': return `${b.minY}`;
+    case 'maxX': return `${b.maxX}`;
+    case 'maxY': return `${b.maxY}`;
+    case 'centerX': return cleanCoordStr((b.minX + b.maxX) * 0.5);
+    case 'centerY': return cleanCoordStr((b.minY + b.maxY) * 0.5);
+    case 'width':
+    case 'widthCenter': return `${b.maxX - b.minX}`;
+    case 'height':
+    case 'heightCenter': return `${b.maxY - b.minY}`;
     case 'layerKey': return `${s.layerNumber}/${s.datatype}`;
     case 'text': return s.text ?? '';
     case 'pathWidth': return `${s.pathWidth ?? 1}`;
@@ -129,12 +142,14 @@ export function shapePropertyValue(s: Shape, key: string): string {
 }
 
 export function shapePropertyFields(type: ShapeType | null): ShapePropertyField[] {
+  const isPointObject: boolean = type === ShapeType.TEXT || type === ShapeType.INSTANCE;
   const fields: ShapePropertyField[] = [
-    { key: 'x', label: 'X', unit: 'nm' }, { key: 'y', label: 'Y', unit: 'nm' }
+    { key: 'x', label: isPointObject ? '锚点 X' : '左下 X1', unit: 'nm' },
+    { key: 'y', label: isPointObject ? '锚点 Y' : '左下 Y1', unit: 'nm' }
   ];
   if (type !== ShapeType.INSTANCE) fields.push({ key: 'layerKey', label: '层 / 数据型', unit: '' });
   if (type === ShapeType.RECT || type === ShapeType.POLYGON || type === ShapeType.PATH) {
-    fields.push({ key: 'width', label: '宽', unit: 'nm' }, { key: 'height', label: '高', unit: 'nm' });
+    fields.push({ key: 'width', label: '宽度 W', unit: 'nm' }, { key: 'height', label: '高度 H', unit: 'nm' });
   }
   if (type === ShapeType.TEXT) fields.push({ key: 'text', label: '文本内容', unit: '' });
   if (type === ShapeType.PATH) {
@@ -147,14 +162,33 @@ export function shapePropertyFields(type: ShapeType | null): ShapePropertyField[
   if (type === ShapeType.INSTANCE) {
     fields.push({ key: 'cellId', label: '引用 Cell ID', unit: '' },
       { key: 'arrayCols', label: '阵列列数', unit: '' }, { key: 'arrayRows', label: '阵列行数', unit: '' },
-      { key: 'arrayColStepX', label: '列间距 X', unit: 'nm' }, { key: 'arrayColStepY', label: '列间距 Y', unit: 'nm' },
-      { key: 'arrayRowStepX', label: '行间距 X', unit: 'nm' }, { key: 'arrayRowStepY', label: '行间距 Y', unit: 'nm' });
+      { key: 'arrayColStepX', label: '列步进 X', unit: 'nm' }, { key: 'arrayColStepY', label: '列偏置 Y', unit: 'nm' },
+      { key: 'arrayRowStepX', label: '行偏置 X', unit: 'nm' }, { key: 'arrayRowStepY', label: '行步进 Y', unit: 'nm' });
   }
   if (type === ShapeType.INSTANCE || type === ShapeType.TEXT) {
     fields.push({ key: 'rotation', label: '旋转', unit: '°' }, { key: 'mirror', label: '镜像', unit: '0/1/2' },
       { key: 'magnification', label: '倍率', unit: '×' });
   }
   return fields;
+}
+
+function checkPathZeroLengthCollapse(beforePoints: Point[], nextPoints: Point[]): string {
+  for (let i = 1; i < nextPoints.length; i++) {
+    const beforeA: Point = beforePoints[i - 1];
+    const beforeB: Point = beforePoints[i];
+    if ((beforeA.x !== beforeB.x || beforeA.y !== beforeB.y) &&
+      nextPoints[i - 1].x === nextPoints[i].x &&
+      nextPoints[i - 1].y === nextPoints[i].y) {
+      return '修改会产生重合顶点（零长度边），请调整尺寸或顶点';
+    }
+  }
+  return '';
+}
+
+function shapePathPadding(s: Shape): number {
+  return s.type === ShapeType.PATH
+    ? (s.pathWidth ?? 0) + ((s.pathType ?? 0) === 4 ? 2 * Math.max(Math.abs(s.pathBeginExtension ?? 0), Math.abs(s.pathEndExtension ?? 0)) : 0)
+    : 0;
 }
 
 /** Mutates only a caller-owned clone. All targets must pass before committing. */
@@ -205,6 +239,91 @@ export function prepareShapeProperty(s: Shape, key: string, value: string,
   if (value.trim().length === 0) return '数值不能为空';
   const n: number = Number(value);
   if (!Number.isFinite(n)) return '请输入完整的有限数值';
+
+  // 中心点平移（centerX / centerY）：整体平移图形使其包围盒中心精确落在目标坐标
+  if (key === 'centerX' || key === 'centerY') {
+    const b = getShapeBounds(s);
+    const cx: number = (b.minX + b.maxX) * 0.5;
+    const cy: number = (b.minY + b.maxY) * 0.5;
+    const dx: number = key === 'centerX' ? n - cx : 0;
+    const dy: number = key === 'centerY' ? n - cy : 0;
+    s.points = s.points.map((p: Point): Point => ({ x: p.x + dx, y: p.y + dy }));
+    return '';
+  }
+
+  // 中心点锚定对称缩放（widthCenter / heightCenter）：保持中心点 CX/CY 不变，向两侧对称缩放宽或高
+  if (key === 'widthCenter' || key === 'heightCenter') {
+    const b = getShapeBounds(s);
+    const w: number = b.maxX - b.minX;
+    const h: number = b.maxY - b.minY;
+    const isW: boolean = key === 'widthCenter';
+    if (s.type === ShapeType.TEXT || s.type === ShapeType.INSTANCE || n <= 0 || (isW ? w : h) <= 0) {
+      return '宽高必须大于 0，且对象需要可缩放的几何';
+    }
+    const padding: number = shapePathPadding(s);
+    const extent: number = (isW ? w : h) - padding;
+    if (n < padding || (extent === 0 && n !== padding)) {
+      return '该尺寸小于线宽/延伸，或路径在此方向没有跨度；请调整线宽或顶点';
+    }
+    const scale: number = extent === 0 ? 1 : (n - padding) / extent;
+    const cx: number = (b.minX + b.maxX) * 0.5;
+    const cy: number = (b.minY + b.maxY) * 0.5;
+    const nextPoints: Point[] = s.points.map((p: Point): Point => ({
+      x: isW ? cx + (p.x - cx) * scale : p.x,
+      y: !isW ? cy + (p.y - cy) * scale : p.y,
+    }));
+    if (s.type === ShapeType.PATH) {
+      const err: string = checkPathZeroLengthCollapse(s.points, nextPoints);
+      if (err.length > 0) return err;
+    }
+    s.points = nextPoints;
+    return '';
+  }
+
+  // 对角边界独立推拉（minXEdge / maxX / minYEdge / maxY，对齐 KLayout Box Left/Right/Bottom/Top 编辑语义）
+  if (key === 'minXEdge' || key === 'maxX' || key === 'minYEdge' || key === 'maxY') {
+    const b = getShapeBounds(s);
+    if (s.type === ShapeType.TEXT || s.type === ShapeType.INSTANCE) {
+      const dx: number = (key === 'minXEdge' || key === 'maxX') ? n - b.minX : 0;
+      const dy: number = (key === 'minYEdge' || key === 'maxY') ? n - b.minY : 0;
+      s.points = s.points.map((p: Point): Point => ({ x: p.x + dx, y: p.y + dy }));
+      return '';
+    }
+    const w: number = b.maxX - b.minX;
+    const h: number = b.maxY - b.minY;
+    const isX: boolean = key === 'minXEdge' || key === 'maxX';
+    const isMinEdge: boolean = key === 'minXEdge' || key === 'minYEdge';
+    const targetSpan: number = isX
+      ? (isMinEdge ? b.maxX - n : n - b.minX)
+      : (isMinEdge ? b.maxY - n : n - b.minY);
+    if (targetSpan <= 0) {
+      return isX
+        ? (isMinEdge ? '左边界 X1 必须小于右边界 X2' : '右边界 X2 必须大于左边界 X1')
+        : (isMinEdge ? '下边界 Y1 必须小于上边界 Y2' : '上边界 Y2 必须大于下边界 Y1');
+    }
+    if ((isX ? w : h) <= 0) {
+      return '对象在此方向跨度为 0，无法单独推拉边界';
+    }
+    const padding: number = shapePathPadding(s);
+    const extent: number = (isX ? w : h) - padding;
+    if (targetSpan < padding || (extent === 0 && targetSpan !== padding)) {
+      return '边界间距小于路径线宽/延伸；请调整线宽或顶点';
+    }
+    const scale: number = extent === 0 ? 1 : (targetSpan - padding) / extent;
+    const fixedX: number = isMinEdge ? b.maxX - padding * 0.5 : b.minX + padding * 0.5;
+    const fixedY: number = isMinEdge ? b.maxY - padding * 0.5 : b.minY + padding * 0.5;
+    const nextPoints: Point[] = s.points.map((p: Point): Point => ({
+      x: isX ? fixedX + (p.x - fixedX) * scale : p.x,
+      y: !isX ? fixedY + (p.y - fixedY) * scale : p.y,
+    }));
+    if (s.type === ShapeType.PATH) {
+      const err: string = checkPathZeroLengthCollapse(s.points, nextPoints);
+      if (err.length > 0) return err;
+    }
+    s.points = nextPoints;
+    return '';
+  }
+
   if (key === 'x' || key === 'y' || key === 'width' || key === 'height') {
     const b = getShapeBounds(s);
     const w: number = b.maxX - b.minX; const h: number = b.maxY - b.minY;
@@ -212,10 +331,7 @@ export function prepareShapeProperty(s: Shape, key: string, value: string,
       if (s.type === ShapeType.TEXT || s.type === ShapeType.INSTANCE || n <= 0 ||
         (key === 'width' ? w : h) <= 0) return '宽高必须大于 0，且对象需要可缩放的几何';
     }
-    // PATH bounds include a fixed stroke/end-extension envelope. Scale the
-    // centerline extent only, so the value shown after editing equals the input.
-    const padding: number = s.type === ShapeType.PATH ? (s.pathWidth ?? 0) +
-      ((s.pathType ?? 0) === 4 ? 2 * Math.max(Math.abs(s.pathBeginExtension ?? 0), Math.abs(s.pathEndExtension ?? 0)) : 0) : 0;
+    const padding: number = shapePathPadding(s);
     const extent: number = (key === 'width' ? w : h) - padding;
     if ((key === 'width' || key === 'height') && (n < padding || (extent === 0 && n !== padding))) {
       return '该尺寸小于线宽/延伸，或路径在此方向没有跨度；请调整线宽或顶点';
@@ -230,12 +346,8 @@ export function prepareShapeProperty(s: Shape, key: string, value: string,
       return next;
     });
     if (s.type === ShapeType.PATH) {
-      // Preserve imported repeated vertices; reject only edges collapsed by this edit.
-      for (let i = 1; i < nextPoints.length; i++) {
-        const beforeA: Point = s.points[i - 1]; const beforeB: Point = s.points[i];
-        if ((beforeA.x !== beforeB.x || beforeA.y !== beforeB.y) && nextPoints[i - 1].x === nextPoints[i].x &&
-          nextPoints[i - 1].y === nextPoints[i].y) return '修改会产生重合顶点（零长度边），请调整尺寸或顶点';
-      }
+      const err: string = checkPathZeroLengthCollapse(s.points, nextPoints);
+      if (err.length > 0) return err;
     }
     s.points = nextPoints;
     return '';

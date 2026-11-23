@@ -80,6 +80,8 @@ export interface WorkspaceDocument extends LayoutSemanticState {
   updatedAt: number;
 }
 
+export const MAX_WORKSPACE_TABS: number = 24;
+
 export interface WorkspaceTab {
   id: string;
   title: string;
@@ -369,9 +371,9 @@ export class WorkspaceService {
     const revision: number = payload.revision;
     const title: string = payload.title;
     const tabSnapshot: WorkspaceTab[] = tabs.map((tab: WorkspaceTab): WorkspaceTab => ({ id: tab.id, title: tab.title, dirty: tab.dirty }));
-    if (tabSnapshot.length > 8 || new Set<string>(tabSnapshot.map((t: WorkspaceTab) => t.id)).size !== tabSnapshot.length ||
+    if (tabSnapshot.length > MAX_WORKSPACE_TABS || new Set<string>(tabSnapshot.map((t: WorkspaceTab) => t.id)).size !== tabSnapshot.length ||
       tabSnapshot.some((t: WorkspaceTab) => !this.validFileName(`${t.id}.json`) || typeof t.title !== 'string' || t.title.length > 512)) {
-      throw new Error('工作区标签页无效或超过 8 个');
+      throw new Error(`工作区标签页无效或超过 ${MAX_WORKSPACE_TABS} 个`);
     }
     const run: Promise<void> = this.queue.catch(() => {}).then(async () => {
       if (this.directory.length === 0) throw new Error('工作区尚未初始化');
@@ -788,7 +790,7 @@ export class WorkspaceService {
 
   private validateIndex(index: WorkspaceIndex): void {
     if (index === null || index.version !== 1 || typeof index.activeId !== 'string' ||
-      !Array.isArray(index.tabs) || index.tabs.length > 8 ||
+      !Array.isArray(index.tabs) || index.tabs.length > MAX_WORKSPACE_TABS ||
       !Array.isArray(index.history) || index.history.length > 24) throw new Error('工作区索引无效');
     const ids: Set<string> = new Set<string>();
     for (const tab of index.tabs) {

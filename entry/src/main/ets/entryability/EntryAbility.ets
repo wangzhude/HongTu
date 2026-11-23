@@ -10,7 +10,12 @@ import { window, display, UIContext } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import {
   adaptWorkspace,
+  bindWindowDisplayController,
+  HONGTU_AUTO_LANDSCAPE_DESKTOP_KEY,
+  HONGTU_CUSTOM_DPI_SCALE_KEY,
+  HONGTU_EFFECTIVE_DPI_SCALE_KEY,
   HONGTU_FORCE_DESKTOP_MODE_KEY,
+  HONGTU_WINDOW_IS_LANDSCAPE_KEY,
   resolveSystemDensity
 } from '../common/WorkspaceAdaptation';
 import { ThemeManager } from '../common/Theme';
@@ -72,6 +77,8 @@ export default class EntryAbility extends UIAbility {
   private workspaceUIContext: UIContext | undefined;
   private foldRegistered: boolean = false;
   private wantTokenSeq: number = 0;
+  private lastAppliedDensity: number = -1;
+  private manualLandscapeLocked: boolean = false;
   private lastAppliedAppColorMode: ConfigurationConstant.ColorMode | undefined = undefined;
   private sizeListener: (size: window.Size) => void = () => this.applyWorkspaceAdaptation();
   private densityListener: (density: number) => void = () => this.applyWorkspaceAdaptation();
@@ -174,19 +181,78 @@ export default class EntryAbility extends UIAbility {
     });
   }
 
+  private toggleWindowOrientation(): void {
+    if (this.workspaceWindow === undefined) return;
+    try {
+      const rect: window.Rect = this.workspaceWindow.getWindowProperties().windowRect;
+      const currentlyLandscape: boolean = rect.width > rect.height * 1.05;
+      if (currentlyLandscape) {
+        this.manualLandscapeLocked = false;
+        this.workspaceWindow.setPreferredOrientation(window.Orientation.PORTRAIT).then((): void => {
+          setTimeout((): void => {
+            try {
+              if (!this.manualLandscapeLocked) {
+                this.workspaceWindow?.setPreferredOrientation(window.Orientation.AUTO_ROTATION_RESTRICTED).catch((): void => {});
+              }
+            } catch (_) {}
+          }, 1200);
+        }).catch((): void => {});
+      } else {
+        this.manualLandscapeLocked = true;
+        this.workspaceWindow.setPreferredOrientation(window.Orientation.AUTO_ROTATION_LANDSCAPE).catch((): void => {
+          this.workspaceWindow?.setPreferredOrientation(window.Orientation.LANDSCAPE).catch((): void => {});
+        });
+      }
+    } catch (err) {
+      hilog.warn(0x0000, 'HongTu', '切换窗口横竖屏方向失败: %{public}s', String(err));
+    }
+  }
+
   private applyWorkspaceAdaptation(): void {
     if (this.workspaceWindow === undefined || this.workspaceStage === undefined) return;
     try {
+      if (AppStorage.get<boolean>(HONGTU_AUTO_LANDSCAPE_DESKTOP_KEY) === undefined) {
+        AppStorage.setOrCreate<boolean>(HONGTU_AUTO_LANDSCAPE_DESKTOP_KEY, true);
+      }
+      if (AppStorage.get<number>(HONGTU_CUSTOM_DPI_SCALE_KEY) === undefined) {
+        AppStorage.setOrCreate<number>(HONGTU_CUSTOM_DPI_SCALE_KEY, 0);
+      }
       const rect: window.Rect = this.workspaceWindow.getWindowProperties().windowRect;
       const systemDensity: number = this.resolveActiveSystemDensity();
       const forceDesktop: boolean = AppStorage.get<boolean>(HONGTU_FORCE_DESKTOP_MODE_KEY) === true;
-      const layout = adaptWorkspace(rect.width, rect.height, systemDensity, deviceInfo.deviceType, forceDesktop);
+      const autoLandscapeDesktop: boolean = AppStorage.get<boolean>(HONGTU_AUTO_LANDSCAPE_DESKTOP_KEY) !== false;
+      const customDpiScale: number = AppStorage.get<number>(HONGTU_CUSTOM_DPI_SCALE_KEY) ?? 0;
+      const layout = adaptWorkspace(
+        rect.width,
+        rect.height,
+        systemDensity,
+        deviceInfo.deviceType,
+        forceDesktop,
+        autoLandscapeDesktop,
+        customDpiScale
+      );
+
+      if (deviceInfo.sdkApiVersion >= 15 && Math.abs(this.lastAppliedDensity - layout.density) > 0.005) {
+        this.lastAppliedDensity = layout.density;
+        try {
+          if (Math.abs(layout.effectiveScale - 1.0) < 0.01 && deviceInfo.sdkApiVersion >= 20) {
+            this.workspaceWindow.setDefaultDensityEnabled(true).catch((): void => {
+              this.workspaceWindow?.setCustomDensity(layout.density).catch((): void => {});
+            });
+          } else {
+            this.workspaceWindow.setCustomDensity(layout.density).catch((): void => {});
+          }
+        } catch (_densityErr) {}
+      }
+
       AppStorage.setOrCreate<boolean>('hongtuDesktopWorkspace', layout.desktop);
-      AppStorage.setOrCreate<number>('hongtuWindowDensity', systemDensity);
-      hongTuThemeState.updateDisplayDensity(systemDensity);
-      this.refreshSafeAreaInsets(systemDensity);
-      const widthVp: number = rect.width / Math.max(0.5, systemDensity);
-      const heightVp: number = rect.height / Math.max(0.5, systemDensity);
+      AppStorage.setOrCreate<boolean>(HONGTU_WINDOW_IS_LANDSCAPE_KEY, layout.isLandscape);
+      AppStorage.setOrCreate<number>(HONGTU_EFFECTIVE_DPI_SCALE_KEY, layout.effectiveScale);
+      AppStorage.setOrCreate<number>('hongtuWindowDensity', layout.density);
+      hongTuThemeState.updateDisplayDensity(layout.density);
+      this.refreshSafeAreaInsets(layout.density);
+      const widthVp: number = rect.width / Math.max(0.5, layout.density);
+      const heightVp: number = rect.height / Math.max(0.5, layout.density);
       publishResponsiveSnapshot(createResponsiveSnapshot(widthVp, heightVp, this.workspaceUIContext));
     } catch (error) {
       hilog.warn(0x0000, 'HongTu', '工作台响应式适配更新失败: %{public}s', String(error));
@@ -357,6 +423,13 @@ export default class EntryAbility extends UIAbility {
       } catch (_statusRegErr) {
       }
       this.foldRegistered = registerFoldStatusListener(this.foldListener);
+      bindWindowDisplayController({
+        reapplyAdaptation: (): void => this.applyWorkspaceAdaptation(),
+        toggleOrientation: (): void => this.toggleWindowOrientation()
+      });
+      try {
+        await mainWindow.setPreferredOrientation(window.Orientation.AUTO_ROTATION_RESTRICTED);
+      } catch (_oriErr) {}
       this.applyWorkspaceAdaptation();
     } catch (e) {
       hilog.error(0x0000, 'HongTu', '沉浸式窗口底座设置失败: %{public}s', JSON.stringify(e));
@@ -418,6 +491,7 @@ export default class EntryAbility extends UIAbility {
         hilog.warn(0x0000, 'HongTu', '解除系统密度监听失败: %{public}s', String(error));
       }
     }
+    bindWindowDisplayController(null);
     clearResponsiveUIContext();
     hongTuThemeState.unbindMainWindow(this.workspaceWindow);
     this.workspaceUIContext = undefined;

@@ -75,6 +75,31 @@ bool XComponentPlugin::ensureEGLContextLocked() {
     return true;
 }
 
+bool XComponentPlugin::presentImmediateLocked() {
+    if (!renderer_ || eglDisplay_ == EGL_NO_DISPLAY || eglSurface_ == EGL_NO_SURFACE ||
+        eglContext_ == EGL_NO_CONTEXT) {
+        return false;
+    }
+    if (!ensureEGLContextLocked()) {
+        return false;
+    }
+    if (!renderer_->isReady()) {
+        if (!renderer_->initialize()) {
+            eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            return false;
+        }
+        renderer_->onViewportChanged(surfaceWidth_, surfaceHeight_);
+    }
+    renderer_->render();
+    const EGLBoolean swapped = eglSwapBuffers(eglDisplay_, eglSurface_);
+    eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (swapped == EGL_TRUE) {
+        needRedraw_ = false;
+        return true;
+    }
+    return false;
+}
+
 void XComponentPlugin::OnSurfaceCreated(OH_NativeXComponent* component, void* window) {
     LOGI("Surface 创建");
     auto& plugin = XComponentPlugin::getInstance();
@@ -122,13 +147,17 @@ void XComponentPlugin::OnSurfaceCreated(OH_NativeXComponent* component, void* wi
         return;
     }
 
-    // 初始化渲染器（编译着色器、创建 VBO，需在 EGL 上下文就绪后进行）
+    // 初始化渲染器并立即提交首帧清屏/几何缓冲，彻底根除硬件 Surface 初建未交换导致的纯黑底 (#000000)
     if (plugin.renderer_ && !plugin.renderer_->isReady()) {
         plugin.renderer_->initialize();
         plugin.renderer_->onViewportChanged(plugin.surfaceWidth_, plugin.surfaceHeight_);
     }
+    if (plugin.renderer_ && plugin.renderer_->isReady()) {
+        plugin.renderer_->render();
+        eglSwapBuffers(plugin.eglDisplay_, plugin.eglSurface_);
+    }
 
-    // 释放当前线程占用，允许后续运行在独立帧线程的 OnFrameCallback 无冲突绑定 eglContext_
+    // 释放当前线程占用，允许后续 OnFrameCallback 或 NAPI 线程无冲突绑定 eglContext_
     eglMakeCurrent(plugin.eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
     ++plugin.surfaceGeneration_;
@@ -256,8 +285,10 @@ void XComponentPlugin::OnFrameCallback(OH_NativeXComponent* component, uint64_t 
                 plugin.needRedraw_ = true;
             }
         }
+        eglMakeCurrent(plugin.eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         return;
     }
+    eglMakeCurrent(plugin.eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     plugin.needRedraw_ = false;
 }
 
@@ -271,6 +302,7 @@ void XComponentPlugin::setRenderData(const std::vector<RenderBatch>& batches, do
     if (renderer_) {
         renderer_->setRenderData(batches, false, originX, originY);
         needRedraw_ = true;
+        presentImmediateLocked();
     }
 }
 
@@ -287,6 +319,7 @@ bool XComponentPlugin::submitCachedHierarchyRenderData(const std::vector<RenderB
     if (!isReadyLocked()) return false;
     appliedPublication = renderer_->setCachedLayoutRenderData(batches, expectedPublication, originX, originY);
     needRedraw_ = true;
+    presentImmediateLocked();
     return true;
 }
 
@@ -294,7 +327,11 @@ bool XComponentPlugin::clearRenderScene() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (renderer_) renderer_->setRenderData({}, true, 0.0, 0.0);
     needRedraw_ = true;
-    return isReadyLocked();
+    if (isReadyLocked()) {
+        presentImmediateLocked();
+        return true;
+    }
+    return false;
 }
 
 void XComponentPlugin::setCamera(double scaleX, double scaleY, double offsetX, double offsetY,
@@ -322,6 +359,9 @@ void XComponentPlugin::setBackgroundColor(float r, float g, float b, float a) {
     if (renderer_) {
         renderer_->setBackgroundColor(r, g, b, a);
         needRedraw_ = true;
+        if (isReadyLocked()) {
+            presentImmediateLocked();
+        }
     }
 }
 

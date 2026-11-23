@@ -48,6 +48,7 @@ import {
   DraftRectPreview,
   DraftStampPreview,
   DraftTouchLoupe,
+  REGULAR_POLYGON_SIDES_PRESETS,
 } from '../../store/DraftOverlayStore';
 
 class DraftCanvasAreaRepaintFrame extends FrameCallback {
@@ -87,6 +88,8 @@ export struct DraftOverlayLayer {
   onOpenStampDialog: () => void = () => {};
   onStampTransformChanged: () => void = () => {};
   onExitStampMode: () => void = () => {};
+  onExactCreateRect: (minX: number, minY: number, maxX: number, maxY: number) => boolean = () => false;
+  viewportCenterProvider: () => Point = () => ({ x: 0, y: 0 });
 
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
@@ -1010,6 +1013,15 @@ export struct DraftOverlayLayer {
         desktopMode: this.desktopMode,
         canvasWidth: this.canvasWidth,
         topStripY: this.topStripY,
+        onExactCreateRect: this.onExactCreateRect,
+        viewportCenterProvider: this.viewportCenterProvider,
+      })
+
+      DraftTextControlStrip({
+        store: this.controlStore,
+        desktopMode: this.desktopMode,
+        canvasWidth: this.canvasWidth,
+        topStripY: this.topStripY,
       })
 
       DraftStampControlStrip({
@@ -1054,6 +1066,14 @@ struct DraftPolyControlStrip {
     return items;
   }
 
+  private buildPolyKindItems(): SegmentButtonItemTuple {
+    const items: [SegmentButtonTextItem, SegmentButtonTextItem] = [
+      { text: '折线' },
+      { text: '正多边形' }
+    ];
+    return items;
+  }
+
   private bumpPathWidth(sign: number): void {
     const cur: number = Number(this.store.pathWidthStr);
     const delta: number = Math.max(1, Math.round(this.stepUnitNm > 0 ? this.stepUnitNm : 10));
@@ -1062,74 +1082,122 @@ struct DraftPolyControlStrip {
     this.onPathWidthEdited(String(next));
   }
 
+  private isPathMode(): boolean {
+    return this.store.isPath || (this.store.pathToolActive && !this.store.polygonToolActive);
+  }
+
   build() {
-    if (this.store.polyActive) {
+    if ((this.store.polyActive || this.store.polygonToolActive || this.store.pathToolActive) &&
+      this.store.curveKind.length === 0 && !this.store.stampActive) {
       Scroll() {
         Row({ space: 8 }) {
-          Text(this.store.continuingShapeId >= 0 ? '续画路径' : (this.store.isPath ? '路径' : '多边形'))
+          Text(this.store.continuingShapeId >= 0 ? '续画路径' : (this.isPathMode() ? '路径' : '多边形'))
             .fontSize(12)
             .fontColor(this.store.continuingShapeId >= 0 ? COLORS.primary : COLORS.ink)
             .fontWeight(FontWeight.Medium)
-          Text(`${this.store.pointCount} 点`)
-            .fontSize(12)
-            .fontFamily(FONT_MONO)
-            .fontColor(COLORS.muted)
 
-          Row() {
-            StableSegmentButton({
-              items: this.buildRoutingSegmentItems(),
-              selectedIndex: this.store.routingModeIndex(),
-              onItemClicked: (index: number) => {
-                this.onSelectRoutingMode(DraftControlStore.routingModeForIndex(index));
-              },
-              fontColor: COLORS.muted,
-              selectedFontColor: COLORS.primary,
-              capsuleBackgroundColor: COLORS.surfaceMuted,
-              selectedBackgroundColor: COLORS.primarySoft,
-              fontSizeFp: 11,
-              capsuleBorderRadius: UI.controlRadius,
-              buttonMinHeight: 32,
-              itemMinHeight: 26,
-              itemPaddingHorizontal: 6,
-              itemPaddingVertical: 3
-            })
+          if (this.store.polyActive && this.store.pointCount > 0) {
+            Text(`${this.store.pointCount} 点`)
+              .fontSize(12)
+              .fontFamily(FONT_MONO)
+              .fontColor(COLORS.muted)
           }
-          .width(188)
 
-          if (this.store.routingMode === RoutingMode.MANHATTAN_90) {
-            Row({ space: 6 }) {
-              Chip({
-                prefixSymbol: {
-                  normal: new SymbolGlyphModifier($r('sys.symbol.stroke_path'))
-                    .fontSize(14)
-                    .fontColor([COLORS.primary]),
-                  activated: new SymbolGlyphModifier($r('sys.symbol.stroke_path'))
-                    .fontSize(14)
-                    .fontColor([COLORS.primary])
+          if (!this.isPathMode() && !this.store.polyActive) {
+            Row() {
+              StableSegmentButton({
+                items: this.buildPolyKindItems(),
+                selectedIndex: this.store.polygonSubMode,
+                onItemClicked: (idx: number) => {
+                  this.store.polygonSubMode = idx === 1 ? 1 : 0;
                 },
-                label: {
-                  text: this.store.horizontalFirst ? '拐向:横先' : '拐向:纵先',
-                  fontSize: 12,
-                  fontColor: COLORS.ink,
-                  activatedFontColor: COLORS.primary
-                },
-                size: ChipSize.SMALL,
-                allowClose: false,
-                activated: true,
-                backgroundColor: COLORS.surfaceMuted,
-                activatedBackgroundColor: COLORS.primarySoft,
-                borderRadius: UI.controlRadius,
-                maxFontScale: 1.3,
-                accessibilitySelectedType: AccessibilitySelectedType.SELECTED,
-                accessibilityDescription: '翻转正交 L 型拐角方向，快捷键 Tab',
-                onClicked: () => {
-                  this.onFlipPosture();
-                }
+                fontColor: COLORS.muted,
+                selectedFontColor: COLORS.primary,
+                capsuleBackgroundColor: COLORS.surfaceMuted,
+                selectedBackgroundColor: COLORS.primarySoft,
+                fontSizeFp: 11,
+                capsuleBorderRadius: UI.controlRadius,
+                buttonMinHeight: 32,
+                itemMinHeight: 26,
+                itemPaddingHorizontal: 6,
+                itemPaddingVertical: 3
               })
+            }
+            .width(136)
+          }
+
+          if (!this.isPathMode() && this.store.polygonSubMode === 1 && !this.store.polyActive) {
+            Row({ space: 4 }) {
+              ForEach(REGULAR_POLYGON_SIDES_PRESETS, (n: number) => {
+                Button(`${n}边`, { type: ButtonType.Normal })
+                  .height(28)
+                  .fontSize(11)
+                  .padding({ left: 7, right: 7 })
+                  .backgroundColor(this.store.regularPolygonSides === n ? COLORS.primarySoft : COLORS.surfaceMuted)
+                  .fontColor(this.store.regularPolygonSides === n ? COLORS.primary : COLORS.ink)
+                  .border({ width: 1, color: this.store.regularPolygonSides === n ? COLORS.primary : COLORS.border })
+                  .borderRadius(UI.controlRadius)
+                  .focusable(false)
+                  .onClick(() => { this.store.regularPolygonSides = n; })
+              }, (n: number) => `strip_ngon_${n}`)
+            }
+          } else {
+            Row() {
+              StableSegmentButton({
+                items: this.buildRoutingSegmentItems(),
+                selectedIndex: this.store.routingModeIndex(),
+                onItemClicked: (index: number) => {
+                  this.onSelectRoutingMode(DraftControlStore.routingModeForIndex(index));
+                },
+                fontColor: COLORS.muted,
+                selectedFontColor: COLORS.primary,
+                capsuleBackgroundColor: COLORS.surfaceMuted,
+                selectedBackgroundColor: COLORS.primarySoft,
+                fontSizeFp: 11,
+                capsuleBorderRadius: UI.controlRadius,
+                buttonMinHeight: 32,
+                itemMinHeight: 26,
+                itemPaddingHorizontal: 6,
+                itemPaddingVertical: 3
+              })
+            }
+            .width(184)
+
+            if (this.store.routingMode === RoutingMode.MANHATTAN_90) {
+              Row({ space: 6 }) {
+                Chip({
+                  prefixSymbol: {
+                    normal: new SymbolGlyphModifier($r('sys.symbol.stroke_path'))
+                      .fontSize(14)
+                      .fontColor([COLORS.primary]),
+                    activated: new SymbolGlyphModifier($r('sys.symbol.stroke_path'))
+                      .fontSize(14)
+                      .fontColor([COLORS.primary])
+                  },
+                  label: {
+                    text: this.store.horizontalFirst ? '拐向:横先' : '拐向:纵先',
+                    fontSize: 12,
+                    fontColor: COLORS.ink,
+                    activatedFontColor: COLORS.primary
+                  },
+                  size: ChipSize.SMALL,
+                  allowClose: false,
+                  activated: true,
+                  backgroundColor: COLORS.surfaceMuted,
+                  activatedBackgroundColor: COLORS.primarySoft,
+                  borderRadius: UI.controlRadius,
+                  maxFontScale: 1.3,
+                  accessibilitySelectedType: AccessibilitySelectedType.SELECTED,
+                  accessibilityDescription: '翻转正交 L 型拐角方向，快捷键 Tab',
+                  onClicked: () => {
+                    this.onFlipPosture();
+                  }
+                })
+              }
             }
           }
 
-          if (this.store.isPath) {
+          if (this.isPathMode()) {
             Row({ space: 4 }) {
               Text('线宽')
                 .fontSize(12)
@@ -1193,39 +1261,41 @@ struct DraftPolyControlStrip {
             }
           }
 
-          Button('退一点', { type: ButtonType.Normal })
-            .height(UI.compactControlHeight)
-            .fontSize(UI.fontBody)
-            .backgroundColor(COLORS.surfaceMuted)
-            .fontColor(COLORS.ink)
-            .border({ width: 1, color: COLORS.border })
-            .borderRadius(UI.controlRadius)
-            .attributeModifier(hongTuThemeState.luminousPointLightModifier())
-            .focusable(false)
-            .onClick(() => { this.onUndoPolyVertex(); })
+          if (this.store.polyActive && this.store.pointCount > 0) {
+            Button('退一点', { type: ButtonType.Normal })
+              .height(UI.compactControlHeight)
+              .fontSize(UI.fontBody)
+              .backgroundColor(COLORS.surfaceMuted)
+              .fontColor(COLORS.ink)
+              .border({ width: 1, color: COLORS.border })
+              .borderRadius(UI.controlRadius)
+              .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+              .focusable(false)
+              .onClick(() => { this.onUndoPolyVertex(); })
 
-          Button('完成', { type: ButtonType.Normal })
-            .height(UI.compactControlHeight)
-            .fontSize(UI.fontBody)
-            .backgroundColor(this.store.canFinish ? COLORS.primary : COLORS.surfaceMuted)
-            .fontColor(this.store.canFinish ? Color.White : COLORS.muted)
-            .border({ width: 1, color: this.store.canFinish ? COLORS.primary : COLORS.border })
-            .borderRadius(UI.controlRadius)
-            .attributeModifier(hongTuThemeState.luminousPointLightModifier())
-            .enabled(this.store.canFinish)
-            .focusable(false)
-            .onClick(() => { this.onFinishPoly(); })
+            Button('完成', { type: ButtonType.Normal })
+              .height(UI.compactControlHeight)
+              .fontSize(UI.fontBody)
+              .backgroundColor(this.store.canFinish ? COLORS.primary : COLORS.surfaceMuted)
+              .fontColor(this.store.canFinish ? Color.White : COLORS.muted)
+              .border({ width: 1, color: this.store.canFinish ? COLORS.primary : COLORS.border })
+              .borderRadius(UI.controlRadius)
+              .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+              .enabled(this.store.canFinish)
+              .focusable(false)
+              .onClick(() => { this.onFinishPoly(); })
 
-          Button('取消', { type: ButtonType.Normal })
-            .height(UI.compactControlHeight)
-            .fontSize(UI.fontBody)
-            .backgroundColor(COLORS.surfaceMuted)
-            .fontColor(COLORS.ink)
-            .border({ width: 1, color: COLORS.border })
-            .borderRadius(UI.controlRadius)
-            .attributeModifier(hongTuThemeState.luminousPointLightModifier())
-            .focusable(false)
-            .onClick(() => { this.onCancelPoly(); })
+            Button('取消', { type: ButtonType.Normal })
+              .height(UI.compactControlHeight)
+              .fontSize(UI.fontBody)
+              .backgroundColor(COLORS.surfaceMuted)
+              .fontColor(COLORS.ink)
+              .border({ width: 1, color: COLORS.border })
+              .borderRadius(UI.controlRadius)
+              .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+              .focusable(false)
+              .onClick(() => { this.onCancelPoly(); })
+          }
         }
         .alignItems(VerticalAlign.Center)
       }
@@ -1248,7 +1318,7 @@ struct DraftPolyControlStrip {
 }
 
 /**
- * 矩形工具增强浮条：支持「对角框 / 中心扩 / 定尺寸」三模切换、触屏「锁正方」与固定宽×高一键点放
+ * 矩形工具增强浮条：支持「对角框 / 中心扩 / 定尺寸」三模切换、正方形锁定与精确中心/角点坐标一键生成
  */
 @Component
 struct DraftRectControlStrip {
@@ -1256,132 +1326,276 @@ struct DraftRectControlStrip {
   @Prop desktopMode: boolean = false;
   @Prop canvasWidth: number = 800;
   @Prop topStripY: number = 52;
+  onExactCreateRect: (minX: number, minY: number, maxX: number, maxY: number) => boolean = () => false;
+  viewportCenterProvider: () => Point = () => ({ x: 0, y: 0 });
+  @State private exactError: string = '';
 
   private buildRectModeItems(): SegmentButtonItemTuple {
     const items: [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] = [
-      { text: '对角框' },
-      { text: '中心扩' },
+      { text: '对角两点' },
+      { text: '中心外扩' },
       { text: '定尺寸' }
     ];
     return items;
   }
 
+  private submitInlineExactRect(): void {
+    const xv: number = Number(this.store.exactRectXStr.trim());
+    const yv: number = Number(this.store.exactRectYStr.trim());
+    const wv: number = Number(this.store.exactRectWStr.trim());
+    const hv: number = Number(this.store.exactRectHStr.trim());
+    if (!Number.isFinite(xv) || !Number.isFinite(yv) || !Number.isFinite(wv) || !Number.isFinite(hv) || wv <= 0 || hv <= 0) {
+      this.exactError = '坐标或宽高无效';
+      return;
+    }
+    const minX: number = this.store.exactRectAnchorMode === 1 ? Math.round(xv - wv * 0.5) : Math.round(xv);
+    const minY: number = this.store.exactRectAnchorMode === 1 ? Math.round(yv - hv * 0.5) : Math.round(yv);
+    if (this.onExactCreateRect(minX, minY, Math.round(minX + wv), Math.round(minY + hv))) {
+      this.exactError = '';
+      this.store.showExactRectBar = false;
+    } else {
+      this.exactError = '创建未成功';
+    }
+  }
+
   build() {
     if (this.store.rectActive && !this.store.polyActive && this.store.curveKind.length === 0 && !this.store.stampActive) {
-      Scroll() {
-        Row({ space: 8 }) {
-          Text('矩形')
-            .fontSize(12)
-            .fontColor(COLORS.ink)
-            .fontWeight(FontWeight.Medium)
+      Column({ space: 6 }) {
+        Scroll() {
+          Row({ space: 8 }) {
+            Text('矩形')
+              .fontSize(12)
+              .fontColor(COLORS.ink)
+              .fontWeight(FontWeight.Medium)
 
-          Row() {
-            StableSegmentButton({
-              items: this.buildRectModeItems(),
-              selectedIndex: this.store.rectDrawMode,
-              onItemClicked: (index: number) => {
-                if (index >= 0 && index <= 2) {
-                  this.store.rectDrawMode = index;
-                }
-              },
-              fontColor: COLORS.muted,
-              selectedFontColor: COLORS.primary,
-              capsuleBackgroundColor: COLORS.surfaceMuted,
-              selectedBackgroundColor: COLORS.primarySoft,
-              fontSizeFp: 11,
-              capsuleBorderRadius: UI.controlRadius,
-              buttonMinHeight: 32,
-              itemMinHeight: 26,
-              itemPaddingHorizontal: 6,
-              itemPaddingVertical: 3
-            })
-          }
-          .width(184)
-
-          if (this.store.rectDrawMode !== 2) {
-            Row({ space: 6 }) {
-              Chip({
-                label: {
-                  text: '锁正方',
-                  fontSize: 12,
-                  fontColor: COLORS.ink,
-                  activatedFontColor: COLORS.primary
+            Row() {
+              StableSegmentButton({
+                items: this.buildRectModeItems(),
+                selectedIndex: this.store.rectDrawMode,
+                onItemClicked: (index: number) => {
+                  if (index >= 0 && index <= 2) {
+                    this.store.rectDrawMode = index;
+                  }
                 },
-                size: ChipSize.SMALL,
-                allowClose: false,
-                activated: this.store.rectSquareLock,
-                backgroundColor: COLORS.surfaceMuted,
-                activatedBackgroundColor: COLORS.primarySoft,
-                borderRadius: UI.controlRadius,
-                maxFontScale: 1.3,
-                accessibilitySelectedType: AccessibilitySelectedType.CHECKED,
-                accessibilityDescription: '锁定等宽高正方形绘制',
-                onClicked: () => {
-                  this.store.rectSquareLock = !this.store.rectSquareLock;
-                }
+                fontColor: COLORS.muted,
+                selectedFontColor: COLORS.primary,
+                capsuleBackgroundColor: COLORS.surfaceMuted,
+                selectedBackgroundColor: COLORS.primarySoft,
+                fontSizeFp: 11,
+                capsuleBorderRadius: UI.controlRadius,
+                buttonMinHeight: 32,
+                itemMinHeight: 26,
+                itemPaddingHorizontal: 6,
+                itemPaddingVertical: 3
               })
             }
-          } else {
-            Row({ space: 4 }) {
-              Text('宽')
-                .fontSize(11)
-                .fontColor(COLORS.muted)
-              TextInput({ text: this.store.rectFixedWNmStr })
-                .type(InputType.Normal)
-                .width(56)
-                .height(UI.fieldHeight)
-                .fontSize(UI.fontBody)
-                .fontColor(COLORS.ink)
-                .backgroundColor(COLORS.surfaceMuted)
-                .border({ width: 1, color: COLORS.border })
-                .borderRadius(UI.controlRadius)
-                .onChange((v: string) => { this.store.rectFixedWNmStr = v; })
-                .onTouch((event: TouchEvent) => { event.stopPropagation(); })
-                .onMouse((event: MouseEvent) => { event.stopPropagation(); })
-                .onFocus(() => { resetModifierKeys(); })
-                .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-              Text('× 高')
-                .fontSize(11)
-                .fontColor(COLORS.muted)
-              TextInput({ text: this.store.rectFixedHNmStr })
-                .type(InputType.Normal)
-                .width(56)
-                .height(UI.fieldHeight)
-                .fontSize(UI.fontBody)
-                .fontColor(COLORS.ink)
-                .backgroundColor(COLORS.surfaceMuted)
-                .border({ width: 1, color: COLORS.border })
-                .borderRadius(UI.controlRadius)
-                .onChange((v: string) => { this.store.rectFixedHNmStr = v; })
-                .onTouch((event: TouchEvent) => { event.stopPropagation(); })
-                .onMouse((event: MouseEvent) => { event.stopPropagation(); })
-                .onFocus(() => { resetModifierKeys(); })
-                .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
-              Text('nm')
-                .fontSize(11)
-                .fontColor(COLORS.muted)
-              Button('互换', { type: ButtonType.Normal })
-                .height(UI.compactControlHeight)
-                .fontSize(11)
-                .padding({ left: 8, right: 8 })
-                .backgroundColor(COLORS.surfaceMuted)
-                .fontColor(COLORS.primary)
-                .border({ width: 1, color: COLORS.border })
-                .borderRadius(UI.controlRadius)
-                .attributeModifier(hongTuThemeState.luminousPointLightModifier())
-                .focusable(false)
-                .onClick(() => { this.store.swapRectFixedDimensions(); })
+            .width(196)
+
+            if (this.store.rectDrawMode !== 2) {
+              Row({ space: 6 }) {
+                Chip({
+                  label: {
+                    text: '锁正方',
+                    fontSize: 12,
+                    fontColor: COLORS.ink,
+                    activatedFontColor: COLORS.primary
+                  },
+                  size: ChipSize.SMALL,
+                  allowClose: false,
+                  activated: this.store.rectSquareLock,
+                  backgroundColor: COLORS.surfaceMuted,
+                  activatedBackgroundColor: COLORS.primarySoft,
+                  borderRadius: UI.controlRadius,
+                  maxFontScale: 1.3,
+                  accessibilitySelectedType: AccessibilitySelectedType.CHECKED,
+                  accessibilityDescription: '锁定等宽高正方形绘制',
+                  onClicked: () => {
+                    this.store.rectSquareLock = !this.store.rectSquareLock;
+                  }
+                })
+              }
+            } else {
+              Row({ space: 4 }) {
+                Text('宽').fontSize(11).fontColor(COLORS.muted)
+                TextInput({ text: this.store.rectFixedWNmStr })
+                  .type(InputType.Normal)
+                  .width(56).height(UI.fieldHeight).fontSize(UI.fontBody)
+                  .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
+                  .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius)
+                  .onChange((v: string) => { this.store.rectFixedWNmStr = v; })
+                  .onTouch((event: TouchEvent) => { event.stopPropagation(); })
+                  .onMouse((event: MouseEvent) => { event.stopPropagation(); })
+                  .onFocus(() => { resetModifierKeys(); })
+                  .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+                Text('× 高').fontSize(11).fontColor(COLORS.muted)
+                TextInput({ text: this.store.rectFixedHNmStr })
+                  .type(InputType.Normal)
+                  .width(56).height(UI.fieldHeight).fontSize(UI.fontBody)
+                  .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
+                  .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius)
+                  .onChange((v: string) => { this.store.rectFixedHNmStr = v; })
+                  .onTouch((event: TouchEvent) => { event.stopPropagation(); })
+                  .onMouse((event: MouseEvent) => { event.stopPropagation(); })
+                  .onFocus(() => { resetModifierKeys(); })
+                  .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+                Text('nm').fontSize(11).fontColor(COLORS.muted)
+                Button('互换', { type: ButtonType.Normal })
+                  .height(UI.compactControlHeight).fontSize(11).padding({ left: 8, right: 8 })
+                  .backgroundColor(COLORS.surfaceMuted).fontColor(COLORS.primary)
+                  .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius)
+                  .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+                  .focusable(false)
+                  .onClick(() => { this.store.swapRectFixedDimensions(); })
+              }
+              .alignItems(VerticalAlign.Center)
             }
-            .alignItems(VerticalAlign.Center)
+
+            Button(this.store.showExactRectBar ? '收起输入' : '精确坐标…', { type: ButtonType.Normal })
+              .height(UI.compactControlHeight)
+              .fontSize(11.5)
+              .padding({ left: 8, right: 8 })
+              .backgroundColor(this.store.showExactRectBar ? COLORS.primarySoft : COLORS.surfaceMuted)
+              .fontColor(COLORS.primary)
+              .border({ width: 1, color: this.store.showExactRectBar ? COLORS.primary : COLORS.border })
+              .borderRadius(UI.controlRadius)
+              .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+              .focusable(false)
+              .onClick(() => {
+                this.store.showExactRectBar = !this.store.showExactRectBar;
+                this.exactError = '';
+              })
           }
+          .alignItems(VerticalAlign.Center)
         }
-        .alignItems(VerticalAlign.Center)
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+        .constraintSize({ maxWidth: Math.max(220, this.canvasWidth - (this.desktopMode ? 86 : 28)) })
+        .height(44)
+        .padding({ left: 12, right: 12 })
+        .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'regular', hongTuThemeState.elevation('md')))
+
+        if (this.store.showExactRectBar) {
+          Scroll() {
+            Row({ space: 6 }) {
+              Button(this.store.exactRectAnchorMode === 1 ? '基准:中心点' : '基准:左下角', { type: ButtonType.Normal })
+                .height(28).fontSize(11).padding({ left: 8, right: 8 })
+                .fontColor(COLORS.primary).backgroundColor(COLORS.primarySoft)
+                .border({ width: 1, color: COLORS.primary }).borderRadius(UI.controlRadius).focusable(false)
+                .onClick(() => {
+                  this.store.exactRectAnchorMode = this.store.exactRectAnchorMode === 1 ? 0 : 1;
+                })
+              Text(this.store.exactRectAnchorMode === 1 ? 'CX' : 'X').fontSize(11).fontColor(COLORS.muted)
+              TextInput({ text: this.store.exactRectXStr })
+                .width(60).height(28).fontSize(12).padding({ left: 6, right: 6 })
+                .backgroundColor(COLORS.surfaceMuted).fontColor(COLORS.ink).borderRadius(6)
+                .onFocus(() => resetModifierKeys()).onKeyEvent((e: KeyEvent) => e.stopPropagation())
+                .onChange((v: string) => { this.store.exactRectXStr = v; this.exactError = ''; })
+              Text(this.store.exactRectAnchorMode === 1 ? 'CY' : 'Y').fontSize(11).fontColor(COLORS.muted)
+              TextInput({ text: this.store.exactRectYStr })
+                .width(60).height(28).fontSize(12).padding({ left: 6, right: 6 })
+                .backgroundColor(COLORS.surfaceMuted).fontColor(COLORS.ink).borderRadius(6)
+                .onFocus(() => resetModifierKeys()).onKeyEvent((e: KeyEvent) => e.stopPropagation())
+                .onChange((v: string) => { this.store.exactRectYStr = v; this.exactError = ''; })
+              Text('宽').fontSize(11).fontColor(COLORS.muted)
+              TextInput({ text: this.store.exactRectWStr })
+                .width(56).height(28).fontSize(12).padding({ left: 6, right: 6 })
+                .backgroundColor(COLORS.surfaceMuted).fontColor(COLORS.ink).borderRadius(6)
+                .onFocus(() => resetModifierKeys()).onKeyEvent((e: KeyEvent) => e.stopPropagation())
+                .onChange((v: string) => { this.store.exactRectWStr = v; this.exactError = ''; })
+              Text('高').fontSize(11).fontColor(COLORS.muted)
+              TextInput({ text: this.store.exactRectHStr })
+                .width(56).height(28).fontSize(12).padding({ left: 6, right: 6 })
+                .backgroundColor(COLORS.surfaceMuted).fontColor(COLORS.ink).borderRadius(6)
+                .onFocus(() => resetModifierKeys()).onKeyEvent((e: KeyEvent) => e.stopPropagation())
+                .onChange((v: string) => { this.store.exactRectHStr = v; this.exactError = ''; })
+              Text('nm').fontSize(10.5).fontColor(COLORS.muted)
+              Button('取中心', { type: ButtonType.Normal })
+                .height(28).fontSize(11).padding({ left: 7, right: 7 })
+                .fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
+                .border({ width: 1, color: COLORS.border }).borderRadius(6).focusable(false)
+                .onClick(() => {
+                  const c: Point = this.viewportCenterProvider();
+                  this.store.exactRectXStr = String(Math.round(c.x));
+                  this.store.exactRectYStr = String(Math.round(c.y));
+                })
+              Button('生成', { type: ButtonType.Normal })
+                .height(28).fontSize(11.5).padding({ left: 10, right: 10 })
+                .fontColor(Color.White).backgroundColor(COLORS.primary)
+                .borderRadius(6).focusable(false)
+                .onClick(() => this.submitInlineExactRect())
+              if (this.exactError.length > 0) {
+                Text(this.exactError).fontSize(11).fontColor(COLORS.danger)
+              }
+            }.alignItems(VerticalAlign.Center)
+          }
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .constraintSize({ maxWidth: Math.max(220, this.canvasWidth - (this.desktopMode ? 86 : 28)) })
+          .height(42)
+          .padding({ left: 10, right: 10 })
+          .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'regular', hongTuThemeState.elevation('md')))
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .transition(panelTransition(TransitionEdge.TOP))
+      .zIndex(ZIndexTokens.floatingToolbar)
+      .position({ x: this.desktopMode ? 72 : 14, y: this.topStripY })
+      .hitTestBehavior(HitTestMode.Default)
+      .onTouch((event: TouchEvent) => { event.stopPropagation(); })
+      .onMouse((event: MouseEvent) => { event.stopPropagation(); })
+      .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+    }
+  }
+}
+
+/**
+ * 文本工具快捷引脚连盖章浮条
+ */
+@Component
+struct DraftTextControlStrip {
+  @ObjectLink store: DraftControlStore;
+  @Prop desktopMode: boolean = false;
+  @Prop canvasWidth: number = 800;
+  @Prop topStripY: number = 52;
+  private readonly pins: string[] = ['VDD', 'VSS', 'GND', 'CLK', 'IN', 'OUT'];
+
+  build() {
+    if (this.store.textToolActive && !this.store.polyActive && !this.store.rectActive &&
+      this.store.curveKind.length === 0 && !this.store.stampActive) {
+      Scroll() {
+        Row({ space: 6 }) {
+          Text('文本标签').fontSize(12).fontWeight(FontWeight.Medium).fontColor(COLORS.ink)
+          Button('弹窗输入', { type: ButtonType.Normal })
+            .height(28).fontSize(11).padding({ left: 8, right: 8 })
+            .fontColor(this.store.textQuickPreset.length === 0 ? COLORS.primary : COLORS.ink)
+            .backgroundColor(this.store.textQuickPreset.length === 0 ? COLORS.primarySoft : COLORS.surfaceMuted)
+            .border({ width: 1, color: this.store.textQuickPreset.length === 0 ? COLORS.primary : COLORS.border })
+            .borderRadius(UI.controlRadius).focusable(false)
+            .onClick(() => { this.store.textQuickPreset = ''; })
+          ForEach(this.pins, (pin: string) => {
+            Button(pin, { type: ButtonType.Normal })
+              .height(28).fontSize(11).fontFamily(FONT_MONO).padding({ left: 8, right: 8 })
+              .fontColor(this.store.textQuickPreset === pin ? COLORS.primary : COLORS.ink)
+              .backgroundColor(this.store.textQuickPreset === pin ? COLORS.primarySoft : COLORS.surfaceMuted)
+              .border({ width: 1, color: this.store.textQuickPreset === pin ? COLORS.primary : COLORS.border })
+              .borderRadius(UI.controlRadius).focusable(false)
+              .onClick(() => { this.store.textQuickPreset = pin; })
+          }, (pin: string) => `tstrip_${pin}`)
+          Button(`PIN_${this.store.textAutoPinIndex}++`, { type: ButtonType.Normal })
+            .height(28).fontSize(11).fontFamily(FONT_MONO).padding({ left: 8, right: 8 })
+            .fontColor(this.store.textQuickPreset === 'AUTO_PIN' ? COLORS.primary : COLORS.ink)
+            .backgroundColor(this.store.textQuickPreset === 'AUTO_PIN' ? COLORS.primarySoft : COLORS.surfaceMuted)
+            .border({ width: 1, color: this.store.textQuickPreset === 'AUTO_PIN' ? COLORS.primary : COLORS.border })
+            .borderRadius(UI.controlRadius).focusable(false)
+            .onClick(() => { this.store.textQuickPreset = 'AUTO_PIN'; })
+        }.alignItems(VerticalAlign.Center)
       }
       .scrollable(ScrollDirection.Horizontal)
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
       .constraintSize({ maxWidth: Math.max(220, this.canvasWidth - (this.desktopMode ? 86 : 28)) })
-      .height(44)
+      .height(42)
       .padding({ left: 12, right: 12 })
       .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'regular', hongTuThemeState.elevation('md')))
       .transition(panelTransition(TransitionEdge.TOP))

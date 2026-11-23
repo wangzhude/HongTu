@@ -107,6 +107,8 @@ private:
     void destroyEGLContext();
     /** 持锁校验当前线程 EGL 上下文与绘制表面绑定，解绑时自动执行 eglMakeCurrent 恢复 */
     bool ensureEGLContextLocked();
+    /** 持锁立即渲染并交换缓冲区（完成后解绑上下文），杜绝 Surface 初建或静默态黑底 */
+    bool presentImmediateLocked();
 
     std::unique_ptr<GLRenderer> renderer_;
     std::mutex mutex_;

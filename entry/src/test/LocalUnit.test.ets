@@ -16,7 +16,9 @@ import { splitMarkdownSegments, repairStreamingMarkdown, describeAiToolCall, mat
   summarizeProcessSteps,
   publishAiLiveStream,
   getAiLiveStreamSnapshot,
+  extractAiPlan,
   resetAiLiveStream, formatCompactTokens, AI_SLASH_COMMANDS } from '../main/ets/services/AiAgentPresentation';
+import { adaptWorkspace } from '../main/ets/common/WorkspaceAdaptation';
 import type { LayoutPort, LayoutCrossSection, LayoutContextRecord } from '../main/ets/models/LayoutPort';
 import type { LayoutPropRecord, NativeShape } from '../main/cpp/types/libhongtu/Index';
 import { EditService, editService, EditStructureState } from '../main/ets/services/EditService';
@@ -31,6 +33,7 @@ import {
 } from '../main/ets/common/CloneUtils';
 import {
   PropertyCellOption,
+  shapePropertyValue,
   prepareShapeProperty,
   validatePropertyHierarchy
 } from '../main/ets/services/ShapePropertyService';
@@ -971,6 +974,68 @@ export default function localUnitTest(): void {
       expect(liveSnap.activeThinkId).assertEqual('think-2');
       expect(summarizeProcessSteps(liveSnap.steps, false)).assertEqual('2 步思考 · 1 步工具调用');
       resetAiLiveStream();
+
+      // Landscape PC mode & Quick DPI adaptation unit verification
+      const portraitPhone = adaptWorkspace(1216, 2688, 3.25, 'phone', false, true, 0);
+      expect(portraitPhone.desktop).assertFalse();
+      expect(portraitPhone.isLandscape).assertFalse();
+      expect(portraitPhone.effectiveScale).assertEqual(1.0);
+
+      const landscapePhoneAuto = adaptWorkspace(2688, 1216, 3.25, 'phone', false, true, 0);
+      expect(landscapePhoneAuto.desktop).assertTrue();
+      expect(landscapePhoneAuto.isLandscape).assertTrue();
+      expect(landscapePhoneAuto.effectiveScale).assertEqual(0.8);
+      expect(Math.abs(landscapePhoneAuto.density - 2.6) < 0.01).assertTrue();
+
+      const landscapePhoneCustom75 = adaptWorkspace(2688, 1216, 3.25, 'phone', false, true, 0.75);
+      expect(landscapePhoneCustom75.desktop).assertTrue();
+      expect(landscapePhoneCustom75.effectiveScale).assertEqual(0.75);
+
+      const planItems = extractAiPlan([{
+        id: 'tc-plan-1',
+        name: 'todo_write',
+        status: 'completed',
+        arguments: '{"todos":[{"content":"检查当前版图单元","status":"completed"},{"content":"原生绘制CMOS反相器","status":"in_progress"}]}',
+        result: '{"success":true}'
+      }]);
+      expect(planItems.length).assertEqual(2);
+      expect(planItems[0].status).assertEqual('completed');
+      expect(planItems[1].status).assertEqual('in_progress');
+
+      // v7 Coordinate Anchor System (Center / Min / Bounds) & Symmetric Resize verification
+      const rectTestShape: Shape = {
+        id: 101,
+        type: ShapeType.RECT,
+        layerNumber: 1,
+        datatype: 0,
+        selected: true,
+        points: [{ x: 100, y: 200 }, { x: 500, y: 800 }]
+      };
+      expect(shapePropertyValue(rectTestShape, 'centerX')).assertEqual('300');
+      expect(shapePropertyValue(rectTestShape, 'centerY')).assertEqual('500');
+      expect(shapePropertyValue(rectTestShape, 'maxX')).assertEqual('500');
+      expect(shapePropertyValue(rectTestShape, 'maxY')).assertEqual('800');
+      expect(prepareShapeProperty(rectTestShape, 'widthCenter', '600', [], [rectTestShape])).assertEqual('');
+      expect(shapePropertyValue(rectTestShape, 'centerX')).assertEqual('300');
+      expect(shapePropertyValue(rectTestShape, 'x')).assertEqual('0');
+      expect(shapePropertyValue(rectTestShape, 'maxX')).assertEqual('600');
+      expect(prepareShapeProperty(rectTestShape, 'minXEdge', '120', [], [rectTestShape])).assertEqual('');
+      expect(shapePropertyValue(rectTestShape, 'x')).assertEqual('120');
+      expect(shapePropertyValue(rectTestShape, 'maxX')).assertEqual('600');
+
+      // v7 Regular N-gon & MeasureStore Area/Crosshair verification
+      const hexPts = routingConstraintService.buildRegularPolygon({ x: 0, y: 0 }, { x: 500, y: 0 }, 6, true);
+      expect(hexPts.length).assertEqual(6);
+      const ms = new MeasureStore();
+      ms.setSubMode('area');
+      ms.begin(0, 0);
+      ms.commit(1000, 2000);
+      expect(ms.areaBoxes.length).assertEqual(1);
+      expect(ms.formatArea(2000000)).assertEqual('2.000 µm²');
+      ms.setSubMode('ruler');
+      ms.rulerOrientation = 'crosshair';
+      ms.addCrosshairRuler(500, 600);
+      expect(ms.rulers.length).assertEqual(2);
     });
   });
 }

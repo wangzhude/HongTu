@@ -131,7 +131,7 @@ export class ThemeManager {
     ThemeManager.bindBridge();
     if (!ThemeManager.persistenceInitialized) {
       try {
-        PersistentStorage.persistProp<string>(HONGTU_THEME_MODE_KEY, 'dark');
+        PersistentStorage.persistProp<string>(HONGTU_THEME_MODE_KEY, 'system');
         PersistentStorage.persistProp<string>(HONGTU_LUMINOUS_INTENSITY_KEY, DEFAULT_LUMINOUS_INTENSITY_PRESET);
         PersistentStorage.persistProp<boolean>(HONGTU_LUMINOUS_BG_ENABLED_KEY, true);
         PersistentStorage.persistProp<string>(HONGTU_LUMINOUS_BG_PRESET_KEY, DEFAULT_LUMINOUS_BACKGROUND_PRESET);
@@ -140,7 +140,7 @@ export class ThemeManager {
       }
     }
     try {
-      const savedMode: ThemeMode = normalizeThemeMode(AppStorage.get<string>(HONGTU_THEME_MODE_KEY) ?? 'dark');
+      const savedMode: ThemeMode = normalizeThemeMode(AppStorage.get<string>(HONGTU_THEME_MODE_KEY) ?? 'system');
       const savedIntensity: LuminousIntensityPreset = normalizeLuminousIntensityPreset(
         AppStorage.get<string>(HONGTU_LUMINOUS_INTENSITY_KEY) ?? DEFAULT_LUMINOUS_INTENSITY_PRESET
       );
@@ -166,10 +166,14 @@ export class ThemeManager {
       // 关键修复：切勿在 PersistentStorage.persistProp 绑定磁盘前调用 setThemeMode('dark') 写入 AppStorage，
       // 否则 AppStorage 已存在的 'dark' 会在冷启动/恢复时反向覆盖用户持久化的 'light' 浅色模式！
       const preSaved: string | undefined = AppStorage.get<string>(HONGTU_THEME_MODE_KEY);
-      if (preSaved === 'light') {
-        resolved.applyLight();
-      } else {
+      if (preSaved === 'dark') {
         resolved.applyDark();
+      } else if (preSaved === 'light') {
+        resolved.applyLight();
+      } else if (hongTuThemeState.isDark) {
+        resolved.applyDark();
+      } else {
+        resolved.applyLight();
       }
     } else if (hongTuThemeState.isDark) {
       resolved.applyDark();

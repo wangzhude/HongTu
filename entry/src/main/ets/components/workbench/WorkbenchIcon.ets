@@ -13,7 +13,7 @@ export struct WorkbenchIcon {
       this.name === 'mirrorV' || this.name === 'duplicate' || this.name === 'cornerRound' ||
       this.name === 'continuePath' || this.name === 'magnet' || this.name === 'ortho' || this.name === 'loupe' ||
       this.name === 'copy' || this.name === 'slash' || this.name === 'minimize' ||
-      this.name === 'think' || this.name === 'model';
+      this.name === 'think' || this.name === 'model' || this.name === 'dpi' || this.name === 'screenRotate';
   }
 
   private symbolResource(): Resource {
@@ -87,6 +87,10 @@ export struct WorkbenchIcon {
         return 'M12 3A6 6 0 0 0 8 13.5V16.5A1.5 1.5 0 0 0 9.5 18H14.5A1.5 1.5 0 0 0 16 16.5V13.5A6 6 0 0 0 12 3ZM9.5 21H14.5';
       case 'model':
         return 'M12 2L20 6.5V17.5L12 22L4 17.5V6.5ZM12 12L20 6.5M12 12L4 6.5M12 12V22';
+      case 'dpi':
+        return 'M4 9V4H9M20 9V4H15M4 15V20H9M20 15V20H15M9 12H15M12 9V15';
+      case 'screenRotate':
+        return 'M7 4H14A2 2 0 0 1 16 6V18A2 2 0 0 1 14 20H7A2 2 0 0 1 5 18V6A2 2 0 0 1 7 4ZM19 9A5 5 0 0 1 19 16M17 15L19 16.5L21 15';
       case 'cornerRound':
         return 'M5 19V12A7 7 0 0 1 12 5H19M4 18H6V20H4ZM18 4H20V6H18Z';
       case 'continuePath':

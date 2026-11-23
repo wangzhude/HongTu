@@ -25,7 +25,7 @@ import {
 } from '../../common/constants';
 import { hongTuThemeState, ZIndexTokens } from '../../store/ThemeStore';
 import { panelTransition } from '../../common/Motion';
-import { isShiftHeld, isCtrlHeld, isModalKeyboardBlocked, resetModifierKeys, setShiftHeld, setCtrlHeld } from '../../common/ModifierKeys';
+import { isShiftHeld, isCtrlHeld, isAltHeld, isModalKeyboardBlocked, resetModifierKeys, setShiftHeld, setCtrlHeld, setAltHeld } from '../../common/ModifierKeys';
 import { canvasKeyName } from '../../common/CanvasKeyboard';
 import { GlCanvas } from '../GlCanvas';
 import type { ViewSceneSource, ViewScenePrimitive, ViewSceneDrawResult } from '../../models/ViewRenderScene';
@@ -59,7 +59,7 @@ import { UI } from '../../common/UiTokens';
 import { MoveFineTuneDialog } from '../dialogs/MoveFineTuneDialog';
 import { TextCreateDialog } from '../dialogs/TextCreateDialog';
 import { ALPHA, BLUR_BY_LAYER, LayerRenderStyle, layerRenderStyle, withAlpha } from '../../common/MaterialTokens';
-import { CursorStore, MeasureAnnotation, MeasureStore, RulerLine, VertexStore } from '../../common/UiStores';
+import { CursorStore, MeasureAnnotation, MeasureAreaAnnotation, MeasureStore, RulerLine, VertexStore } from '../../common/UiStores';
 
 /** 矩形绘制预览框（用户坐标 nm） */
 interface PreviewRect {
@@ -244,8 +244,11 @@ const VERTEX_STRIP_HEIGHT: number = 46;
 /** 顶点句柄/预览描边色（KLayout 顶点编辑用亮黄） */
 const VERTEX_COLOR: string = '#FFD700';
 
-function isWhiteCanvas(): boolean {
-  return COLORS.canvasBg === '#FFFFFF';
+function isWhiteCanvas(effectiveIsDark?: boolean): boolean {
+  if (effectiveIsDark !== undefined) {
+    return !effectiveIsDark;
+  }
+  return !hongTuThemeState.isDark && COLORS.canvasBg === '#FFFFFF';
 }
 
 function canvasSelectionStroke(): string {
@@ -362,6 +365,7 @@ export struct LayoutCanvasView {
   continuePathCommitAction: (shapeId: number, points: Point[], width: number, pathType: number) => boolean =
     (_id: number, _pts: Point[], _w: number, _pt: number) => false;
   requestPathToolAction: () => void = () => {};
+  fitAllAction: () => void = () => {};
   @Prop selectionLayerFilter: number = -1;
   @Prop selectionDatatypeFilter: number = -1;
   @Prop selectionTypeFilter: ShapeType[] = [];
@@ -429,6 +433,7 @@ export struct LayoutCanvasView {
   private hatchBudgetResult: ViewSceneDrawResult | undefined = undefined;
   // Notification only: numeric px conversion always comes from this UIContext.
   @StorageProp('hongtuWindowDensity') @Watch('onHatchDensityChanged') hatchDensitySignal: number = 1;
+  @StorageProp('effectiveIsDark') @Watch('onEffectiveThemeChanged') effectiveIsDark: boolean = false;
   private snapCacheKey: string = '';
   private snapCache: Shape[] = [];
   private boxSelectLeftToRight: boolean = true;
@@ -577,8 +582,12 @@ export struct LayoutCanvasView {
   private lastTwoFingerPanY: number = 0;
   private isMousePanning: boolean = false;
   private middleMouseDownAt: number = 0;
+  private middleMouseStartX: number = 0;
+  private middleMouseStartY: number = 0;
+  private lastMiddleTapAt: number = 0;
   private lastMousePanX: number = 0;
   private lastMousePanY: number = 0;
+  private hasRegularPolyStart: boolean = false;
   private isSingleFingerPanning: boolean = false;
   private lastSinglePanX: number = 0;
   private lastSinglePanY: number = 0;
@@ -590,7 +599,7 @@ export struct LayoutCanvasView {
     this.draftControlStore.routingMode = this.routingMode;
     this.draftControlStore.curveKind = this.interactiveCurveKind;
     this.draftControlStore.pathWidthStr = this.pathWidthStr;
-    this.draftControlStore.rectActive = this.editable && this.currentTool === ActiveTool.Rect;
+    this.syncToolActiveFlags();
     this.syncCellStackState();
     // 顶点编辑：进入页面时若已有选中图形，立即投影其顶点句柄
     this.syncVertexStore();
@@ -652,6 +661,10 @@ export struct LayoutCanvasView {
   // 由 ShapeNode 乘进填充/描边不透明度。仅 ArkUI 路径生效（GL 主路径无逐帧回调）。
 
   /** layers 变化：按是否仍有动画层启停闪烁循环 */
+  onEffectiveThemeChanged(): void {
+    this.styleRenderRevision++;
+  }
+
   onLayersChange(): void {
     this.styleRenderRevision++;
     if (this.anyLayerAnimated()) {
@@ -746,7 +759,7 @@ export struct LayoutCanvasView {
           canvasWidth: this.canvasWidth,
           canvasHeight: this.canvasHeight,
           useGL: true,
-          lightBackground: isWhiteCanvas(),
+          lightBackground: !this.effectiveIsDark,
           currentCellId: editService.getCurrentCellId(),
           hierarchyDepth: this.hierarchyDepth,
           // 编辑后 native g_layout 未同步：必须走 ArkTS 已展开 shapes，避免 GL 画旧几何
@@ -933,6 +946,14 @@ export struct LayoutCanvasView {
           this.refreshLiveStampPreview(this.lastPointerScreenX, this.lastPointerScreenY, false);
         },
         onExitStampMode: () => { this.exitStampModeAction(); },
+        onExactCreateRect: (minX: number, minY: number, maxX: number, maxY: number): boolean => {
+          if (!this.editable || !this.ensureActiveLayerReadyForDraw()) return false;
+          return this.createShapeAction({ x: minX, y: minY }, { x: maxX, y: maxY });
+        },
+        viewportCenterProvider: (): Point => ({
+          x: this.screenToWorldX(this.canvasWidth * 0.5),
+          y: this.screenToWorldY(this.canvasHeight * 0.5)
+        }),
       })
 
       // Measure 测量 + Ruler 持久标尺：端点/标尺/读数/模式切换全部下沉到叶子组件，
@@ -1101,7 +1122,8 @@ export struct LayoutCanvasView {
     if (!continuingKeep) {
       this.clearPolyDraw();
     }
-    this.draftControlStore.rectActive = this.editable && this.currentTool === ActiveTool.Rect;
+    this.syncToolActiveFlags();
+    this.hasRegularPolyStart = false;
     if (this.currentTool !== ActiveTool.Instance && this.draftControlStore.stampActive) {
       this.draftControlStore.resetStamp();
       draftCanvasEngine.stampPreview = null;
@@ -1133,6 +1155,7 @@ export struct LayoutCanvasView {
     this.hasPendingStampTouch = false;
     this.hasPendingTextTouch = false;
     this.hasCurveStart = false;
+    this.hasRegularPolyStart = false;
     this.hasMeasureTouchActive = false;
     this.moveGhostOutlines = [];
     if (!continuingKeep) {
@@ -1176,8 +1199,18 @@ export struct LayoutCanvasView {
     this.gestureCellId = editService.getCurrentCellId();
   }
 
-  private onEditableChanged(): void {
+  private syncToolActiveFlags(): void {
     this.draftControlStore.rectActive = this.editable && this.currentTool === ActiveTool.Rect;
+    this.draftControlStore.polygonToolActive = this.editable && this.currentTool === ActiveTool.Polygon;
+    this.draftControlStore.pathToolActive = this.editable && this.currentTool === ActiveTool.Path;
+    this.draftControlStore.textToolActive = this.editable && this.currentTool === ActiveTool.Text;
+    if (!this.draftControlStore.rectActive && this.draftControlStore.showExactRectBar) {
+      this.draftControlStore.showExactRectBar = false;
+    }
+  }
+
+  private onEditableChanged(): void {
+    this.syncToolActiveFlags();
     if (!this.editable) {
       this.draftControlStore.resetStamp();
       this.cancelActiveGesture();
@@ -1205,6 +1238,12 @@ export struct LayoutCanvasView {
       if (key === 'TAB' && this.currentTool === ActiveTool.Select && this.hitCandidates.length > 1) {
         this.cycleHitCandidate(isShiftHeld() ? -1 : 1);
         event.stopPropagation(); return;
+      }
+      if (this.currentTool === ActiveTool.Rect && key === 'TAB') {
+        this.draftControlStore.rectDrawMode = this.draftControlStore.rectDrawMode === 1 ? 0 : 1;
+        this.cursorStore.setReadout(this.draftControlStore.rectDrawMode === 1 ? '矩形模式：中心对称外扩 (Tab切换)' : '矩形模式：对角两点拉框 (Tab切换)');
+        event.stopPropagation();
+        return;
       }
       if (this.isDrawingPoly && key === 'TAB') {
         this.flipRoutingPosture();
@@ -2035,11 +2074,15 @@ export struct LayoutCanvasView {
       if (!s.pending) {
         return base;
       }
+      if (s.rulerOrientation === 'crosshair') {
+        const ch: string = `十字标尺 (${s.formatLength(s.liveX)}, ${s.formatLength(s.liveY)})`;
+        return base.length > 0 ? `${base}\n待落 ${ch}` : `待落 ${ch}`;
+      }
       const isVert: boolean = s.rulerOrientation === 'vertical' ||
         (s.rulerOrientation === 'auto' && Math.abs(s.liveY - s.y1) > Math.abs(s.liveX - s.x1));
       const axis: string = isVert
-        ? `竖直 X=${umText(s.liveX)}µm`
-        : `水平 Y=${umText(s.liveY)}µm`;
+        ? `竖直 X=${s.formatLength(s.liveX)}`
+        : `水平 Y=${s.formatLength(s.liveY)}`;
       return base.length > 0 ? `${base}\n待落 ${axis}` : `待落 ${axis}`;
     }
     if (!s.hasSegment()) {
@@ -2047,8 +2090,12 @@ export struct LayoutCanvasView {
     }
     const dx: number = s.dxNm();
     const dy: number = s.dyNm();
-    const line1: string = `距离 ${umText(s.distanceNm())}µm  Δx=${umText(dx)} Δy=${umText(dy)}`
-      + `  宽${umText(Math.abs(dx))}×高${umText(Math.abs(dy))}`;
+    if (s.isAreaMode()) {
+      const wNm: number = Math.abs(dx);
+      const hNm: number = Math.abs(dy);
+      return `面积 ${s.formatArea(wNm * hNm)}  宽 ${s.formatLength(wNm)} × 高 ${s.formatLength(hNm)}  周长 ${s.formatLength(2 * (wNm + hNm))}`;
+    }
+    const line1: string = `距离 ${s.formatLength(s.distanceNm())}  Δx=${s.formatLength(dx)} Δy=${s.formatLength(dy)}`;
     const line2: string = `起(${umText(s.x1)}, ${umText(s.y1)})  终(${umText(s.endX())}, ${umText(s.endY())}) µm`
       + (s.pending ? '  ·拖动中' : '  ·已锁定');
     return `${line1}\n${line2}`;
@@ -2153,10 +2200,11 @@ export struct LayoutCanvasView {
   }
 
   private handleMouse(event: MouseEvent): void {
-    // 防死锁保护：按住中键移出画布松开再回到画布时，一旦检测到 Hover、Cancel、非中键 Move 或左/右键 Press，立即自动复位 isMousePanning
+    // 防死锁保护：HarmonyOS 在 MouseAction.Move 期间 event.button 为 MouseButton.None(0)，绝不可因 Move 重置中键拖拽！
     if (this.isMousePanning) {
       if (event.action === MouseAction.Hover || event.action === MouseAction.CANCEL ||
-        ((event.action === MouseAction.Move || event.action === MouseAction.Press) && event.button !== MouseButton.Middle)) {
+        (event.action === MouseAction.Press && event.button !== MouseButton.Middle) ||
+        Date.now() - this.middleMouseDownAt > 20000) {
         this.isMousePanning = false;
       }
     }
@@ -2206,6 +2254,8 @@ export struct LayoutCanvasView {
     if (event.action === MouseAction.Press && event.button === MouseButton.Middle) {
       this.isMousePanning = true;
       this.middleMouseDownAt = Date.now();
+      this.middleMouseStartX = event.x;
+      this.middleMouseStartY = event.y;
       this.lastMousePanX = event.x;
       this.lastMousePanY = event.y;
       event.stopPropagation();
@@ -2222,9 +2272,26 @@ export struct LayoutCanvasView {
       event.stopPropagation();
       return;
     }
-    if ((event.action === MouseAction.Release || event.action === MouseAction.CANCEL) && this.isMousePanning) {
+    if ((event.action === MouseAction.Release || event.action === MouseAction.CANCEL) &&
+      (this.isMousePanning || event.button === MouseButton.Middle)) {
+      const wasPanning: boolean = this.isMousePanning;
       this.isMousePanning = false;
+      if (wasPanning && event.action === MouseAction.Release) {
+        const moveDist: number = Math.hypot(event.x - this.middleMouseStartX, event.y - this.middleMouseStartY);
+        const nowMs: number = Date.now();
+        if (moveDist <= 5) {
+          if (nowMs - this.lastMiddleTapAt <= 380) {
+            this.lastMiddleTapAt = 0;
+            this.fitAllAction();
+          } else {
+            this.lastMiddleTapAt = nowMs;
+          }
+        } else {
+          this.lastMiddleTapAt = 0;
+        }
+      }
       event.stopPropagation();
+      return;
     }
   }
 
@@ -2240,7 +2307,15 @@ export struct LayoutCanvasView {
     const horizontal: number = event.getHorizontalAxisValue();
     const vertical: number = event.getVerticalAxisValue();
     if (event.scrollStep !== undefined && Math.abs(vertical) > 0.001) {
-      this.zoomAtAction(event.x, event.y, vertical > 0 ? 0.88 : 1.14);
+      if (isShiftHeld() && !isCtrlHeld()) {
+        this.panCanvasAction(0, -vertical * 2.4);
+        return;
+      }
+      if (isCtrlHeld() && !isShiftHeld()) {
+        this.panCanvasAction(-vertical * 2.4, 0);
+        return;
+      }
+      this.zoomAtAction(event.x, event.y, vertical > 0 ? 0.85 : 1.18);
       return;
     }
     if (Math.abs(horizontal) > 0.001 || Math.abs(vertical) > 0.001) {
@@ -2285,12 +2360,12 @@ export struct LayoutCanvasView {
       this.cancelTransientPointerOnly();
       return;
     }
-    if (event.type === TouchType.Down && this.isMousePanning &&
-      (event.source !== SourceType.Mouse || Date.now() - this.middleMouseDownAt > 80)) {
-      this.isMousePanning = false;
-    }
     if (this.isMousePanning) {
-      return;
+      if (event.source !== SourceType.Mouse || Date.now() - this.middleMouseDownAt > 20000) {
+        this.isMousePanning = false;
+      } else {
+        return;
+      }
     }
     // CANVAS-10: 弹框显示期间屏蔽画布触摸，避免误绘制/误选
     // （TextCreateDialog / MoveFineTuneDialog 已改为 @CustomDialog，系统模态遮罩自动屏蔽画布触摸）
@@ -3270,7 +3345,7 @@ export struct LayoutCanvasView {
       draftCanvasEngine.rectPreview = {
         x: sp.x, y: sp.y, w: 0, h: 0,
         layerColor: this.colorForLayer(this.selectedLayerNumber, this.selectedDatatype),
-        centerAnchor: this.draftControlStore.rectDrawMode === 1 ? sp : undefined,
+        centerAnchor: (this.draftControlStore.rectDrawMode === 1 || isAltHeld()) ? sp : undefined,
       };
       this.updateTouchLoupe(screenX, screenY, sp, rich.readoutText);
       draftCanvasEngine.requestRepaint();
@@ -3366,6 +3441,25 @@ export struct LayoutCanvasView {
       this.moveGhostOutlines = this.captureMoveGhostOutlines();
       this.updateTouchLoupe(screenX, screenY, sp, rich.readoutText);
       draftCanvasEngine.requestRepaint();
+    } else if (this.currentTool === ActiveTool.Polygon && this.draftControlStore.polygonSubMode === 1 && !this.isDrawingPoly) {
+      if (!this.ensureActiveLayerReadyForDraw()) return;
+      const rich: RichSnapResult = this.snapRichWorld(userX, userY);
+      const sp: Point = rich.point;
+      this.curveCenterX = sp.x;
+      this.curveCenterY = sp.y;
+      this.hasRegularPolyStart = true;
+      draftCanvasEngine.snapMarker = rich.marker;
+      draftCanvasEngine.alignmentGuides = rich.guides;
+      draftCanvasEngine.curvePreview = {
+        kind: `NGON_${this.draftControlStore.regularPolygonSides}`,
+        center: sp,
+        edge: sp,
+        points: [],
+        layerColor: this.colorForLayer(this.selectedLayerNumber, this.selectedDatatype),
+      };
+      this.updateTouchLoupe(screenX, screenY, sp, rich.readoutText);
+      draftCanvasEngine.requestRepaint();
+      return;
     } else if (this.currentTool === ActiveTool.Polygon || this.currentTool === ActiveTool.Path) {
       if (!this.ensureActiveLayerReadyForDraw()) return;
       if (!this.isDrawingPoly) {
@@ -3445,12 +3539,18 @@ export struct LayoutCanvasView {
     }
 
     if (s.pending) {
-      // 已定起点，当前按下用于瞄准第二点（松手才最终 commit，允许手指滑动微调对准磁吸点！）
       this.measureWasWaitingSecondPoint = true;
       const step: number = this.snapEnabled ? (this.drawStepNm >= 0 ? this.drawStepNm : this.gridSize) : 0;
-      sp = routingConstraintService.constrainMeasureEnd({ x: s.x1, y: s.y1 }, sp, s.angleLock, isShiftHeld(), step);
+      if (!s.isAreaMode()) {
+        sp = routingConstraintService.constrainMeasureEnd({ x: s.x1, y: s.y1 }, sp, s.angleLock, isShiftHeld(), step);
+        draftCanvasEngine.measureTriangle = { x1: s.x1, y1: s.y1, x2: sp.x, y2: sp.y };
+      } else {
+        if (isShiftHeld()) {
+          sp = routingConstraintService.constrainRectEnd({ x: s.x1, y: s.y1 }, sp, true, step);
+        }
+        draftCanvasEngine.measureTriangle = null;
+      }
       s.moveLive(sp.x, sp.y);
-      draftCanvasEngine.measureTriangle = { x1: s.x1, y1: s.y1, x2: sp.x, y2: sp.y };
     } else {
       this.measureWasWaitingSecondPoint = false;
       s.begin(sp.x, sp.y);
@@ -3472,7 +3572,22 @@ export struct LayoutCanvasView {
     draftCanvasEngine.snapMarker = rich.marker;
     draftCanvasEngine.alignmentGuides = rich.guides;
 
-    if (!s.rulerMode) {
+    if (s.isAreaMode()) {
+      const step: number = this.snapEnabled ? (this.drawStepNm >= 0 ? this.drawStepNm : this.gridSize) : 0;
+      if (isShiftHeld()) {
+        sp = routingConstraintService.constrainRectEnd({ x: s.x1, y: s.y1 }, sp, true, step);
+      }
+      s.moveLive(sp.x, sp.y);
+      draftCanvasEngine.measureTriangle = null;
+      const wNm: number = Math.abs(sp.x - s.x1);
+      const hNm: number = Math.abs(sp.y - s.y1);
+      draftCanvasEngine.cursorHud = {
+        screenX: screenX,
+        screenY: screenY,
+        primaryText: `面积 ${s.formatArea(wNm * hNm)}`,
+        secondaryText: `宽 ${s.formatLength(wNm)} × 高 ${s.formatLength(hNm)} · 周长 ${s.formatLength(2 * (wNm + hNm))}`,
+      };
+    } else if (!s.rulerMode) {
       const step: number = this.snapEnabled ? (this.drawStepNm >= 0 ? this.drawStepNm : this.gridSize) : 0;
       sp = routingConstraintService.constrainMeasureEnd({ x: s.x1, y: s.y1 }, sp, s.angleLock, isShiftHeld(), step);
       s.moveLive(sp.x, sp.y);
@@ -3482,16 +3597,19 @@ export struct LayoutCanvasView {
       draftCanvasEngine.cursorHud = {
         screenX: screenX,
         screenY: screenY,
-        primaryText: `距离 ${umText(Math.hypot(dx, dy))} µm`,
-        secondaryText: `Δx ${umText(dx)}  Δy ${umText(dy)} µm` + (rich.readoutText.length > 0 ? ` · ${rich.readoutText}` : ''),
+        primaryText: `距离 ${s.formatLength(Math.hypot(dx, dy))}`,
+        secondaryText: `Δx ${s.formatLength(dx)}  Δy ${s.formatLength(dy)}` + (rich.readoutText.length > 0 ? ` · ${rich.readoutText}` : ''),
       };
     } else {
       s.moveLive(sp.x, sp.y);
+      const isCross: boolean = s.rulerOrientation === 'crosshair';
       const vertical: boolean = this.resolveRulerVertical(screenX, screenY);
       draftCanvasEngine.cursorHud = {
         screenX: screenX,
         screenY: screenY,
-        primaryText: vertical ? `竖直标尺 X = ${umText(sp.x)} µm` : `水平标尺 Y = ${umText(sp.y)} µm`,
+        primaryText: isCross
+          ? `十字标尺 (${s.formatLength(sp.x)}, ${s.formatLength(sp.y)})`
+          : (vertical ? `竖直标尺 X = ${s.formatLength(sp.x)}` : `水平标尺 Y = ${s.formatLength(sp.y)}`),
         secondaryText: rich.readoutText.length > 0 ? rich.readoutText : '拖动吸边，松手落标尺',
       };
     }
@@ -3515,8 +3633,12 @@ export struct LayoutCanvasView {
     const s: MeasureStore = this.measureStore;
     this.hasRulerDown = false;
     this.hasMeasureTouchActive = false;
-    const vertical: boolean = this.resolveRulerVertical(screenX, screenY);
-    s.addRuler(vertical, vertical ? s.liveX : s.liveY);
+    if (s.rulerOrientation === 'crosshair') {
+      s.addCrosshairRuler(s.liveX, s.liveY);
+    } else {
+      const vertical: boolean = this.resolveRulerVertical(screenX, screenY);
+      s.addRuler(vertical, vertical ? s.liveX : s.liveY);
+    }
     s.reset();
     draftCanvasEngine.clearTransientPointerVisuals(true);
     this.syncReadout();
@@ -3550,6 +3672,33 @@ export struct LayoutCanvasView {
         this.polygonPoints.length,
         this.polyCloseLoopReady
       );
+      return;
+    }
+    if (this.currentTool === ActiveTool.Polygon && this.draftControlStore.polygonSubMode === 1 && this.hasRegularPolyStart) {
+      const center: Point = { x: this.curveCenterX, y: this.curveCenterY };
+      const rich: RichSnapResult = this.snapRichWorld(userX, userY, [center]);
+      const edgePt: Point = rich.point;
+      const sides: number = this.draftControlStore.regularPolygonSides;
+      const pts: Point[] = routingConstraintService.buildRegularPolygon(center, edgePt, sides, isShiftHeld());
+      const rNm: number = Math.hypot(edgePt.x - center.x, edgePt.y - center.y);
+      draftCanvasEngine.snapMarker = rich.marker;
+      draftCanvasEngine.alignmentGuides = rich.guides;
+      draftCanvasEngine.curvePreview = {
+        kind: `NGON_${sides}`,
+        center: center,
+        edge: edgePt,
+        points: pts,
+        layerColor: this.colorForLayer(this.selectedLayerNumber, this.selectedDatatype),
+      };
+      draftCanvasEngine.cursorHud = {
+        screenX: screenX,
+        screenY: screenY,
+        primaryText: `正${sides}边形 · 外接R ${umText(rNm)} µm`,
+        secondaryText: rich.readoutText.length > 0 ? rich.readoutText : `心(${umText(center.x)}, ${umText(center.y)}) µm · Shift锁15°`,
+      };
+      this.cursorStore.setReadout(`正${sides}边形 R=${umText(rNm)} µm`);
+      this.updateTouchLoupe(screenX, screenY, edgePt, rich.readoutText);
+      draftCanvasEngine.requestRepaint();
       return;
     }
     if (this.draftControlStore.curveKind.length > 0 && this.hasCurveStart) {
@@ -3609,7 +3758,7 @@ export struct LayoutCanvasView {
       const step: number = this.snapEnabled ? (this.drawStepNm >= 0 ? this.drawStepNm : this.gridSize) : 0;
       const lockSq: boolean = isShiftHeld() || this.draftControlStore.rectSquareLock;
       const sp: Point = routingConstraintService.constrainRectEnd(startPt, rich.point, lockSq, step);
-      const centerMode: boolean = this.draftControlStore.rectDrawMode === 1;
+      const centerMode: boolean = this.draftControlStore.rectDrawMode === 1 || isAltHeld();
       const halfW: number = Math.abs(sp.x - this.drawStartX);
       const halfH: number = Math.abs(sp.y - this.drawStartY);
       const x: number = centerMode ? this.drawStartX - halfW : Math.min(this.drawStartX, sp.x);
@@ -3673,7 +3822,8 @@ export struct LayoutCanvasView {
       const minY: number = Math.min(screenY, this.boxStartScreenY);
       const w: number = Math.abs(screenX - this.boxStartScreenX);
       const h: number = Math.abs(screenY - this.boxStartScreenY);
-      this.boxSelectLeftToRight = screenX >= this.boxStartScreenX;
+      const rule: number = this.draftControlStore.boxSelectRule;
+      this.boxSelectLeftToRight = rule === 1 ? false : (rule === 2 ? true : screenX >= this.boxStartScreenX);
       this.boxSelectRect = { x: minX, y: minY, w: w, h: h };
       draftCanvasEngine.boxPreview = {
         x: minX, y: minY, w: w, h: h,
@@ -3686,7 +3836,7 @@ export struct LayoutCanvasView {
         screenX: screenX,
         screenY: screenY,
         primaryText: `${umText(wx)} × ${umText(wy)} µm`,
-        secondaryText: this.currentTool === ActiveTool.BoxZoom ? '框选局部放大' : (this.boxSelectLeftToRight ? '左向右：完全包含选中' : '右向左：相交即选中'),
+        secondaryText: this.currentTool === ActiveTool.BoxZoom ? '框选局部放大' : (this.boxSelectLeftToRight ? '完全包含选中' : '相交即选中'),
       };
       draftCanvasEngine.requestRepaint();
     } else if (this.currentTool === ActiveTool.Measure) {
@@ -3760,6 +3910,18 @@ export struct LayoutCanvasView {
     if (this.onVertexUp()) {
       return;
     }
+    if (this.currentTool === ActiveTool.Polygon && this.draftControlStore.polygonSubMode === 1 && this.hasRegularPolyStart) {
+      this.onMove(userX, userY, screenX, screenY);
+      const pts: Point[] = draftCanvasEngine.curvePreview !== null ? draftCanvasEngine.curvePreview.points : [];
+      this.hasRegularPolyStart = false;
+      draftCanvasEngine.clearTransientPointerVisuals(true);
+      if (pts.length >= 3) {
+        if (!this.createPolygonAction(pts)) {
+          this.cursorStore.setReadout('正多边形未创建，请检查当前图层是否锁定');
+        }
+      }
+      return;
+    }
     if (this.draftControlStore.curveKind.length > 0 && this.hasCurveStart) {
       this.onMove(userX, userY, screenX, screenY);
       const pts: Point[] = draftCanvasEngine.curvePreview !== null ? draftCanvasEngine.curvePreview.points : [];
@@ -3778,6 +3940,13 @@ export struct LayoutCanvasView {
       this.textInsertY = rich.point.y;
       this.hasPendingTextTouch = false;
       draftCanvasEngine.clearTransientPointerVisuals(true);
+      if (this.draftControlStore.textQuickPreset.length > 0) {
+        const quickPin: string = this.draftControlStore.consumeQuickTextLabel();
+        if (quickPin.length > 0) {
+          this.createTextAction(this.textInsertX, this.textInsertY, quickPin);
+        }
+        return;
+      }
       this.textInsertContext = this.textCreateContext();
       this.textCreateController.open();
       return;
@@ -3901,7 +4070,7 @@ export struct LayoutCanvasView {
       const step: number = this.snapEnabled ? (this.drawStepNm >= 0 ? this.drawStepNm : this.gridSize) : 0;
       const lockSq: boolean = isShiftHeld() || this.draftControlStore.rectSquareLock;
       const end: Point = routingConstraintService.constrainRectEnd(start, rich.point, lockSq, step);
-      const centerMode: boolean = this.draftControlStore.rectDrawMode === 1;
+      const centerMode: boolean = this.draftControlStore.rectDrawMode === 1 || isAltHeld();
       const halfW: number = Math.abs(end.x - start.x);
       const halfH: number = Math.abs(end.y - start.y);
       const commitStart: Point = centerMode ? { x: start.x - halfW, y: start.y - halfH } : start;
@@ -4973,6 +5142,7 @@ struct ShapeNode {
 
 @Component
 struct CanvasGrid {
+  @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
   @Prop canvasWidth: number = 800;
   @Prop canvasHeight: number = 600;
   @Prop zoomPercent: number = 100;
@@ -5066,9 +5236,9 @@ struct CanvasGrid {
 
   private lineColor(line: GridLinePosition): string {
     if (line.origin) {
-      return withAlpha(COLORS.primary, isWhiteCanvas() ? 0.45 : 0.62);
+      return withAlpha(COLORS.primary, !this.effectiveIsDark ? 0.45 : 0.62);
     }
-    return line.major ? COLORS.canvasGridMajor : COLORS.canvasGrid;
+    return !this.effectiveIsDark ? (line.major ? 'rgba(15, 23, 42, 0.11)' : 'rgba(15, 23, 42, 0.055)') : (line.major ? 'rgba(148, 163, 184, 0.16)' : 'rgba(148, 163, 184, 0.075)');
   }
 }
 
@@ -5081,6 +5251,7 @@ struct CanvasGrid {
  */
 @Component
 struct MeasureLayer {
+  @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
   @ObjectLink store: MeasureStore;
   @ObjectLink cursorStore: CursorStore;
   @Prop zoomPercent: number = 100;
@@ -5173,45 +5344,97 @@ struct MeasureLayer {
           .hitTestBehavior(HitTestMode.None)
       }, (ann: MeasureAnnotation) => `ann_lbl_${ann.id}`)
 
-      // 当前正在拖拽/待定第二点的活动橡皮筋线段
-      if (this.store.hasSegment() && !this.store.rulerMode) {
-        Polyline({ width: this.segWidth(), height: this.segHeight() })
-          .points(this.segPointPairs())
-          .fillOpacity(0)
-          .stroke(canvasMeasureColor())
-          .strokeWidth(1.8)
-          .strokeDashArray([6, 4])
-          .position({ x: this.segLeft(), y: this.segTop() })
+      // 已锁定的区域面积测量框标注
+      ForEach(this.store.areaBoxes, (box: MeasureAreaAnnotation) => {
+        Rect()
+          .width(Math.max(2, Math.abs(this.sx(box.maxX) - this.sx(box.minX))))
+          .height(Math.max(2, Math.abs(this.sy(box.maxY) - this.sy(box.minY))))
+          .fill(withAlpha(canvasMeasureColor(), 0.10))
+          .border({ width: 1.4, color: canvasMeasureColor(), style: BorderStyle.Dashed })
+          .position({
+            x: Math.min(this.sx(box.minX), this.sx(box.maxX)),
+            y: Math.min(this.sy(box.minY), this.sy(box.maxY))
+          })
           .hitTestBehavior(HitTestMode.None)
+      }, (box: MeasureAreaAnnotation) => `area_box_${box.id}`)
 
-        Circle({ width: 9, height: 9 })
-          .fill(canvasMeasureColor())
-          .position({ x: this.sx(this.store.x1) - 4.5, y: this.sy(this.store.y1) - 4.5 })
+      ForEach(this.store.areaBoxes, (box: MeasureAreaAnnotation) => {
+        Text(`${this.store.formatArea((box.maxX - box.minX) * (box.maxY - box.minY))} (${this.store.formatLength(box.maxX - box.minX)}×${this.store.formatLength(box.maxY - box.minY)})`)
+          .fontSize(10.5)
+          .fontFamily(FONT_MONO)
+          .fontColor(canvasMeasureColor())
+          .maxLines(1)
+          .backgroundColor(isWhiteCanvas() ? withAlpha('#FFFFFF', 0.92) : withAlpha('#0B0E14', 0.84))
+          .border({ width: 0.8, color: withAlpha(canvasMeasureColor(), 0.45) })
+          .borderRadius(6)
+          .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+          .position({
+            x: Math.max(this.desktopMode ? 76 : 8, Math.min((this.sx(box.minX) + this.sx(box.maxX)) * 0.5 - 64, this.canvasWidth - 250)),
+            y: Math.max(12, Math.min((this.sy(box.minY) + this.sy(box.maxY)) * 0.5 - 12, this.canvasHeight - 62))
+          })
           .hitTestBehavior(HitTestMode.None)
-        Circle({ width: 9, height: 9 })
-          .fill(canvasMeasureColor())
-          .position({ x: this.sx(this.store.endX()) - 4.5, y: this.sy(this.store.endY()) - 4.5 })
+      }, (box: MeasureAreaAnnotation) => `area_lbl_${box.id}`)
+
+      // 十字标尺拖拽双线实时预览
+      if (this.store.rulerMode && this.store.rulerOrientation === 'crosshair' && this.store.pending) {
+        Rect()
+          .width(this.canvasWidth).height(1.5).fill(canvasRulerColor())
+          .position({ x: 0, y: this.sy(this.store.liveY) })
+          .hitTestBehavior(HitTestMode.None)
+        Rect()
+          .width(1.5).height(this.canvasHeight).fill(canvasRulerColor())
+          .position({ x: this.sx(this.store.liveX), y: 0 })
           .hitTestBehavior(HitTestMode.None)
       }
 
-      // 触屏与桌面双友好测量/标尺控制浮条（受控原生 StableSegmentButton + HdsSnackBar 一键撤销恢复 + 保活弹簧入场）
+      // 当前正在拖拽的活动橡皮筋（测距线段 或 测面积矩形）
+      if (this.store.hasSegment() && !this.store.rulerMode) {
+        if (this.store.isAreaMode()) {
+          Rect()
+            .width(Math.max(2, Math.abs(this.sx(this.store.endX()) - this.sx(this.store.x1))))
+            .height(Math.max(2, Math.abs(this.sy(this.store.endY()) - this.sy(this.store.y1))))
+            .fill(withAlpha(canvasMeasureColor(), 0.14))
+            .border({ width: 1.6, color: canvasMeasureColor(), style: BorderStyle.Dashed })
+            .position({
+              x: Math.min(this.sx(this.store.x1), this.sx(this.store.endX())),
+              y: Math.min(this.sy(this.store.y1), this.sy(this.store.endY()))
+            })
+            .hitTestBehavior(HitTestMode.None)
+        } else {
+          Polyline({ width: this.segWidth(), height: this.segHeight() })
+            .points(this.segPointPairs())
+            .fillOpacity(0)
+            .stroke(canvasMeasureColor())
+            .strokeWidth(1.8)
+            .strokeDashArray([6, 4])
+            .position({ x: this.segLeft(), y: this.segTop() })
+            .hitTestBehavior(HitTestMode.None)
+
+          Circle({ width: 9, height: 9 })
+            .fill(canvasMeasureColor())
+            .position({ x: this.sx(this.store.x1) - 4.5, y: this.sy(this.store.y1) - 4.5 })
+            .hitTestBehavior(HitTestMode.None)
+          Circle({ width: 9, height: 9 })
+            .fill(canvasMeasureColor())
+            .position({ x: this.sx(this.store.endX()) - 4.5, y: this.sy(this.store.endY()) - 4.5 })
+            .hitTestBehavior(HitTestMode.None)
+        }
+      }
+
+      // 测量 / 测面积 / 持久参考标尺底部浮条
       if (this.toolActive) {
         Scroll() {
           Row({ space: 8 }) {
             Row() {
               StableSegmentButton({
-                items: [{ text: '测距尺' }, { text: '参考线' }] as [SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
-                selectedIndex: this.store.rulerMode ? 1 : 0,
+                items: [{ text: '测距尺' }, { text: '测面积' }, { text: '参考线' }] as [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
+                selectedIndex: this.store.subModeIndex(),
                 onItemClicked: (idx: number) => {
-                  const wantRuler: boolean = idx === 1;
-                  if (this.store.rulerMode !== wantRuler) {
-                    this.store.rulerMode = wantRuler;
-                    this.store.reset();
-                    draftCanvasEngine.clearTransientPointerVisuals(true);
-                    this.cursorStore.setReadout(wantRuler
-                      ? '参考线：拖拽磁吸边角，松手落水平或竖直标尺'
-                      : '测距：可直接按住拖拉，或单击起点再点终点');
-                  }
+                  this.store.setSubModeByIndex(idx);
+                  draftCanvasEngine.clearTransientPointerVisuals(true);
+                  this.cursorStore.setReadout(idx === 2
+                    ? '参考标尺：拖拽磁吸边角，松手落标尺线'
+                    : (idx === 1 ? '测面积：对角拉框测量宽×高、面积与周长' : '测距：按住拖拉或单击两点测量距离'));
                 },
                 fontColor: COLORS.muted,
                 selectedFontColor: COLORS.primary,
@@ -5225,31 +5448,41 @@ struct MeasureLayer {
                 itemPaddingVertical: 3
               })
             }
-            .width(134)
+            .width(196)
+
+            CanvasModeButton({
+              label: `单位:${this.store.unitModeLabel()}`,
+              active: this.store.unitMode !== 'um',
+              activateAction: () => {
+                this.store.cycleUnitMode();
+              }
+            })
 
             if (!this.store.rulerMode) {
-              Row() {
-                StableSegmentButton({
-                  items: [{ text: '自由角' }, { text: '锁90°' }, { text: '锁45°' }] as [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
-                  selectedIndex: this.store.angleLockIndex(),
-                  onItemClicked: (idx: number) => {
-                    this.store.setAngleLockByIndex(idx);
-                  },
-                  fontColor: COLORS.muted,
-                  selectedFontColor: COLORS.primary,
-                  capsuleBackgroundColor: COLORS.surfaceMuted,
-                  selectedBackgroundColor: COLORS.primarySoft,
-                  fontSizeFp: 11,
-                  capsuleBorderRadius: UI.controlRadius,
-                  buttonMinHeight: 32,
-                  itemMinHeight: 26,
-                  itemPaddingHorizontal: 6,
-                  itemPaddingVertical: 3
-                })
+              if (!this.store.isAreaMode()) {
+                Row() {
+                  StableSegmentButton({
+                    items: [{ text: '自由角' }, { text: '锁90°' }, { text: '锁45°' }] as [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
+                    selectedIndex: this.store.angleLockIndex(),
+                    onItemClicked: (idx: number) => {
+                      this.store.setAngleLockByIndex(idx);
+                    },
+                    fontColor: COLORS.muted,
+                    selectedFontColor: COLORS.primary,
+                    capsuleBackgroundColor: COLORS.surfaceMuted,
+                    selectedBackgroundColor: COLORS.primarySoft,
+                    fontSizeFp: 11,
+                    capsuleBorderRadius: UI.controlRadius,
+                    buttonMinHeight: 32,
+                    itemMinHeight: 26,
+                    itemPaddingHorizontal: 6,
+                    itemPaddingVertical: 3
+                  })
+                }
+                .width(184)
               }
-              .width(184)
 
-              if (this.store.annotations.length > 0 || this.store.pending) {
+              if (this.store.totalMeasurementCount() > 0 || this.store.pending) {
                 CanvasModeButton({
                   label: '撤一条',
                   active: false,
@@ -5259,19 +5492,21 @@ struct MeasureLayer {
                   }
                 })
                 CanvasModeButton({
-                  label: `清空测距 ${this.store.annotations.length}`,
+                  label: `清空测量 ${this.store.totalMeasurementCount()}`,
                   active: false,
                   danger: true,
                   activateAction: () => {
                     const snapshot: MeasureAnnotation[] = this.store.annotations.slice();
+                    const snapshotBoxes: MeasureAreaAnnotation[] = this.store.areaBoxes.slice();
+                    const total: number = snapshot.length + snapshotBoxes.length;
                     this.store.clearAnnotations();
                     draftCanvasEngine.clearTransientPointerVisuals(true);
                     this.cursorStore.setReadout('');
-                    if (snapshot.length > 0) {
-                      showAppSnackBar(this.getUIContext(), `已清空 ${snapshot.length} 条测距标注`, {
+                    if (total > 0) {
+                      showAppSnackBar(this.getUIContext(), `已清空 ${total} 条测量标注`, {
                         actionText: '撤销',
                         onAction: () => {
-                          this.store.restoreAnnotations(snapshot);
+                          this.store.restoreAnnotations(snapshot, snapshotBoxes);
                         }
                       });
                     }
@@ -5281,7 +5516,7 @@ struct MeasureLayer {
             } else {
               Row() {
                 StableSegmentButton({
-                  items: [{ text: '自动' }, { text: '水平' }, { text: '竖直' }] as [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
+                  items: [{ text: '自动' }, { text: '水平' }, { text: '竖直' }, { text: '十字' }] as [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
                   selectedIndex: this.store.rulerOrientationIndex(),
                   onItemClicked: (idx: number) => {
                     this.store.setRulerOrientationByIndex(idx);
@@ -5298,7 +5533,7 @@ struct MeasureLayer {
                   itemPaddingVertical: 3
                 })
               }
-              .width(168)
+              .width(212)
 
               if (this.store.rulers.length > 0) {
                 CanvasModeButton({
@@ -5399,9 +5634,9 @@ struct MeasureLayer {
     const dy: number = ann.y2 - ann.y1;
     const d: number = Math.hypot(dx, dy);
     if (Math.abs(dx) < 1e-6 || Math.abs(dy) < 1e-6) {
-      return `${umText(d)} µm`;
+      return this.store.formatLength(d);
     }
-    return `${umText(d)} µm (Δx ${umText(dx)}, Δy ${umText(dy)})`;
+    return `${this.store.formatLength(d)} (Δx ${umText(dx)}, Δy ${umText(dy)})`;
   }
 
   private visibleAnnotations(): MeasureAnnotation[] {
@@ -5488,6 +5723,7 @@ struct MeasureLayer {
  */
 @Component
 struct VertexLayer {
+  @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
   @ObjectLink store: VertexStore;
   @Prop zoomPercent: number = 100;
   @Prop viewOffsetX: number = 0;
@@ -5798,6 +6034,7 @@ interface VertexBox {
 
 @Component
 struct CanvasModeButton {
+  @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
   @Prop label: string = '';
   @Prop active: boolean = false;
   @Prop danger: boolean = false;
@@ -5824,6 +6061,7 @@ struct CanvasModeButton {
 
 @Component
 struct CanvasHud {
+  @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
   @Prop toolLabel: string = '';
   @Prop selectedLayerNumber: number = 1;
   @Prop selectedDatatype: number = 0;
@@ -5890,7 +6128,7 @@ struct CanvasHud {
             .fill(this.selectedLayerColor)
           Text(`L${this.selectedLayerNumber}/D${this.selectedDatatype}` + (this.selectedLayerLocked ? ' 锁/隐' : ' ▾'))
             .fontSize(11)
-            .fontColor(this.selectedLayerLocked ? COLORS.danger : (isWhiteCanvas() ? COLORS.ink : '#FFFFFF'))
+            .fontColor(this.selectedLayerLocked ? COLORS.danger : (!this.effectiveIsDark ? '#111827' : '#FFFFFF'))
             .fontFamily(FONT_MONO)
         }
         .alignItems(VerticalAlign.Center)

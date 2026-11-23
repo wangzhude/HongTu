@@ -8,6 +8,19 @@ import { feedbackCurve, MOTION, motionDuration, MotionSettings, USER_REDUCE_MOTI
 import { buildLuminousMenuOptions } from '../../store/LuminousSurfaceOptions';
 import { hongTuThemeState, LuminousLightLevel } from '../../store/ThemeStore';
 import { WorkbenchIcon } from './WorkbenchIcon';
+import {
+  DpiScalePreset,
+  HONGTU_AUTO_LANDSCAPE_DESKTOP_KEY,
+  HONGTU_CUSTOM_DPI_SCALE_KEY,
+  HONGTU_DPI_PRESETS,
+  HONGTU_EFFECTIVE_DPI_SCALE_KEY,
+  HONGTU_FORCE_DESKTOP_MODE_KEY,
+  HONGTU_WINDOW_IS_LANDSCAPE_KEY,
+  setWorkspaceAutoLandscapeDesktop,
+  setWorkspaceCustomDpiScale,
+  setWorkspaceForceDesktopMode,
+  toggleWorkspaceOrientation
+} from '../../common/WorkspaceAdaptation';
 
 /**
  * 鸿图主界面标题栏（四层沉浸光感材质 × 按模块收敛控件 × 原生菜单收口）
@@ -17,6 +30,11 @@ import { WorkbenchIcon } from './WorkbenchIcon';
 @Component
 export struct WorkbenchTitleBar {
   @StorageProp(USER_REDUCE_MOTION_KEY) userReduceMotion: boolean = false;
+  @StorageProp(HONGTU_CUSTOM_DPI_SCALE_KEY) customDpiScale: number = 0;
+  @StorageProp(HONGTU_EFFECTIVE_DPI_SCALE_KEY) effectiveDpiScale: number = 1;
+  @StorageProp(HONGTU_AUTO_LANDSCAPE_DESKTOP_KEY) autoLandscapeDesktop: boolean = true;
+  @StorageProp(HONGTU_FORCE_DESKTOP_MODE_KEY) forceDesktopMode: boolean = false;
+  @StorageProp(HONGTU_WINDOW_IS_LANDSCAPE_KEY) windowIsLandscape: boolean = false;
   @Prop showAiPanel: boolean = false;
   @Prop aiRunning: boolean = false;
   @Prop aiPending: boolean = false;
@@ -73,6 +91,94 @@ export struct WorkbenchTitleBar {
       return '数据';
     }
     return '版图';
+  }
+
+  private dpiBadgeLabel(): string {
+    const pct: number = Math.round((this.effectiveDpiScale > 0 ? this.effectiveDpiScale : 1) * 100);
+    return `${pct}%`;
+  }
+
+  private isPresetSelected(presetScale: number): boolean {
+    if (presetScale === 0) {
+      return this.customDpiScale === 0;
+    }
+    return Math.abs(this.customDpiScale - presetScale) < 0.01;
+  }
+
+  private dpiMenuSizing(): MenuItemOptions[] {
+    const items: MenuItemOptions[] = HONGTU_DPI_PRESETS.map((p: DpiScalePreset): MenuItemOptions => ({
+      content: p.scale === 0 ? `${p.label}（当前 ${this.dpiBadgeLabel()}）` : `缩放 ${p.label}`,
+      labelInfo: p.desc,
+      symbolStartIcon: menuIcon('view'),
+      symbolEndIcon: menuCheckIcon(this.isPresetSelected(p.scale))
+    }));
+    items.push({
+      content: '旋转横屏自动切换 PC 桌面布局',
+      symbolStartIcon: menuIcon('layout'),
+      symbolEndIcon: menuCheckIcon(this.autoLandscapeDesktop)
+    });
+    items.push({
+      content: this.windowIsLandscape ? '切换回竖屏触控方向' : '一键横屏进入 PC 桌面布局',
+      symbolStartIcon: menuIcon('reset')
+    });
+    items.push({
+      content: '竖屏也强制启用 PC 桌面布局',
+      symbolStartIcon: menuIcon('sidebar'),
+      symbolEndIcon: menuCheckIcon(this.forceDesktopMode)
+    });
+    return items;
+  }
+
+  @Builder
+  private dpiQuickMenu() {
+    Menu() {
+      MenuItemGroup({ header: '界面缩放 (DPI) 快捷调节' }) {
+        ForEach(HONGTU_DPI_PRESETS, (preset: DpiScalePreset) => {
+          MenuItem({
+            content: preset.scale === 0 ? `${preset.label}（当前 ${this.dpiBadgeLabel()}）` : `缩放 ${preset.label}`,
+            labelInfo: preset.desc,
+            symbolStartIcon: menuIcon('view'),
+            symbolEndIcon: menuCheckIcon(this.isPresetSelected(preset.scale))
+          })
+            .attributeModifier(MENU_ITEM_STYLE)
+            .selected(this.isPresetSelected(preset.scale))
+            .onClick(() => {
+              setWorkspaceCustomDpiScale(preset.scale);
+            })
+        }, (preset: DpiScalePreset): string => `dpi_${preset.scale}_${this.customDpiScale}_${this.effectiveDpiScale}`)
+      }
+      MenuItemGroup({ header: '横竖屏与 PC 工作台布局' }) {
+        MenuItem({
+          content: '旋转横屏自动切换 PC 桌面布局',
+          symbolStartIcon: menuIcon('layout'),
+          symbolEndIcon: menuCheckIcon(this.autoLandscapeDesktop)
+        })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .selected(this.autoLandscapeDesktop)
+          .onClick(() => {
+            setWorkspaceAutoLandscapeDesktop(!this.autoLandscapeDesktop);
+          })
+        MenuItem({
+          content: this.windowIsLandscape ? '切换回竖屏触控方向' : '一键横屏进入 PC 桌面布局',
+          symbolStartIcon: menuIcon('reset')
+        })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => {
+            toggleWorkspaceOrientation();
+          })
+        MenuItem({
+          content: '竖屏也强制启用 PC 桌面布局',
+          symbolStartIcon: menuIcon('sidebar'),
+          symbolEndIcon: menuCheckIcon(this.forceDesktopMode)
+        })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .selected(this.forceDesktopMode)
+          .onClick(() => {
+            setWorkspaceForceDesktopMode(!this.forceDesktopMode);
+          })
+      }
+    }
+    .attributeModifier(menuStyle(this.dpiMenuSizing(), this.getUIContext()))
   }
 
   @Builder
@@ -365,13 +471,35 @@ export struct WorkbenchTitleBar {
       .bindTips('AI 助手')
       .onClick(() => this.toggleAiAction())
 
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 5 }) {
+          WorkbenchIcon({ name: 'dpi', iconSize: 15, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.ink })
+          Text(`DPI ${this.dpiBadgeLabel()}`)
+            .fontSize(11)
+            .fontFamily(FONT_MONO)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.customDpiScale > 0 ? COLORS.primary : COLORS.ink)
+        }.alignItems(VerticalAlign.Center)
+      }
+      .id('titlebar-dpi-quick-btn')
+      .height(UI.controlHeight)
+      .padding({ left: 10, right: 10 })
+      .margin({ left: 8 })
+      .backgroundColor(this.customDpiScale > 0 ? COLORS.primarySoft : COLORS.surfaceMuted)
+      .border({ width: 1, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.border })
+      .borderRadius(UI.controlRadius)
+      .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+      .accessibilityText('快捷调节界面 DPI 缩放与横竖屏布局')
+      .bindTips('快捷调节界面 DPI 缩放与横屏桌面布局')
+      .bindMenu(this.dpiQuickMenu, buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius))
+
       Button({ type: ButtonType.Circle }) {
         WorkbenchIcon({ name: 'appearance', iconSize: 18, color: COLORS.ink })
       }
       .width(UI.controlHeight)
       .height(UI.controlHeight)
       .padding(0)
-      .margin({ left: 10 })
+      .margin({ left: 8 })
       .backgroundColor(COLORS.surfaceMuted)
       .border({ width: 1, color: COLORS.border })
       .attributeModifier(hongTuThemeState.luminousPointLightModifier())
@@ -416,10 +544,30 @@ export struct WorkbenchTitleBar {
         .layoutWeight(1)
         .maxLines(1)
       GhostCommand({ icon: 'open', label: '打开', showLabel: !this.isCompact, activateAction: this.openFileAction })
-      if (this.currentModule !== WorkModule.Data) {
+      if (this.currentModule !== WorkModule.Data && !this.isCompact) {
         GhostCommand({ icon: 'search', label: '搜索命令', showLabel: false, activateAction: this.commandSearchAction })
+      }
+      if (this.currentModule !== WorkModule.Data) {
         GhostCommand({ icon: 'save', label: '保存', showLabel: false, activateAction: this.saveAction })
       }
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 3 }) {
+          WorkbenchIcon({ name: 'dpi', iconSize: 15, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.ink })
+          Text(this.dpiBadgeLabel())
+            .fontSize(10)
+            .fontFamily(FONT_MONO)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.customDpiScale > 0 ? COLORS.primary : COLORS.ink)
+        }.alignItems(VerticalAlign.Center)
+      }
+      .id('touchbar-dpi-quick-btn')
+      .height(UI.controlHeight)
+      .padding({ left: 8, right: 8 })
+      .backgroundColor(this.customDpiScale > 0 ? COLORS.primarySoft : COLORS.surfaceMuted)
+      .border({ width: 1, color: this.customDpiScale > 0 ? COLORS.primary : COLORS.border })
+      .borderRadius(999)
+      .accessibilityText('DPI 缩放与横屏桌面布局')
+      .bindMenu(this.dpiQuickMenu, buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius))
       Button({ type: ButtonType.Circle }) {
         if (this.aiRunning) {
           LoadingProgress().width(16).height(16).color(COLORS.primary)

@@ -1,10 +1,10 @@
 /**
- * 鸿图 UI 状态存储（Phase 6 全工具链与双技能合规增强版）
+ * 鸿图 UI 状态存储（v7 全工具链增强版）
  *
  * 升级亮点：
- * 1. MeasureStore 支持多条持久测量标注（MeasureAnnotation[]），测完一条自动留存画布，支持「撤一条」、整批清空与一键撤销恢复；
- * 2. 新增触屏友好的测量锁角（自由角 / 锁90° / 锁45°）与标尺定向（自动 / 水平 / 竖直）索引映射，直连受控原生 `StableSegmentButton`；
- * 3. 标尺拖拽期间实时更新 liveX/liveY 磁吸落点，松手按实时磁吸位置落线而非按下瞬间死坐标。
+ * 1. MeasureStore 支持三类测量子模式：两点测距（distance）、拉框测面积（area：实时 W×H + 面积 + 周长）、持久参考标尺（ruler）；
+ * 2. 新增测量读数单位切换（µm / nm / 双单位）与十字双轴标尺（crosshair）一键落位；
+ * 3. 100% 兼容既有 rulerMode、annotations、rulers 接口。
  *
  * This file is part of HongTu, licensed under GPLv3.
  */
@@ -60,16 +60,31 @@ export interface MeasureAnnotation {
   y2: number;
 }
 
+/** 已锁定的矩形区域面积测量标注（世界坐标 nm，切换工具保留） */
+export interface MeasureAreaAnnotation {
+  id: number;
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+export type MeasureSubMode = 'distance' | 'area' | 'ruler';
+export type MeasureUnitMode = 'um' | 'nm' | 'dual';
 export type MeasureAngleLock = 'free' | 'ortho90' | 'diag45';
-export type RulerOrientationMode = 'auto' | 'horizontal' | 'vertical';
+export type RulerOrientationMode = 'auto' | 'horizontal' | 'vertical' | 'crosshair';
 
 /**
- * 测量 / 标尺状态存储（多标注持久留存 + 受控分段锁角 + 实时磁吸标尺）
+ * 测量 / 面积 / 标尺状态存储（多标注持久留存 + 单位切换 + 十字标尺）
  */
 @Observed
 export class MeasureStore {
-  /** true = 标尺模式（放置持久参考线），false = 两点测量模式 */
+  /** true = 标尺模式（放置持久参考线），false = 测距或测面积模式 */
   rulerMode: boolean = false;
+  /** 细分模式：distance=两点测距, area=拉框测面积, ruler=持久参考线 */
+  subMode: MeasureSubMode = 'distance';
+  /** 读数单位：um=微米, nm=纳米, dual=微米+纳米双显 */
+  unitMode: MeasureUnitMode = 'um';
   /** 已落下第一点，等待第二点 */
   pending: boolean = false;
   /** 起点（nm） */
@@ -89,10 +104,81 @@ export class MeasureStore {
   rulerOrientation: RulerOrientationMode = 'auto';
   /** 多条已锁定测量尺寸标注集合 */
   annotations: MeasureAnnotation[] = [];
+  /** 多个已锁定区域面积测量标注集合 */
+  areaBoxes: MeasureAreaAnnotation[] = [];
   /** 持久标尺线集合 */
   rulers: RulerLine[] = [];
   private nextRulerId: number = 1;
   private nextAnnotationId: number = 1;
+  private nextAreaBoxId: number = 1;
+
+  setSubMode(mode: MeasureSubMode): void {
+    this.subMode = mode;
+    this.rulerMode = mode === 'ruler';
+    this.reset();
+  }
+
+  subModeIndex(): number {
+    if (this.rulerMode || this.subMode === 'ruler') return 2;
+    if (this.subMode === 'area') return 1;
+    return 0;
+  }
+
+  setSubModeByIndex(idx: number): void {
+    if (idx === 2) {
+      this.setSubMode('ruler');
+    } else if (idx === 1) {
+      this.setSubMode('area');
+    } else {
+      this.setSubMode('distance');
+    }
+  }
+
+  isAreaMode(): boolean {
+    return !this.rulerMode && this.subMode === 'area';
+  }
+
+  cycleUnitMode(): MeasureUnitMode {
+    if (this.unitMode === 'um') {
+      this.unitMode = 'nm';
+    } else if (this.unitMode === 'nm') {
+      this.unitMode = 'dual';
+    } else {
+      this.unitMode = 'um';
+    }
+    return this.unitMode;
+  }
+
+  unitModeLabel(): string {
+    if (this.unitMode === 'nm') return 'nm';
+    if (this.unitMode === 'dual') return 'µm+nm';
+    return 'µm';
+  }
+
+  formatLength(nmVal: number): string {
+    const roundedNm: number = Math.round(nmVal * 10) / 10;
+    const nmStr: string = Number.isInteger(roundedNm) ? String(roundedNm) : roundedNm.toFixed(1);
+    if (this.unitMode === 'nm') {
+      return `${nmStr} nm`;
+    }
+    if (this.unitMode === 'dual') {
+      return `${umText(nmVal)} µm (${nmStr} nm)`;
+    }
+    return `${umText(nmVal)} µm`;
+  }
+
+  formatArea(nm2Val: number): string {
+    const absNm2: number = Math.abs(nm2Val);
+    const um2: number = absNm2 / 1e6;
+    const um2Str: string = um2 >= 100 ? um2.toFixed(2) : (um2 >= 1 ? um2.toFixed(3) : um2.toFixed(4));
+    if (this.unitMode === 'nm') {
+      return `${Math.round(absNm2)} nm²`;
+    }
+    if (this.unitMode === 'dual') {
+      return `${um2Str} µm² (${Math.round(absNm2)} nm²)`;
+    }
+    return `${um2Str} µm²`;
+  }
 
   /** 落起点开启新一次测量（保留历史 annotations 与持久标尺） */
   begin(x: number, y: number): void {
@@ -110,7 +196,7 @@ export class MeasureStore {
     this.liveY = y;
   }
 
-  /** 落终点完成一次测量，并推入持久测量标注列表 */
+  /** 落终点完成一次测量（自动按当前子模式归入测距线或测面积框） */
   commit(x: number, y: number): void {
     this.x2 = x;
     this.y2 = y;
@@ -118,6 +204,25 @@ export class MeasureStore {
     this.liveY = y;
     this.hasEnd = true;
     this.pending = false;
+    if (this.isAreaMode()) {
+      const minX: number = Math.min(this.x1, x);
+      const maxX: number = Math.max(this.x1, x);
+      const minY: number = Math.min(this.y1, y);
+      const maxY: number = Math.max(this.y1, y);
+      if (maxX - minX > 1e-6 && maxY - minY > 1e-6) {
+        const box: MeasureAreaAnnotation = {
+          id: this.nextAreaBoxId++,
+          minX: minX,
+          minY: minY,
+          maxX: maxX,
+          maxY: maxY,
+        };
+        const nextBoxes: MeasureAreaAnnotation[] = this.areaBoxes.slice();
+        nextBoxes.push(box);
+        this.areaBoxes = nextBoxes;
+      }
+      return;
+    }
     if (Math.hypot(x - this.x1, y - this.y1) > 1e-6) {
       const item: MeasureAnnotation = {
         id: this.nextAnnotationId++,
@@ -149,13 +254,21 @@ export class MeasureStore {
       this.reset();
       return;
     }
+    if (this.isAreaMode() && this.areaBoxes.length > 0) {
+      this.areaBoxes = this.areaBoxes.slice(0, -1);
+      this.hasEnd = false;
+      return;
+    }
     if (this.annotations.length > 0) {
       this.annotations = this.annotations.slice(0, -1);
+      this.hasEnd = false;
+    } else if (this.areaBoxes.length > 0) {
+      this.areaBoxes = this.areaBoxes.slice(0, -1);
       this.hasEnd = false;
     }
   }
 
-  restoreAnnotations(items: MeasureAnnotation[]): void {
+  restoreAnnotations(items: MeasureAnnotation[], boxes?: MeasureAreaAnnotation[]): void {
     this.annotations = items.map((ann: MeasureAnnotation): MeasureAnnotation => ({
       id: ann.id,
       x1: ann.x1,
@@ -167,12 +280,32 @@ export class MeasureStore {
       (next: number, ann: MeasureAnnotation): number => Math.max(next, ann.id + 1),
       1
     );
+    if (boxes !== undefined) {
+      this.areaBoxes = boxes.map((b: MeasureAreaAnnotation): MeasureAreaAnnotation => ({
+        id: b.id,
+        minX: b.minX,
+        minY: b.minY,
+        maxX: b.maxX,
+        maxY: b.maxY,
+      }));
+      this.nextAreaBoxId = this.areaBoxes.reduce(
+        (next: number, b: MeasureAreaAnnotation): number => Math.max(next, b.id + 1),
+        1
+      );
+    }
+  }
+
+  totalMeasurementCount(): number {
+    return this.annotations.length + this.areaBoxes.length;
   }
 
   clearAnnotations(): void {
     this.reset();
     if (this.annotations.length > 0) {
       this.annotations = [];
+    }
+    if (this.areaBoxes.length > 0) {
+      this.areaBoxes = [];
     }
   }
 
@@ -214,6 +347,8 @@ export class MeasureStore {
       this.rulerOrientation = 'horizontal';
     } else if (this.rulerOrientation === 'horizontal') {
       this.rulerOrientation = 'vertical';
+    } else if (this.rulerOrientation === 'vertical') {
+      this.rulerOrientation = 'crosshair';
     } else {
       this.rulerOrientation = 'auto';
     }
@@ -223,6 +358,7 @@ export class MeasureStore {
   rulerOrientationIndex(): number {
     if (this.rulerOrientation === 'horizontal') return 1;
     if (this.rulerOrientation === 'vertical') return 2;
+    if (this.rulerOrientation === 'crosshair') return 3;
     return 0;
   }
 
@@ -231,6 +367,8 @@ export class MeasureStore {
       this.rulerOrientation = 'horizontal';
     } else if (index === 2) {
       this.rulerOrientation = 'vertical';
+    } else if (index === 3) {
+      this.rulerOrientation = 'crosshair';
     } else {
       this.rulerOrientation = 'auto';
     }
@@ -239,6 +377,7 @@ export class MeasureStore {
   rulerOrientationLabel(): string {
     if (this.rulerOrientation === 'horizontal') return '水平线';
     if (this.rulerOrientation === 'vertical') return '竖直线';
+    if (this.rulerOrientation === 'crosshair') return '十字标尺';
     return '自动定向';
   }
 
@@ -264,7 +403,11 @@ export class MeasureStore {
     return Math.sqrt(dx * dx + dy * dy);
   }
 
-  /** 当前是否有正在拖拽瞄准的活动测量线 */
+  areaNm2(): number {
+    return Math.abs(this.dxNm() * this.dyNm());
+  }
+
+  /** 当前是否有正在拖拽瞄准的活动测量线/框 */
   hasSegment(): boolean {
     return this.pending;
   }
@@ -275,6 +418,13 @@ export class MeasureStore {
     const line: RulerLine = { id: this.nextRulerId++, vertical: vertical, pos: pos };
     const next: RulerLine[] = this.rulers.slice();
     next.push(line);
+    this.rulers = next;
+  }
+
+  addCrosshairRuler(xPos: number, yPos: number): void {
+    const next: RulerLine[] = this.rulers.slice();
+    next.push({ id: this.nextRulerId++, vertical: true, pos: xPos });
+    next.push({ id: this.nextRulerId++, vertical: false, pos: yPos });
     this.rulers = next;
   }
 
@@ -293,6 +443,11 @@ export class MeasureStore {
     if (this.rulers.length > 0) {
       this.rulers = [];
     }
+  }
+
+  clearAll(): void {
+    this.clearAnnotations();
+    this.clearRulers();
   }
 
   rulerSpacingNm(vertical: boolean): number {
@@ -314,10 +469,10 @@ export class MeasureStore {
     }
     const parts: string[] = [];
     if (v > 0) {
-      parts.push(`竖直间距 ${umText(v)}µm`);
+      parts.push(`竖直间距 ${this.formatLength(v)}`);
     }
     if (h > 0) {
-      parts.push(`水平间距 ${umText(h)}µm`);
+      parts.push(`水平间距 ${this.formatLength(h)}`);
     }
     return `标尺 ${this.rulers.length} 条 · ${parts.join(' ')}`;
   }

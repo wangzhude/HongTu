@@ -420,7 +420,45 @@ class AssistantSDK(unittest.IsolatedAsyncioTestCase):
             chunks = [chunk async for chunk in mod.encoded_stream(request_payload())]
         events = parse_sse(chunks)
         self.assertFalse(any(event.get("name") == "hongtu.commands" for event in events))
-        self.assertTrue(any(event["type"] == "RUN_ERROR" for event in events))
+        self.assertTrue(any(event["type"] == "RUN_ERROR" and "maxTokens" in event.get("message", "") for event in events))
+
+    async def test_long_thinking_length_truncation_without_tool_call_recovers_via_retry(self):
+        calls = 0
+        def sse(data):
+            return "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                ev1 = {"id": "t1", "object": "chat.completion.chunk", "created": 1, "model": "deepseek-v4-flash",
+                       "choices": [{"index": 0, "delta": {"reasoning_content": "长思考被单次输出预算截断"}, "finish_reason": None}]}
+                ev2 = {"id": "t1", "object": "chat.completion.chunk", "created": 1, "model": "deepseek-v4-flash",
+                       "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]}
+                wire = sse(ev1) + sse(ev2) + "data: [DONE]\n\n"
+            else:
+                ev1 = {"id": "t2", "object": "chat.completion.chunk", "created": 2, "model": "deepseek-v4-flash",
+                       "choices": [{"index": 0, "delta": {"content": "已精简思考并直接给出结论。"}, "finish_reason": None}]}
+                ev2 = {"id": "t2", "object": "chat.completion.chunk", "created": 2, "model": "deepseek-v4-flash",
+                       "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+                wire = sse(ev1) + sse(ev2) + "data: [DONE]\n\n"
+            return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=wire.encode())
+        client = AsyncOpenAI(base_url="https://fixture.invalid/v1", api_key="fixture", max_retries=0,
+                             http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        model = OpenAIChatModel("deepseek-v4-flash", provider=DeepSeekProvider(openai_client=client))
+        with patch.object(mod, "_model_client", return_value=(model, client, {})):
+            chunks = [chunk async for chunk in mod.encoded_stream(request_payload("解释版图结构"))]
+        events = parse_sse(chunks)
+        self.assertEqual(calls, 2)
+        self.assertTrue(any(event["type"] == "RUN_FINISHED" for event in events))
+        self.assertFalse(any(event["type"] == "RUN_ERROR" for event in events))
+
+    async def test_zero_tabs_error_clearly_reports_full_workspace_tabs(self):
+        agent = mod.build_agent(tool_model("create_cmos_inverter", {}))
+        chunks, state = await collect(agent, request_payload("画一个反相器", tabs=0))
+        joined = "".join(chunks)
+        self.assertFalse(state.artifact_ids)
+        self.assertIn("标签页容量已满", joined)
+        self.assertNotIn("已经生成的结果", joined)
 
 
 class AssistantCompaction(unittest.IsolatedAsyncioTestCase):

@@ -40,6 +40,8 @@ import { editService } from '../../services/EditService';
 import { WorkbenchIcon } from './WorkbenchIcon';
 import { PanelHeading } from './PanelHeading';
 import { AiMarkdownBody } from './AiMarkdownBody';
+import { DshDesign, DshIcon, DshPermissionMode, DshPermissionPicker, dshPermissionShortLabel } from '../dsh/DshDesign';
+import { DshProcessView, DshRunningTail, DshTaskDock, DshTurnChangesCard, extractLatestPlanFromSteps } from '../dsh/DshProcessView';
 import {
   AiExtractedThinking,
   AiSlashCommandSpec,
@@ -71,11 +73,6 @@ import { UI } from '../../common/UiTokens';
 import { motionDuration, MOTION, panelTransition } from '../../common/Motion';
 import { cloneStructured, cloneUiLayerModel } from '../../common/CloneUtils';
 
-interface AiPlanStepView {
-  id: string;
-  content: string;
-  status: string;
-}
 
 interface AiPendingFieldRow {
   label: string;
@@ -96,6 +93,12 @@ export struct AiAssistantPanel {
   openAgentConnectionAction: () => void = () => {};
   promptAction: (prompt: string, resumeTask?: boolean, forceReadOnly?: boolean) => void = () => {};
   @Prop sessionMode: 'agent' | 'readonly' = 'agent';
+  @Prop permissionMode: DshPermissionMode = 'auto';
+  changePermissionModeAction: (mode: DshPermissionMode) => void = (_m: DshPermissionMode) => {};
+  @Prop turnChangeSummary: string = '';
+  @Prop runStartedAt: number = 0;
+  fitCanvasAction: () => void = () => {};
+  @State showPermissionPicker: boolean = false;
   toggleSessionModeAction: () => void = () => {};
   /** 当前上下文摘要（由 Index 构造传入，替代硬编码） */
   @Prop contextSummary: string = '';
@@ -184,8 +187,8 @@ export struct AiAssistantPanel {
   @State modelNameText: string = 'hongtu-demo';
   @State apiKeyText: string = '';
   @State temperatureText: string = '0.3';
-  @State maxTokensText: string = '2048';
-  @State timeoutSecondsText: string = '30';
+  @State maxTokensText: string = '16384';
+  @State timeoutSecondsText: string = '300';
   @State contextWindowText: string = '32768';
   @State compressionThresholdText: string = '80';
   @State autoCompressValue: boolean = false;
@@ -746,6 +749,11 @@ export struct AiAssistantPanel {
     if (preset.config.maxTokens !== undefined) {
       this.maxTokensText = String(preset.config.maxTokens);
     }
+    if (preset.config.timeoutMs !== undefined) {
+      this.timeoutSecondsText = String(Math.round(preset.config.timeoutMs / 1000));
+    } else if ((Number(this.timeoutSecondsText) || 0) < 300) {
+      this.timeoutSecondsText = '300';
+    }
     if (this.providerValue === AiProvider.DEMO_MODE) {
       this.apiKeyText = '';
     }
@@ -758,6 +766,10 @@ export struct AiAssistantPanel {
     const curMax: number = Number(this.maxTokensText.trim());
     if (Number.isFinite(curMax) && curMax + 6000 >= tokens) {
       this.maxTokensText = String(Math.max(512, tokens - 6500));
+    } else if (tokens >= 200000 && (!Number.isFinite(curMax) || curMax < 16384)) {
+      this.maxTokensText = '32768';
+    } else if (tokens >= 65536 && (!Number.isFinite(curMax) || curMax < 8192)) {
+      this.maxTokensText = '16384';
     }
   }
 
@@ -2448,7 +2460,14 @@ export struct AiAssistantPanel {
             .layoutWeight(1)
         }.width('100%').height(20).alignItems(VerticalAlign.Center).margin({ bottom: 2 })
 
-        this.LiveProcessTimeline()
+        DshProcessView({
+          turnKey: `live-${this.activeConversationId}`,
+          isLive: true,
+          defaultExpanded: true,
+          steps: this.liveSteps,
+          activeThinkId: this.liveActiveThinkId,
+          activeThinkText: this.liveActiveThinkText
+        })
 
         if ((this.liveAnswerText || splitInlineThinking(this.streamingText, this.reasoningText).answer).length > 0) {
           AiMarkdownBody({
@@ -2460,6 +2479,13 @@ export struct AiAssistantPanel {
           })
             .width('100%').padding({ left: 2, right: 2, top: 4, bottom: 4 })
             .backgroundColor(Color.Transparent).borderRadius(RADIUS.md)
+        }
+
+        if (this.liveRunning || this.isLoading) {
+          DshRunningTail({
+            startedAt: this.runStartedAt > 0 ? this.runStartedAt : Date.now(),
+            statusHint: this.liveStatusText || this.generationStatus
+          })
         }
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
     }.width('100%').justifyContent(FlexAlign.Start).padding({ top: 6, bottom: 6 })
@@ -2511,8 +2537,15 @@ export struct AiAssistantPanel {
             }
           }.width('100%').alignItems(VerticalAlign.Center).margin({ bottom: 2 })
 
-          if (msg.role === ChatRole.ASSISTANT) {
-            this.SavedProcessTimeline(msg)
+          if (msg.role === ChatRole.ASSISTANT && resolveMessageProcessSteps(msg).length > 0) {
+            DshProcessView({
+              turnKey: `saved-${msg.timestamp}`,
+              isLive: false,
+              defaultExpanded: false,
+              steps: resolveMessageProcessSteps(msg),
+              activeThinkId: '',
+              activeThinkText: ''
+            })
           }
 
           if (resolveMessageFinalAnswer(msg).length > 0) {
@@ -3867,7 +3900,7 @@ export struct AiAssistantPanel {
           Text('输出快捷档').fontSize(11).fontColor(COLORS.muted)
           Scroll() {
             Row({ space: 6 }) {
-              ForEach([2048, 4096, 8192, 16384, 32768], (outTok: number) => {
+              ForEach([2048, 4096, 8192, 16384, 32768, 65536], (outTok: number) => {
                 Button(formatCompactTokens(outTok), { type: ButtonType.Normal })
                   .height(24).padding({ left: 8, right: 8 }).fontSize(11)
                   .fontColor(Number(this.maxTokensText) === outTok ? COLORS.primary : COLORS.muted)
@@ -4591,7 +4624,25 @@ export struct AiAssistantPanel {
       }
       this.DesktopConversation()
 
-      // DSH-Harmony Docked Approval Card pinned right above the input dock
+      // DSH-Harmony Task Progress Dock + Turn Changes Receipt + Docked Approval Card
+      if (!this.showConversations && !this.showContext && !this.showSettings &&
+        extractLatestPlanFromSteps(this.isLoading ? this.liveSteps : (this.messages.length > 0 ? resolveMessageProcessSteps(this.messages[this.messages.length - 1]) : [])).length > 0) {
+        Column() {
+          DshTaskDock({
+            steps: extractLatestPlanFromSteps(this.isLoading ? this.liveSteps : (this.messages.length > 0 ? resolveMessageProcessSteps(this.messages[this.messages.length - 1]) : []))
+          })
+        }.width('100%').padding({ left: 12, right: 12, bottom: 4 })
+      }
+      if (!this.showConversations && !this.showContext && !this.showSettings && !this.isLoading && this.turnChangeSummary.length > 0) {
+        Column() {
+          DshTurnChangesCard({
+            summaryText: this.turnChangeSummary,
+            canUndo: this.canUndo,
+            onFitView: () => { this.fitCanvasAction(); },
+            onUndo: () => { this.undoAction(); }
+          })
+        }.width('100%').padding({ left: 12, right: 12, bottom: 2 })
+      }
       if (!this.showConversations && !this.showContext && !this.showSettings && this.pendingSummary.length > 0) {
         Column() {
           this.PendingChangeCard()
@@ -4672,27 +4723,35 @@ export struct AiAssistantPanel {
             Row({ space: 4 }) {
               Button({ type: ButtonType.Normal }) {
                 Row({ space: 4 }) {
-                  Circle({ width: 6, height: 6 })
-                    .fill(this.sessionMode === 'readonly' ? COLORS.warning : COLORS.primary)
-                  Text(this.sessionMode === 'readonly' ? '只读' : 'Agent')
+                  DshIcon({
+                    glyph: this.permissionMode === 'readonly'
+                      ? 'permission-read-only'
+                      : (this.permissionMode === 'review' ? 'permission-workspace-write' : 'permission-full-access'),
+                    glyphSize: 12,
+                    color: this.permissionMode === 'readonly' ? COLORS.warning : COLORS.primary
+                  })
+                  Text(dshPermissionShortLabel(this.permissionMode))
                     .fontSize(11)
                     .fontWeight(FontWeight.Medium)
-                    .fontColor(this.sessionMode === 'readonly' ? COLORS.warning : COLORS.primary)
+                    .fontColor(this.permissionMode === 'readonly' ? COLORS.warning : COLORS.primary)
                 }.alignItems(VerticalAlign.Center)
               }
               .id('ai-mode-toggle-btn')
               .height(26)
               .padding({ left: 8, right: 8 })
-              .backgroundColor(this.sessionMode === 'readonly' ? withAlpha(COLORS.warning, 0.14) : COLORS.primarySoft)
+              .backgroundColor(this.permissionMode === 'readonly' ? withAlpha(COLORS.warning, 0.14) : COLORS.primarySoft)
               .borderRadius(RADIUS.capsule)
               .enabled(!this.isLoading && !this.configBusy)
-              .accessibilityText('切换 Agent 编辑模式与只读问答模式')
-              .onClick(() => this.toggleSessionModeAction())
+              .accessibilityText('选择 Agent 执行权限')
+              .onClick(() => {
+                this.showQuickModelPicker = false;
+                this.showPermissionPicker = !this.showPermissionPicker;
+              })
 
               Button({ type: ButtonType.Normal }) {
                 Row({ space: 3 }) {
                   WorkbenchIcon({ name: 'think', iconSize: 12, color: (aiService.getConfig().reasoningEffort ?? 'auto') === 'none' ? COLORS.muted : COLORS.primary })
-                  Text(`思考·${reasoningEffortLabel(aiService.getConfig().reasoningEffort)}`)
+                  Text(this.isCompact ? reasoningEffortLabel(aiService.getConfig().reasoningEffort) : `思考·${reasoningEffortLabel(aiService.getConfig().reasoningEffort)}`)
                     .fontSize(11)
                     .fontColor((aiService.getConfig().reasoningEffort ?? 'auto') === 'none' ? COLORS.muted : COLORS.ink)
                 }.alignItems(VerticalAlign.Center)
@@ -4720,14 +4779,16 @@ export struct AiAssistantPanel {
               .accessibilityText('斜杠快捷指令')
               .onClick(() => { this.slashMenuForced = !this.slashMenuForced; })
 
-              Button('阵列', { type: ButtonType.Normal })
-                .id('ai-array-toggle-btn')
-                .height(26).padding({ left: 7, right: 7 }).fontSize(11)
-                .fontColor(this.showTaskTemplate ? COLORS.primary : COLORS.muted)
-                .backgroundColor(this.showTaskTemplate ? COLORS.primarySoft : COLORS.surfaceMuted)
-                .borderRadius(RADIUS.capsule)
-                .enabled(!this.isLoading && !this.configBusy)
-                .onClick(() => { this.showTaskTemplate = !this.showTaskTemplate; })
+              if (!this.isCompact) {
+                Button('阵列', { type: ButtonType.Normal })
+                  .id('ai-array-toggle-btn')
+                  .height(26).padding({ left: 7, right: 7 }).fontSize(11)
+                  .fontColor(this.showTaskTemplate ? COLORS.primary : COLORS.muted)
+                  .backgroundColor(this.showTaskTemplate ? COLORS.primarySoft : COLORS.surfaceMuted)
+                  .borderRadius(RADIUS.capsule)
+                  .enabled(!this.isLoading && !this.configBusy)
+                  .onClick(() => { this.showTaskTemplate = !this.showTaskTemplate; })
+              }
 
               if (!this.isCompact) {
                 Button('Python', { type: ButtonType.Normal })
@@ -4803,6 +4864,32 @@ export struct AiAssistantPanel {
     .width('100%')
     .height('100%')
 
+    if (this.showPermissionPicker && !this.showConversations && !this.showContext && !this.showSettings) {
+      Stack({ alignContent: Alignment.BottomStart }) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#00000000')
+          .onClick(() => { this.showPermissionPicker = false; })
+        Column() {
+          DshPermissionPicker({
+            currentMode: this.permissionMode,
+            pickerWidth: Math.min(316, Math.max(256, (this.desktopMode ? this.panelWidth : Math.min(this.panelWidth, 440)) - 24)),
+            onSelect: (mode: DshPermissionMode) => {
+              this.changePermissionModeAction(mode);
+              this.showPermissionPicker = false;
+            },
+            onClose: () => { this.showPermissionPicker = false; }
+          })
+            .shadow(hongTuThemeState.elevation('overlay'))
+        }
+        .margin({ left: 12, bottom: 54 })
+      }
+      .width('100%')
+      .height('100%')
+      .zIndex(32)
+    }
+
     if (this.showQuickModelPicker && !this.showConversations && !this.showContext && !this.showSettings) {
       Stack({ alignContent: Alignment.Top }) {
         Column()
@@ -4821,8 +4908,8 @@ export struct AiAssistantPanel {
       .height('100%')
       .zIndex(30)
     }
-    }.width(this.desktopMode ? this.panelWidth : Math.min(this.panelWidth, this.isCompact ? 324 : 380))
-      .height(this.desktopMode ? this.panelHeight : Math.min(this.panelHeight, 640))
+    }.width(this.panelWidth)
+      .height(this.desktopMode ? this.panelHeight : Math.min(this.panelHeight, 680))
       .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'thick', hongTuThemeState.elevation('overlay'))).clip(true)
   }
 

@@ -1,9 +1,9 @@
 /**
- * 鸿图版图正交/斜角走线约束、测量锁角、导轨移动与交互式曲线几何服务
+ * 鸿图版图正交/斜角走线约束、测量锁角、导轨移动与交互式曲线/正多边形几何服务
  *
- * Phase 6 扩展：
+ * v7 扩展：
  * 1. 支持多边形/路径 90° 正交 L 型拐弯、45° 锁角、自由角；
- * 2. 支持移动工具（Move）与测量尺（Measure）的 90° 正交导轨 / 45° 斜角导轨锁定；
+ * 2. 支持正 N 边形（Regular N-gon, 3~32 边）圆心→顶点拖拽与 Shift 15° 角度对齐生成；
  * 3. 支持圆形（CIRCLE）、圆环（DONUT，带无自交微缝合桥）、椭圆（ELLIPSE）、圆弧（ARC）
  *    在画布上直接按「圆心 → 边缘磁吸点」拖拽生成高精度闭合多边形。
  *
@@ -62,6 +62,7 @@ export class RoutingConstraintService {
     if (kind === 'DONUT') return '圆环';
     if (kind === 'ELLIPSE') return '椭圆';
     if (kind === 'ARC') return '圆弧';
+    if (kind.startsWith('NGON_')) return `正${kind.substring(5)}边形`;
     return '曲线';
   }
 
@@ -119,7 +120,6 @@ export class RoutingConstraintService {
         ? { x: snappedTarget.x, y: origin.y }
         : { x: origin.x, y: snappedTarget.y };
     }
-    // 45° 八方向导轨
     const sx: number = dx < 0 ? -1 : 1;
     const sy: number = dy < 0 ? -1 : 1;
     const major: number = Math.max(adx, ady);
@@ -320,6 +320,33 @@ export class RoutingConstraintService {
   }
 
   /**
+   * 正 N 边形生成器（圆心 → 外接圆顶点拖拽，Shift 按住时自动吸附 15° 旋转角）
+   */
+  buildRegularPolygon(center: Point, edgePt: Point, sides: number, lockAngleStep: boolean = false): Point[] {
+    const dx: number = edgePt.x - center.x;
+    const dy: number = edgePt.y - center.y;
+    const radius: number = Math.hypot(dx, dy);
+    if (!Number.isFinite(radius) || radius < 1) {
+      return [];
+    }
+    const n: number = Math.max(3, Math.min(32, Math.round(sides)));
+    let baseAngle: number = Math.atan2(dy, dx);
+    if (lockAngleStep) {
+      const stepRad: number = Math.PI / 12; // 15°
+      baseAngle = Math.round(baseAngle / stepRad) * stepRad;
+    }
+    const pts: Point[] = [];
+    for (let i = 0; i < n; i++) {
+      const theta: number = baseAngle + (2 * Math.PI * i) / n;
+      pts.push({
+        x: Math.round(center.x + radius * Math.cos(theta)),
+        y: Math.round(center.y + radius * Math.sin(theta)),
+      });
+    }
+    return this.dedupAdjacentPoints(pts);
+  }
+
+  /**
    * 交互式曲线直接拖拽多边形生成器（支持圆形、圆环、椭圆、圆弧）
    * 输出严格满足 GDSII 无自交单轮廓多边形规范
    */
@@ -414,7 +441,6 @@ export class RoutingConstraintService {
       return this.dedupAdjacentPoints(pts);
     }
 
-    // 默认 CIRCLE
     const pts: Point[] = [];
     for (let i = 0; i < segs; i++) {
       const theta: number = (2 * Math.PI * i) / segs;
@@ -456,7 +482,6 @@ export class RoutingConstraintService {
     if (clean.length < 2) {
       return [];
     }
-    // PATHTYPE=2: 首尾两端各沿切线方向外延半个线宽
     if (pathType === 2) {
       const halfExt: number = widthNm * 0.5;
       const d0x: number = clean[1].x - clean[0].x;

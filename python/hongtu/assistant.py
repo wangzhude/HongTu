@@ -42,7 +42,7 @@ from .policy import MAX_OUTPUT_BYTES, MAX_SCRIPT_BYTES, validate_script
 from .assistant_control import assistant_control
 from .native_tools import TOOLS as NATIVE_TOOLS, validate_call as validate_native_call, validate_batch as validate_native_batch
 
-RUN_TIMEOUT_SECONDS = 180
+RUN_TIMEOUT_SECONDS = 300
 ARTIFACT_TTL_SECONDS = 300
 MAX_ARTIFACTS = 4
 MAX_CACHE_BYTES = 32 * 1024 * 1024
@@ -70,7 +70,7 @@ width_nm不预乘倍率。db.get_ports(cell)返回带稳定id的定义；db.upda
 IN/OUT/VDD/VSS标签。PMOS在NWELL内用PPLUS，NMOS在阱外用NPLUS；同阱NPLUS tap接VDD，
 衬底PPLUS tap接VSS，tap独立ACTIVE岛不能与源漏ACTIVE连续。源同侧分别接电源，漏同侧共同接OUT，
 不同网络的METAL1不能交叉短接。反相器 execute_layout_python 必须选择 generic_inverter 验证。
-工具失败应根据实际错误修改参数/脚本再调用，重试由SDK预算限制；不得伪造验证成功或跳过固定验证。
+工具失败应根据实际错误修改参数/脚本再调用，重试由SDK预算限制；不得伪造验证成功或跳过固定验证。若工具明确返回当前工作区标签页容量已满（0 个可用新标签页），必须立即停止调用任何其他工具，直接提示用户先关闭一个多余标签页后再试。
 新布局结果是独立文档 artifact；只有工具 success=true 才能说已生成。当返回 autoOpenInNewTab=true 时，编辑器会在本轮结束后自动校验并在新标签页打开该版图（原文档标签保留不变），回复中直接说明将在新标签页自动打开，不要让用户手动加载 artifactId；仅当 autoOpenInNewTab=false 时说明需先关闭多余标签页再恢复载入。pending编辑命令还未执行，需如实说明。
 不要输出密钥、API地址、用户本机绝对路径、GDS base64。工具结果中未提供的事实不要猜测。
 layoutContextIncluded=false 表示用户没有发送版图资料，零计数和空数组仅是占位，不能推断真实版图为空或检查通过。
@@ -144,8 +144,15 @@ class AssistantError(ValueError):
 class CompleteModelResponse(AbstractCapability):
     """Reject incomplete model turns before the SDK can dispatch their tools."""
 
+    def __init__(self, allow_length_retry: bool = False):
+        self.allow_length_retry = allow_length_retry
+
     async def after_model_request(self, ctx, *, request_context, response):
-        if response.finish_reason in {"length", "content_filter", "error"}:
+        if response.finish_reason == "length":
+            if self.allow_length_retry and not any(isinstance(part, ToolCallPart) for part in response.parts):
+                raise ModelRetry("上一轮思考或输出触及单次最大输出上限（max_tokens）被截断；请精简思考过程，直接调用所需工具或输出核心结论。")
+            raise UnexpectedModelBehavior("模型输出或工具参数达到单次上限（max_tokens）被截断，未执行不完整工具调用。")
+        if response.finish_reason in {"content_filter", "error"}:
             raise UnexpectedModelBehavior("模型响应未完整结束，未执行该轮工具。")
         return response
 
@@ -568,8 +575,10 @@ async def _make_artifact(ctx: RunContext[LayoutRun], script: str, profile: str) 
         raise _retry("原用户任务没有授权生成新文档。只读任务可读取、规划和解释；不要调用生成工具。")
     if state.commands_proposed or state.workflow_proposed:
         raise _retry("本次请求已提出当前文档编辑命令，不能同时生成新文档；请完成后另发请求。")
+    if state.available_tabs <= 0 and not state.artifact_ids:
+        raise _retry("当前工作区标签页容量已满（0 个可用新标签页），无法创建新版图文档；请直接告知用户先关闭一个多余标签页后再重试，不要改用其他工具绕过。")
     if len(state.artifact_ids) >= min(state.available_tabs, 1):
-        raise _retry("本次请求的新文档容量已用尽，请使用已经生成的结果并结束。")
+        raise _retry("本次请求的新文档容量已达单次上限（已成功生成 1 份新版图），请使用已经生成的结果并结束。")
     profile = required or profile
     try:
         validate_script(script)
@@ -610,9 +619,9 @@ async def _make_artifact(ctx: RunContext[LayoutRun], script: str, profile: str) 
 
 def build_agent(model, model_settings: dict | None = None, context_window: int = 32768) -> Agent[LayoutRun, str]:
     """Build the real SDK agent; injecting a SDK Test/FunctionModel is test-only."""
-    agent = Agent(model, deps_type=LayoutRun, instructions=LAYOUT_SYSTEM_PROMPT, retries=2,
-                  model_settings=model_settings, tool_timeout=25,
-                  capabilities=[CompleteModelResponse(), ReportContextUsage(context_window=context_window, tokenizer=estimate_layout_tokens),
+    agent = Agent(model, deps_type=LayoutRun, instructions=LAYOUT_SYSTEM_PROMPT, retries=3,
+                  model_settings=model_settings, tool_timeout=45,
+                  capabilities=[CompleteModelResponse(allow_length_retry=True), ReportContextUsage(context_window=context_window, tokenizer=estimate_layout_tokens),
                                 Planning(tools=["write_plan", "read_plan", "update_task_status"]),
                                 ToolOutputLimits(bands=[Band(over=12000, action=Truncate(max_chars=12000))])])
 
@@ -1019,13 +1028,33 @@ async def encoded_stream(payload: dict) -> AsyncIterator[str]:
         else:
             agent = build_diagnostic_agent(model, settings) if state.run_kind == "diagnostic" else build_agent(model, settings, config.contextWindowTokens)
             adapter = AGUIAdapter(agent=agent, run_input=run_input, ag_ui_version="0.1.22")
-            event_source = adapter.run_stream(deps=state, usage_limits=UsageLimits(request_limit=8, tool_calls_limit=16))
+            event_source = adapter.run_stream(deps=state, usage_limits=UsageLimits(request_limit=24, tool_calls_limit=48))
             encoder = adapter
+
+        def classify_run_error(raw_msg: str) -> str:
+            low = (raw_msg or "").lower()
+            if "status_code: 401" in low or " 401 " in low:
+                return "模型认证失败（HTTP 401），请检查当前供应商密钥。"
+            if "status_code: 403" in low or " 403 " in low:
+                return "模型访问被拒绝（HTTP 403），请检查模型权限或账户配额。"
+            if "status_code: 404" in low or " 404 " in low:
+                return "模型或接口不存在（HTTP 404），请检查 API 地址与模型 ID。"
+            if "status_code: 429" in low or " 429 " in low:
+                return "模型请求受限（HTTP 429），请稍后重试或检查供应商额度。"
+            if "timed out" in low or "timeout" in low:
+                return "模型单轮深度思考时间超过连接超时上限；可在 AI 设置中调大超时秒数或精简提示词后重试。"
+            if "request_limit" in low or "tool_calls_limit" in low or "usagelimit" in low:
+                return "助手多步推理或工具调用已达单次上限（24 轮 / 48 次工具调用）；请查看上方工作过程，精简或拆分需求后重试。"
+            if "单次上限" in raw_msg or "max_tokens" in low or "原文未替换" in raw_msg:
+                return "模型单次思考或输出超过最大输出上限（maxTokens）被截断；请在 AI 设置中将「最大输出」调大至 16384 或 32768 后重试。"
+            if "exceeded max retries" in low:
+                return "助手连续多次工具调用未通过校验，已停止重试；请展开上方工作过程查看具体失败提示。"
+            return "助手运行未完成：模型响应异常或流中断，请查看上方工作过程或检查模型连接后重试。"
 
         async def public_events():
             loop = asyncio.get_running_loop()
             step_window = max(float(RUN_TIMEOUT_SECONDS), config.timeoutMs / 1000.0) if RUN_TIMEOUT_SECONDS >= 1 else float(RUN_TIMEOUT_SECONDS)
-            hard_ceiling = loop.time() + (max(step_window * 5.0, 900.0) if RUN_TIMEOUT_SECONDS >= 1 else float(RUN_TIMEOUT_SECONDS))
+            hard_ceiling = loop.time() + (max(step_window * 6.0, 1800.0) if RUN_TIMEOUT_SECONDS >= 1 else float(RUN_TIMEOUT_SECONDS))
             try:
                 async with asyncio.timeout(step_window) as deadline_cm:
                     async for event in event_source:
@@ -1035,7 +1064,7 @@ async def encoded_stream(payload: dict) -> AsyncIterator[str]:
                             yield AguiCustomEvent(name="hongtu.diagnostic", value={"toolCallPassed": state.diagnostic_ok,
                                 "protocol": "assistant-editor-query-v1"})
                         if isinstance(event, RunErrorEvent):
-                            yield RunErrorEvent(message="助手运行未完成：模型、工具或请求预算出错；请检查配置后重试。", code="ASSISTANT_RUN_FAILED")
+                            yield RunErrorEvent(message=classify_run_error(getattr(event, "message", "")), code="ASSISTANT_RUN_FAILED")
                         else:
                             yield event
             except TimeoutError:

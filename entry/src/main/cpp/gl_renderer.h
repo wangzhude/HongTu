@@ -228,7 +228,7 @@ private:
     double displayDensity_ = 1.0;
     bool densityCalibrated_ = false;
     float mvpMatrix_[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-    float backgroundColor_[4] = {0.118f, 0.118f, 0.180f, 1.0f};
+    float backgroundColor_[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
     // 多边形耳切三角化索引缓存（复用平移全等的子 Cell 多边形剖分索引）
     struct CachedPolygonTriangulation {

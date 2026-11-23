@@ -75,7 +75,7 @@ export struct GlCanvas {
   @State sceneStyleLimited: boolean = false;
   /** 连续渲染失败计数：超过阈值则降级到 FALLBACK，避免反复抛错 */
   private failureCount: number = 0;
-  private capacityFallbackActive: boolean = false;
+  @State capacityFallbackActive: boolean = false;
   /** 标记当前降级仅因原生 Surface 尚未完成异步创建或刚经历销毁重建，以便就绪后自动恢复 */
   private surfacePendingRecovery: boolean = false;
   private surfaceAlive: boolean = false;
@@ -309,6 +309,8 @@ export struct GlCanvas {
         XComponent({ id: this.xcomponentId, type: XComponentType.SURFACE, libraryname: 'hongtu' })
           .width('100%')
           .height('100%')
+          .opacity(this.capacityFallbackActive ? 0 : 1)
+          .backgroundColor(this.lightBackground ? '#FFFFFF' : '#070A10')
           .onLoad((context?: object) => {
             this.onXComponentLoad(context);
           })
@@ -356,6 +358,7 @@ export struct GlCanvas {
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(this.lightBackground ? '#FFFFFF' : '#070A10')
     .onAreaChange((_oldArea: Area, newArea: Area) => {
       const w: number = Math.round(newArea.width as number);
       const h: number = Math.round(newArea.height as number);

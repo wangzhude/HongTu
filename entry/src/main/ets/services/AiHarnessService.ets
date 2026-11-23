@@ -185,8 +185,44 @@ export class AiHarnessService {
     if (!Number.isInteger(availableTabs) || availableTabs < 0 || availableTabs > 8) throw new Error('工作区容量无效');
     if (task !== undefined && (task.originalRequest.trim().length === 0 || task.originalRequest.length > 16000)) throw new Error('原任务目标无效');
     if (task !== undefined && !resumeTask && task.originalRequest !== prompt) throw new Error('新任务目标必须与本轮用户请求一致');
-    const budget = buildAiContextBudget(history, context, prompt, config, summary, false, task?.originalRequest ?? '');
+    let effectiveConfig: AiModelConfig = config;
+    let budget = buildAiContextBudget(history, context, prompt, config, summary, false, task?.originalRequest ?? '');
     if (budget.exceedsWindow) throw new Error('AiContextBudgetExceeded: 完整会话超过当前窗口预算，请先压缩会话或调整模型窗口；原文未删除');
+    if (!diagnostic) {
+      const baseWin: number = budget.contextWindowTokens;
+      const minAgentOut: number = baseWin >= 200000 ? 32768 : (baseWin >= 65536 ? 16384 : config.maxTokens);
+      const boostedTimeout: number = Math.min(600000, Math.max(300000, config.timeoutMs));
+      const targetMaxOut: number = Math.min(Math.max(config.maxTokens, minAgentOut), Math.max(512, baseWin - 6500));
+      if (targetMaxOut !== config.maxTokens || boostedTimeout !== config.timeoutMs) {
+        const candidate: AiModelConfig = {
+          provider: config.provider,
+          endpoint: config.endpoint,
+          apiKey: config.apiKey,
+          modelName: config.modelName,
+          temperature: config.temperature,
+          maxTokens: targetMaxOut,
+          timeoutMs: boostedTimeout,
+          enabled: config.enabled,
+          contextWindowTokens: config.contextWindowTokens,
+          compressionThreshold: config.compressionThreshold,
+          autoCompress: config.autoCompress,
+          reasoningEffort: config.reasoningEffort
+        };
+        const candidateBudget = buildAiContextBudget(history, context, prompt, candidate, summary, false, task?.originalRequest ?? '');
+        if (!candidateBudget.exceedsWindow) {
+          effectiveConfig = candidate;
+          budget = candidateBudget;
+        } else {
+          effectiveConfig = {
+            provider: config.provider, endpoint: config.endpoint, apiKey: config.apiKey,
+            modelName: config.modelName, temperature: config.temperature, maxTokens: config.maxTokens,
+            timeoutMs: boostedTimeout, enabled: config.enabled, contextWindowTokens: config.contextWindowTokens,
+            compressionThreshold: config.compressionThreshold, autoCompress: config.autoCompress,
+            reasoningEffort: config.reasoningEffort
+          };
+        }
+      }
+    }
     if (summary.length > 6000) throw new Error('会话摘要超过 6000 字符，请重新压缩');
     pythonBridgeService.beginConnectionUse();
     this.busy = true;
@@ -195,14 +231,14 @@ export class AiHarnessService {
       const bridge = await pythonBridgeService.loadConfig();
       // Only this run's already-loaded credentials are used; no extra reads or
       // credential retention. The callback receives bounded ordinary text only.
-      const historyText = (value: string): string => redactRunHistory(value, config.apiKey, bridge.token);
+      const historyText = (value: string): string => redactRunHistory(value, effectiveConfig.apiKey, bridge.token);
       callbacks.onHistoryInput?.(historyText(prompt), task === undefined ? undefined : {
         originalRequest: historyText(task.originalRequest), readOnly: task.readOnly,
         artifactGenerationAllowed: task.artifactGenerationAllowed, requiredValidationProfile: task.requiredValidationProfile }, historyText);
       if (ticket !== this.serial) throw new Error('助手请求已取消');
       if (bridge.token.length === 0) throw new Error('Agent 尚未连接：请打开助手中的“连接 Agent 伴随服务”，填写地址与令牌并检查连接');
       const endpoint: string = bridge.endpoint.trim().replace(/\/$/, '');
-      const safeForwardedKey: string = assertSafeApiKeyForwarding(endpoint, config.apiKey);
+      const safeForwardedKey: string = assertSafeApiKeyForwarding(endpoint, effectiveConfig.apiKey);
       const messages: HarnessMessage[] = budget.messages.map((entry: AiBudgetMessage): HarnessMessage =>
         ({ id: entry.id, role: entry.role, content: entry.content }));
       const runId: string = `hongtu-${Date.now()}-${ticket}`;
@@ -211,10 +247,10 @@ export class AiHarnessService {
       messages.push({ id: `${runId}-user`, role: 'user', content: prompt });
       const body: HarnessInput = {
         threadId: this.conversationId(sessionId, runId), runId, messages, tools: [], context: [], state: {},
-        forwardedProps: { modelConfig: { provider: config.provider, endpoint: config.endpoint,
-          apiKey: safeForwardedKey, modelName: config.modelName, temperature: config.temperature,
-          maxTokens: config.maxTokens, timeoutMs: config.timeoutMs, contextWindowTokens: budget.contextWindowTokens,
-          reasoningEffort: config.reasoningEffort ?? 'auto' },
+        forwardedProps: { modelConfig: { provider: effectiveConfig.provider, endpoint: effectiveConfig.endpoint,
+          apiKey: safeForwardedKey, modelName: effectiveConfig.modelName, temperature: effectiveConfig.temperature,
+          maxTokens: effectiveConfig.maxTokens, timeoutMs: effectiveConfig.timeoutMs, contextWindowTokens: budget.contextWindowTokens,
+          reasoningEffort: effectiveConfig.reasoningEffort ?? 'auto' },
           layoutContext: context, availableTabs, originalRequest: prompt,
           requiredValidationProfile: task?.requiredValidationProfile ?? requiredValidationProfile, conversationSummary: summary,
           taskOriginalRequest: task?.originalRequest, resumeTask: task === undefined ? undefined : resumeTask,
@@ -223,7 +259,7 @@ export class AiHarnessService {
       if (callbacks.onEditorQuery !== undefined) body.forwardedProps.editorProtocol = 'hongtu-editor-query/v1';
       if (diagnostic) body.forwardedProps.runKind = 'diagnostic';
       callbacks.onStatus('已连接开源 Harness，正在处理版图需求…');
-      return await this.stream(`${endpoint}/v1/assistant`, this.requestBody(body), bridge.token, config.apiKey, ticket, callbacks, false, config.timeoutMs);
+      return await this.stream(`${endpoint}/v1/assistant`, this.requestBody(body), bridge.token, effectiveConfig.apiKey, ticket, callbacks, false, effectiveConfig.timeoutMs);
     } finally { this.busy = false; this.runControl = null; pythonBridgeService.endConnectionUse(); }
   }
 
@@ -379,7 +415,7 @@ export class AiHarnessService {
       let totalTimer: number = -1;
       let finishGraceTimer: number = -1;
       const startedAtMs: number = Date.now();
-      const hardCeilingMs: number = 15 * 60 * 1000;
+      const hardCeilingMs: number = 30 * 60 * 1000;
       const cleanup = (): void => {
         clearTimeout(idleTimer); clearTimeout(totalTimer); clearTimeout(finishGraceTimer);
         this.cancelRequest = null;
@@ -404,13 +440,13 @@ export class AiHarnessService {
         clearTimeout(totalTimer);
         const elapsed: number = Date.now() - startedAtMs;
         const remainingCeiling: number = Math.max(15000, hardCeilingMs - elapsed);
-        const windowMs: number = Math.min(remainingCeiling, Math.max(180000, timeoutMs));
+        const windowMs: number = Math.min(remainingCeiling, Math.max(300000, timeoutMs));
         totalTimer = setTimeout(() => fail('助手长时间无新进展已超时'), windowMs);
       };
       const resetIdle = (): void => {
         if (runFinished) return;
         clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => fail('助手连接读取超时'), Math.max(65000, timeoutMs));
+        idleTimer = setTimeout(() => fail('助手连接读取超时'), Math.max(300000, timeoutMs));
       };
       let sawSseFrame: boolean = false;
       let nonSseSample: string = '';
@@ -445,7 +481,7 @@ export class AiHarnessService {
         if (typeof event.toolCallId !== 'string' || event.toolCallId.length > 256) return undefined;
         let tool = result.tools.find((item: HarnessToolState): boolean => item.id === event.toolCallId);
         if (tool === undefined) {
-          if (result.tools.length >= 32) { fail('助手工具调用超过限制'); return undefined; }
+          if (result.tools.length >= 64) { fail('助手工具调用超过限制'); return undefined; }
           tool = { id: event.toolCallId, name: event.toolCallName ?? '版图工具', status: 'running', arguments: '', result: '' };
           result.tools.push(tool);
         }
@@ -701,7 +737,7 @@ export class AiHarnessService {
       request.requestInStream(url, {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
-        extraData: body, connectTimeout: Math.min(15000, timeoutMs), readTimeout: 600000
+        extraData: body, connectTimeout: Math.min(15000, timeoutMs), readTimeout: 1800000
       }).then((responseCode: number): void => {
         code = responseCode;
         if (code !== 200) {

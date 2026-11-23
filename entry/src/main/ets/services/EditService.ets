@@ -3357,11 +3357,25 @@ export class EditService {
    * @param mirror 镜像 0=无 1=X 轴 2=Y 轴
    * @returns 新建实例 shape 的 ID
    */
-  createInstance(cellId: number, x: number, y: number, rotation: number, mirror: number, cellName?: string): number {
+  createInstance(
+    cellId: number,
+    x: number,
+    y: number,
+    rotation: number,
+    mirror: number,
+    cellName?: string,
+    arrayCols: number = 1,
+    arrayRows: number = 1,
+    arrayColStepX: number = 0,
+    arrayRowStepY: number = 0
+  ): number {
     this.requireEditableLayer(0, 0);
     if (!Number.isInteger(cellId) || cellId < 0 || !Number.isFinite(x) || !Number.isFinite(y) ||
-      !Number.isFinite(rotation) || [0, 1, 2].indexOf(mirror) < 0) {
-      throw new Error('实例引用、坐标或变换无效');
+      !Number.isFinite(rotation) || [0, 1, 2].indexOf(mirror) < 0 ||
+      !Number.isInteger(arrayCols) || arrayCols < 1 || arrayCols > 32767 ||
+      !Number.isInteger(arrayRows) || arrayRows < 1 || arrayRows > 32767 ||
+      !Number.isFinite(arrayColStepX) || !Number.isFinite(arrayRowStepY)) {
+      throw new Error('实例引用、坐标、变换或阵列参数无效');
     }
     if (this.shapes.length >= 1000000) throw new Error('实例放置超过基础图形预算');
     let points: number = 1;
@@ -3380,6 +3394,14 @@ export class EditService {
       mirror: mirror,
       magnification: 1,
     };
+    if (arrayCols > 1 || arrayRows > 1) {
+      shape.arrayCols = arrayCols;
+      shape.arrayRows = arrayRows;
+      shape.arrayColStepX = arrayColStepX;
+      shape.arrayColStepY = 0;
+      shape.arrayRowStepX = 0;
+      shape.arrayRowStepY = arrayRowStepY;
+    }
     if (cellName !== undefined && cellName.length > 0) {
       shape.cellName = cellName;
     }

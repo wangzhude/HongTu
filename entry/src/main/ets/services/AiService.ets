@@ -518,6 +518,12 @@ export enum AiCommandType {
 }
 
 /** 默认模型配置 */
+export function defaultMaxTokensForWindow(windowTokens: number): number {
+  if (windowTokens >= 200000) return 32768;
+  if (windowTokens >= 65536) return 16384;
+  return 8192;
+}
+
 export function createDefaultConfig(): AiModelConfig {
   return {
     provider: AiProvider.DEMO_MODE,
@@ -525,8 +531,8 @@ export function createDefaultConfig(): AiModelConfig {
     apiKey: '',
     modelName: 'hongtu-demo',
     temperature: 0.3,
-    maxTokens: 4096,
-    timeoutMs: 120000,
+    maxTokens: 16384,
+    timeoutMs: 300000,
     enabled: true,
     contextWindowTokens: 65536,
     compressionThreshold: 0.8,
@@ -1192,7 +1198,8 @@ export class AiService {
         const template: AiModelConfig = this.profileConfig(profile, profile.activeModelId);
         template.modelName = cleanName;
         template.contextWindowTokens = win;
-        template.maxTokens = Math.min(Math.max(4096, template.maxTokens), Math.max(512, win - 6500));
+        template.maxTokens = Math.min(Math.max(defaultMaxTokensForWindow(win), template.maxTokens), Math.max(512, win - 6500));
+        template.timeoutMs = Math.max(300000, template.timeoutMs);
         template.apiKey = '';
         targetModel = { id: `${this.newId()}-model`, config: template };
         profile.models.push(targetModel);
@@ -1237,7 +1244,8 @@ export class AiService {
         const cfg: AiModelConfig = this.mergeConfig(baseCfg, baseCfg);
         cfg.modelName = cleanName;
         cfg.contextWindowTokens = win;
-        cfg.maxTokens = Math.min(Math.max(4096, cfg.maxTokens), Math.max(512, win - 6500));
+        cfg.maxTokens = Math.min(Math.max(defaultMaxTokensForWindow(win), cfg.maxTokens), Math.max(512, win - 6500));
+        cfg.timeoutMs = Math.max(300000, cfg.timeoutMs);
         cfg.apiKey = '';
         profile.models.push({ id: `${this.newId()}-${i}-m`, config: cfg });
         addedCount++;
@@ -1687,22 +1695,36 @@ current_cell.transform(db.Trans(dx, 0))`}`;
       let fullText = '';
       let commands: ParsedCommand[] = [];
 
+      // 演示模式下优先响应选区解释/版图检查/问题定位/修复建议等上下文问答
+      const preDemoAnalysis: string = this.config.provider === AiProvider.DEMO_MODE
+        ? this.buildDemoContextualReply(userMessage, context)
+        : '';
       // Fix ⑥: 意图分类 — 本地可处理的命令直接返回，不走 LLM
-      const intent = this.classifyIntent(userMessage, context);
-      if (intent.localOnly && intent.commands) {
+      const intent = preDemoAnalysis.length > 0
+        ? { type: IntentType.UNKNOWN, localOnly: false }
+        : this.classifyIntent(userMessage, context);
+      if (preDemoAnalysis.length > 0) {
+        commands = [];
+        fullText = preDemoAnalysis;
+      } else if (intent.localOnly && intent.commands) {
         commands = intent.commands;
         fullText = commands.length > 0
           ? `[${intent.type}] 已解析 ${commands.length} 个操作：\n${commands.map(c => '• ' + c.description).join('\n')}`
           : '未能理解您的指令，请尝试更具体的描述，例如：\n"在金属1层画一个100x200的矩形"';
       } else if (this.config.provider === AiProvider.DEMO_MODE) {
-        // Demo 模式兜底
-        if (this.hasTypedLayers(context)) {
-          throw new Error('当前文档包含非零 datatype。请在 AI 设置中连接模型，再明确指定 layer/datatype；演示指令不支持此工艺图层体系');
+        const analysisText: string = this.buildDemoContextualReply(userMessage, context);
+        if (analysisText.length > 0) {
+          commands = [];
+          fullText = analysisText;
+        } else {
+          if (this.hasTypedLayers(context)) {
+            throw new Error('当前文档包含非零 datatype。请在右上角设置中配置模型 API Key，以支持完整多图层 datatype 操作。');
+          }
+          commands = this.demoParse(userMessage, context);
+          fullText = commands.length > 0
+            ? `已解析 ${commands.length} 个版图操作：\n${commands.map(c => '- ' + c.description).join('\n')}`
+            : this.buildDemoFallbackGuide(context);
         }
-        commands = this.demoParse(userMessage, context);
-        fullText = commands.length > 0
-          ? `已解析 ${commands.length} 个操作：\n${commands.map(c => '• ' + c.description).join('\n')}`
-          : '未能理解您的指令，请尝试更具体的描述，例如：\n"在金属1层画一个100x200的矩形"';
       } else {
         if (!await this.checkNetworkAvailable()) {
           throw new Error('网络不可用，请检查网络连接');
@@ -2372,6 +2394,51 @@ current_cell.transform(db.Trans(dx, 0))`}`;
    * - 缩放："放大" / "缩小" / "放大2倍"
    * - 工具切换："切换到矩形工具" / "用选择工具"
    */
+  private buildDemoContextualReply(text: string, context: AiContext): string {
+    const q: string = text.trim();
+    const sel: AiSelectedShape[] = context.selectedShapes ?? [];
+    const issues: AiIssueInfo[] = context.drcIssues ?? [];
+    if (/解释.*图形|解释.*选中|当前选中|什么用途|选中图形/.test(q)) {
+      if (sel.length === 0) {
+        return `### 选区分析（演示模式）\n\n当前单元 **${context.currentCellName || 'TOP'}** 暂未选中任何图形（画布共 **${context.totalShapes}** 个图形，激活图层 **L${context.currentLayer}/D${context.currentDatatype ?? 0}**）。\n\n- 请先在画布点选或框选目标图形后再点击「解释图形」\n- 点击右上角设置图标配置 DeepSeek / 通义千问 / OpenAI 兼容模型后，可启用完整 DSH 多步推理 Agent`;
+      }
+      const lines: string[] = sel.slice(0, 8).map((s: AiSelectedShape): string => {
+        const w: number = Math.round((s.bounds.maxX - s.bounds.minX) * 100) / 100;
+        const h: number = Math.round((s.bounds.maxY - s.bounds.minY) * 100) / 100;
+        const lInfo = context.layers.find(l => l.layerNumber === s.layer && (l.datatype ?? 0) === (s.datatype ?? 0));
+        const lLabel: string = lInfo ? `${lInfo.chineseName || lInfo.englishName} (L${s.layer}/D${s.datatype ?? 0})` : `L${s.layer}/D${s.datatype ?? 0}`;
+        return `- **#${s.id} ${s.type.toUpperCase()}** · 图层 ${lLabel} · 尺寸 **${w} × ${h} nm** · 范围 (${s.bounds.minX}, ${s.bounds.minY}) → (${s.bounds.maxX}, ${s.bounds.maxY}) nm`;
+      });
+      return `### 选中图形解析（共 ${sel.length} 项）\n\n${lines.join('\n')}\n\n当前工作单元为 **${context.currentCellName || 'TOP'}**（DBU = ${context.dbuNm ?? 1} nm）。如需结合电路网表或工艺规则做深度语义分析，可在右上角设置中配置大模型 API。`;
+    }
+    if (/检查.*版图|盘点|概况|摘要|关注的问题/.test(q) && !/运行.*drc/i.test(q)) {
+      const visibleLayers: number = context.layers.filter(l => l.visible).length;
+      const issueSummary: string = issues.length > 0
+        ? `检测到 **${issues.length}** 项 DRC 违规（首项：${issues[0].ruleType} @ (${issues[0].x}, ${issues[0].y}) nm — ${issues[0].message}）`
+        : '当前已记录 DRC 违规为 **0**（可切换到「验证」页签或发送「运行DRC」执行最新检查）';
+      return `### 当前版图健康检查\n\n- **活动单元**：${context.currentCellName || 'TOP'}（共 ${context.cells.length} 个 Cell，**${context.totalShapes}** 个几何图形）\n- **图层状态**：共 ${context.layers.length} 层（可见 ${visibleLayers} 层），当前绘图层 **L${context.currentLayer}/D${context.currentDatatype ?? 0}**\n- **设计规则 (DRC)**：${issueSummary}\n\n提示：当前为离线演示模式；点击右上角齿轮配置任意 OpenAI 兼容模型后，Agent 可自动调用原生工具闭环检查并修复违规。`;
+    }
+    if (/定位.*问题|第一个问题/.test(q)) {
+      if (issues.length === 0) {
+        return `当前没有已记录的 DRC 违规项。你可以先发送 **「运行DRC」** 或点击顶部菜单运行规则检查，若存在间距/线宽违规即可自动定位。`;
+      }
+      const first: AiIssueInfo = issues[0];
+      return `### 首项 DRC 问题定位\n\n- **规则类型**：${first.ruleType}（${first.severity}）\n- **违规坐标**：(${first.x}, ${first.y}) nm\n- **说明**：${first.message}\n\n可在「验证」面板点击该条违规一键跳转高亮；连接大模型后 Agent 支持自动选中对应图元。`;
+    }
+    if (/提出.*修复|最小修复方案/.test(q)) {
+      if (issues.length === 0) {
+        return `当前版图暂无 DRC 错误记录（已选 ${sel.length} 个图形）。请先运行 DRC 获取具体违规证据，或在右上角设置中连接大模型以生成可预览修复方案。`;
+      }
+      const first: AiIssueInfo = issues[0];
+      return `### 修复建议摘要\n\n针对首项违规 **${first.ruleType}**（坐标 ${first.x}, ${first.y} nm：${first.message}）：\n- 建议在画布选中对应图元后使用拉伸控点或移动工具调整线宽/间距以满足当前规则阈值\n- 如需 AI 自动计算最小位移并生成画布预览方案，请点击右上角齿轮配置模型 API Key。`;
+    }
+    return '';
+  }
+
+  private buildDemoFallbackGuide(context: AiContext): string {
+    return `当前处于**离线演示模式**（单元 **${context.currentCellName || 'TOP'}**，共 ${context.totalShapes} 个图形）。\n\n你可以直接尝试：\n- 点击快捷指令：**解释图形** / **检查版图** / **画反相器**\n- 发送几何指令：\`在L1层 (0,0) 画一个 200x120 的矩形\` 或 \`运行DRC\`\n- 点击右上角 **设置图标** 配置 DeepSeek / 通义千问 / 硅基流动 / OpenAI 等模型，即可开启完整 DSH 多步思考与原生版图工具闭环。`;
+  }
+
   private demoParse(input: string, context: AiContext): ParsedCommand[] {
     if (this.isNonExecutingRequest(input) || (this.hasCircuitTopic(input) && !this.isCircuitCreationRequest(input))) return [];
     if (this.hasTypedLayers(context)) return [];

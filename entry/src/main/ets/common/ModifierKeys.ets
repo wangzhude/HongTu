@@ -13,6 +13,9 @@ let _shiftHeld: boolean = false;
 /** Ctrl 键是否按下 */
 let _ctrlHeld: boolean = false;
 
+/** Alt 键是否按下（按住 Alt 支持临时从中心向外绘制矩形/图形，对齐 KLayout/PS/AE 习惯） */
+let _altHeld: boolean = false;
+
 /** 当前打开的模态输入弹窗令牌集合（防重复关闭或重叠打开导致计数漂移） */
 let _nextModalGateToken: number = 1;
 const _activeModalGateTokens: Set<number> = new Set<number>();
@@ -33,10 +36,19 @@ export function isCtrlHeld(): boolean {
   return _ctrlHeld;
 }
 
+export function setAltHeld(value: boolean): void {
+  _altHeld = value;
+}
+
+export function isAltHeld(): boolean {
+  return _altHeld;
+}
+
 /** 重置可能因弹窗弹出、焦点切换或快捷键组合遗留的粘滞修饰键 */
 export function resetModifierKeys(): void {
   _shiftHeld = false;
   _ctrlHeld = false;
+  _altHeld = false;
 }
 
 /**

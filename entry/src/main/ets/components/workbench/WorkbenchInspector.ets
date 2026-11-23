@@ -2,7 +2,7 @@ import { StableSegmentButton } from '../StableSegmentButton';
 import { SegmentButtonItemTuple, SegmentButtonTextItem } from '@kit.ArkUI';
 import { DrcIssue, WorkModule } from '../../workbench/WorkbenchModels';
 import { UiLayer, LayerGroup } from '../../common/types';
-import { COLORS, formatZoomPercent } from '../../common/constants';
+import { COLORS, formatZoomPercent, umText } from '../../common/constants';
 import { canvasKeyName } from '../../common/CanvasKeyboard';
 import { resetModifierKeys } from '../../common/ModifierKeys';
 import { BLUR_BY_LAYER, RADIUS, withAlpha } from '../../common/MaterialTokens';
@@ -1866,6 +1866,7 @@ struct PropertiesPanel {
   @Prop zoomPercent: number = 100;
   @Prop selectedShape: Shape | null = null;
   @Prop desktopCanvasFirst: boolean = false;
+  @StorageLink('hongtuPropCoordMode') coordMode: number = 0;
   onShapePropertySubmit: (shapeId: number, property: string, value: string) => void = () => {};
 
   /** 图形类型中文标签 */
@@ -1973,42 +1974,204 @@ struct PropertiesPanel {
           numericOnly: false,
           submitAction: this.onShapePropertySubmit
         })
-        EditablePropertyRow({
-          label: 'X',
-          value: `${this.shapeMinX()}`,
-          propertyKey: 'x',
-          shapeId: this.selectedShape.id,
-          editable: this.editable,
-          numericOnly: false,
-          submitAction: this.onShapePropertySubmit
-        })
-        EditablePropertyRow({
-          label: 'Y',
-          value: `${this.shapeMinY()}`,
-          propertyKey: 'y',
-          shapeId: this.selectedShape.id,
-          editable: this.editable,
-          numericOnly: false,
-          submitAction: this.onShapePropertySubmit
-        })
-        EditablePropertyRow({
-          label: '宽',
-          value: `${this.shapeWidth()}`,
-          propertyKey: 'width',
-          shapeId: this.selectedShape.id,
-          editable: this.editable,
-          numericOnly: false,
-          submitAction: this.onShapePropertySubmit
-        })
-        EditablePropertyRow({
-          label: '高',
-          value: `${this.shapeHeight()}`,
-          propertyKey: 'height',
-          shapeId: this.selectedShape.id,
-          editable: this.editable,
-          numericOnly: false,
-          submitAction: this.onShapePropertySubmit
-        })
+        if (this.selectedShape.type === ShapeType.RECT || this.selectedShape.type === ShapeType.POLYGON || this.selectedShape.type === ShapeType.PATH) {
+          Row({ space: 6 }) {
+            Text('坐标基准').fontSize(11).fontColor(COLORS.muted).width(60)
+            Row() {
+              StableSegmentButton({
+                items: [{ text: '中心点' }, { text: '左下角' }, { text: '对角边界' }] as [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
+                selectedIndex: (this.coordMode === 0 || this.coordMode === 1 || this.coordMode === 2) ? this.coordMode : 0,
+                onItemClicked: (idx: number) => {
+                  if (idx === 0 || idx === 1 || idx === 2) this.coordMode = idx;
+                },
+                fontColor: COLORS.muted,
+                selectedFontColor: COLORS.primary,
+                capsuleBackgroundColor: COLORS.surfaceMuted,
+                selectedBackgroundColor: COLORS.primarySoft,
+                fontSizeFp: 10.5,
+                capsuleBorderRadius: 6,
+                buttonMinHeight: 26,
+                itemMinHeight: 22,
+                itemPaddingHorizontal: 5,
+                itemPaddingVertical: 2
+              })
+            }.layoutWeight(1)
+          }
+          .width('100%')
+          .height(32)
+          .padding({ left: 14, right: 14 })
+          .alignItems(VerticalAlign.Center)
+
+          if (this.coordMode === 0) {
+            EditablePropertyRow({
+              label: '中心 CX',
+              value: `${(this.shapeMinX() + this.shapeMaxX()) * 0.5}`,
+              propertyKey: 'centerX',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '中心 CY',
+              value: `${(this.shapeMinY() + this.shapeMaxY()) * 0.5}`,
+              propertyKey: 'centerY',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '对称宽 W',
+              value: `${this.shapeWidth()}`,
+              propertyKey: 'widthCenter',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '对称高 H',
+              value: `${this.shapeHeight()}`,
+              propertyKey: 'heightCenter',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+          } else if (this.coordMode === 1) {
+            EditablePropertyRow({
+              label: '左下 X1',
+              value: `${this.shapeMinX()}`,
+              propertyKey: 'x',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '左下 Y1',
+              value: `${this.shapeMinY()}`,
+              propertyKey: 'y',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '宽度 W',
+              value: `${this.shapeWidth()}`,
+              propertyKey: 'width',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '高度 H',
+              value: `${this.shapeHeight()}`,
+              propertyKey: 'height',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+          } else {
+            EditablePropertyRow({
+              label: '左边界 X1',
+              value: `${this.shapeMinX()}`,
+              propertyKey: 'minXEdge',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '下边界 Y1',
+              value: `${this.shapeMinY()}`,
+              propertyKey: 'minYEdge',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '右边界 X2',
+              value: `${this.shapeMaxX()}`,
+              propertyKey: 'maxX',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+            EditablePropertyRow({
+              label: '上边界 Y2',
+              value: `${this.shapeMaxY()}`,
+              propertyKey: 'maxY',
+              shapeId: this.selectedShape.id,
+              editable: this.editable,
+              numericOnly: false,
+              submitAction: this.onShapePropertySubmit
+            })
+          }
+        } else {
+          EditablePropertyRow({
+            label: '锚点 X',
+            value: `${this.shapeMinX()}`,
+            propertyKey: 'x',
+            shapeId: this.selectedShape.id,
+            editable: this.editable,
+            numericOnly: false,
+            submitAction: this.onShapePropertySubmit
+          })
+          EditablePropertyRow({
+            label: '锚点 Y',
+            value: `${this.shapeMinY()}`,
+            propertyKey: 'y',
+            shapeId: this.selectedShape.id,
+            editable: this.editable,
+            numericOnly: false,
+            submitAction: this.onShapePropertySubmit
+          })
+        }
+        if (this.selectedShape.type === ShapeType.INSTANCE) {
+          EditablePropertyRow({
+            label: '阵列列数',
+            value: `${this.selectedShape.arrayCols || 1}`,
+            propertyKey: 'arrayCols',
+            shapeId: this.selectedShape.id,
+            editable: this.editable,
+            numericOnly: true,
+            submitAction: this.onShapePropertySubmit
+          })
+          EditablePropertyRow({
+            label: '阵列行数',
+            value: `${this.selectedShape.arrayRows || 1}`,
+            propertyKey: 'arrayRows',
+            shapeId: this.selectedShape.id,
+            editable: this.editable,
+            numericOnly: true,
+            submitAction: this.onShapePropertySubmit
+          })
+          EditablePropertyRow({
+            label: '列距 PitchX',
+            value: `${this.selectedShape.arrayColStepX ?? 0}`,
+            propertyKey: 'arrayColStepX',
+            shapeId: this.selectedShape.id,
+            editable: this.editable,
+            numericOnly: false,
+            submitAction: this.onShapePropertySubmit
+          })
+          EditablePropertyRow({
+            label: '行距 PitchY',
+            value: `${this.selectedShape.arrayRowStepY ?? 0}`,
+            propertyKey: 'arrayRowStepY',
+            shapeId: this.selectedShape.id,
+            editable: this.editable,
+            numericOnly: false,
+            submitAction: this.onShapePropertySubmit
+          })
+        }
         if (this.selectedShape.type === ShapeType.PATH) {
           EditablePropertyRow({
             label: '线宽',
@@ -2020,6 +2183,7 @@ struct PropertiesPanel {
             submitAction: this.onShapePropertySubmit
           })
         }
+        DataRow({ label: '中心 (CX,CY)', value: `(${umText((this.shapeMinX() + this.shapeMaxX()) * 0.5)}, ${umText((this.shapeMinY() + this.shapeMaxY()) * 0.5)}) µm` })
         DataRow({ label: '包围盒 X', value: `${this.shapeMinX().toFixed(0)} ~ ${this.shapeMaxX().toFixed(0)}` })
         DataRow({ label: '包围盒 Y', value: `${this.shapeMinY().toFixed(0)} ~ ${this.shapeMaxY().toFixed(0)}` })
         DataRow({ label: '宽 x 高', value: `${this.shapeWidth().toFixed(0)} x ${this.shapeHeight().toFixed(0)} nm` })

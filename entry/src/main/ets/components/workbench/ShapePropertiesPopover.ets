@@ -1,15 +1,24 @@
-import { COLORS } from '../../common/constants';
+import { SegmentButtonItemTuple, SegmentButtonTextItem } from '@kit.ArkUI';
+import { COLORS, umText } from '../../common/constants';
 import { WorkbenchIcon } from './WorkbenchIcon';
 import { FONT_MONO } from '../../common/Fonts';
 import { UI } from '../../common/UiTokens';
 import { canvasKeyName } from '../../common/CanvasKeyboard';
 import { resetModifierKeys, isCtrlHeld, isShiftHeld } from '../../common/ModifierKeys';
 import { UiLayer } from '../../common/types';
-import { Shape, ShapeType } from '../../models/GdsiiData';
+import { Shape, ShapeType, ShapeBounds, getShapeBounds, getShapeArea } from '../../models/GdsiiData';
 import { PropertyCellOption, ShapePropertyField, shapePropertyFields, shapePropertyValue } from '../../services/ShapePropertyService';
 import { hongTuThemeState, Radius } from '../../store/ThemeStore';
+import { StableSegmentButton } from '../StableSegmentButton';
 
-/** A field submission applies to the explicit selection in one undo transaction. */
+/**
+ * 图形与实例属性浮窗/侧边面板（v7 显式坐标基准锚点与阵列直编版）
+ *
+ * 1. 彻底消除模糊的裸 `X` / `Y` 标签：提供「中心+宽高」、「左下+宽高」、「对角边界 (X1,Y1↔X2,Y2)」三套坐标基准实时切换；
+ * 2. 在「中心+宽高」基准下修改宽/高，以图形中心为锚点向两侧对称缩放（光子晶格/微环谐振腔圆心永不漂移）；
+ * 3. 在「对角边界」基准下支持像 KLayout Box 属性一样独立修改左 X1、下 Y1、右 X2、上 Y2；
+ * 4. 实例（INSTANCE）在主视图直接提供「行列阵列 (Cols × Rows + Pitch X/Y)」编辑，无需再翻找隐藏层级。
+ */
 @Component
 export struct ShapePropertiesPopover {
   @Prop @Watch('resetDraft') documentId: string = '';
@@ -23,6 +32,8 @@ export struct ShapePropertiesPopover {
   @Prop panelHeight: number = 596;
   @Prop docked: boolean = false;
   @State detailsExpanded: boolean = false;
+  /** 坐标基准：0=中心+宽高(Center), 1=左下+宽高(Min Corner), 2=对角边界(X1,Y1-X2,Y2) */
+  @StorageLink('hongtuPropCoordMode') coordMode: number = 0;
   @State propertiesDraft: string = '';
   @State errorText: string = '';
   private propertiesSelectionKey: string = '';
@@ -39,6 +50,9 @@ export struct ShapePropertiesPopover {
   saveShortcutAction: ((saveAs: boolean) => void) | null = null;
 
   aboutToAppear(): void {
+    if (this.coordMode !== 0 && this.coordMode !== 1 && this.coordMode !== 2) {
+      this.coordMode = 0;
+    }
     this.resetDraft();
   }
 
@@ -75,6 +89,12 @@ export struct ShapePropertiesPopover {
   private commonType(): ShapeType | null {
     const targets: Shape[] = this.targets();
     return targets.length > 0 && targets.every((s: Shape) => s.type === targets[0].type) ? targets[0].type : null;
+  }
+
+  private isScalableGeometry(): boolean {
+    const targets: Shape[] = this.targets();
+    return targets.length > 0 && targets.every((s: Shape) =>
+      s.type === ShapeType.RECT || s.type === ShapeType.POLYGON || s.type === ShapeType.PATH);
   }
 
   private typeLabel(): string {
@@ -177,6 +197,30 @@ export struct ShapePropertiesPopover {
     return raw.length > 0 ? `L${raw}` : '多个图层';
   }
 
+  private singleGeometrySummaryLines(): [string, string] {
+    const targets: Shape[] = this.targets();
+    if (targets.length !== 1) {
+      return [`已选 ${targets.length} 个对象`, '可统一修改相同坐标、尺寸或所在图层'];
+    }
+    const s: Shape = targets[0];
+    const b: ShapeBounds = getShapeBounds(s);
+    const cx: number = (b.minX + b.maxX) * 0.5;
+    const cy: number = (b.minY + b.maxY) * 0.5;
+    if (s.type === ShapeType.TEXT || s.type === ShapeType.INSTANCE) {
+      const arrCount: number = (s.arrayCols || 1) * (s.arrayRows || 1);
+      const extra: string = s.type === ShapeType.INSTANCE
+        ? (arrCount > 1 ? `阵列 ${s.arrayCols || 1}×${s.arrayRows || 1} (${arrCount} 单元)` : '单个子单元实例')
+        : `文本锚点 · 旋转 ${s.rotation ?? 0}°`;
+      return [`锚点 (${umText(b.minX)}, ${umText(b.minY)}) µm`, extra];
+    }
+    const areaUm2: number = getShapeArea(s) / 1e6;
+    const areaStr: string = areaUm2 >= 100 ? areaUm2.toFixed(2) : (areaUm2 >= 1 ? areaUm2.toFixed(3) : areaUm2.toFixed(4));
+    return [
+      `中心 (${umText(cx)}, ${umText(cy)}) µm · 面积 ${areaStr} µm²`,
+      `范围 [${umText(b.minX)}, ${umText(b.minY)}] → [${umText(b.maxX)}, ${umText(b.maxY)}] µm`
+    ];
+  }
+
   @Builder
   private propertySection(title: string) {
     Text(title)
@@ -265,7 +309,7 @@ export struct ShapePropertiesPopover {
           saveShortcutAction: this.saveShortcutAction,
           submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
         })
-        .width(66)
+        .width(64)
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
@@ -289,77 +333,138 @@ export struct ShapePropertiesPopover {
   }
 
   @Builder
+  private compactCoordCell(label: string, key: string, unit: string = 'nm') {
+    SelectionPropertyField({
+      label: label,
+      unit: unit,
+      fieldKey: key,
+      compactCell: true,
+      bareInput: false,
+      stacked: false,
+      value: this.commonValue(key),
+      selectionKey: this.selectionKey(),
+      editable: this.editable,
+      focusGuardId: this.focusGuardId(),
+      returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
+      saveShortcutAction: this.saveShortcutAction,
+      submitAction: (k: string, val: string, sel: string) => this.submit(k, val, sel)
+    }).layoutWeight(1)
+  }
+
+  @Builder
   private GeometryGrid() {
-    Column({ space: 8 }) {
-      if (this.hasField('x') && this.hasField('y')) {
-        Row({ space: 8 }) {
-          SelectionPropertyField({
-            label: 'X',
-            unit: 'nm',
-            fieldKey: 'x',
-            compactCell: true,
-            bareInput: false,
-            stacked: false,
-            value: this.commonValue('x'),
-            selectionKey: this.selectionKey(),
-            editable: this.editable,
-            focusGuardId: this.focusGuardId(),
-            returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
-            saveShortcutAction: this.saveShortcutAction,
-            submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
-          }).layoutWeight(1)
-          SelectionPropertyField({
-            label: 'Y',
-            unit: 'nm',
-            fieldKey: 'y',
-            compactCell: true,
-            bareInput: false,
-            stacked: false,
-            value: this.commonValue('y'),
-            selectionKey: this.selectionKey(),
-            editable: this.editable,
-            focusGuardId: this.focusGuardId(),
-            returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
-            saveShortcutAction: this.saveShortcutAction,
-            submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
-          }).layoutWeight(1)
+    Column({ space: 7 }) {
+      if (this.isScalableGeometry()) {
+        // 显式坐标基准切换器（中心点 / 左下角 / 对角边界）
+        Row({ space: 6 }) {
+          Text('坐标基准')
+            .fontSize(10.5)
+            .fontColor(COLORS.muted)
+          Row() {
+            StableSegmentButton({
+              items: [
+                { text: '中心点' },
+                { text: '左下角' },
+                { text: '对角边界' }
+              ] as [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
+              selectedIndex: this.coordMode,
+              onItemClicked: (idx: number) => {
+                if (idx === 0 || idx === 1 || idx === 2) {
+                  this.coordMode = idx;
+                }
+              },
+              fontColor: COLORS.muted,
+              selectedFontColor: COLORS.primary,
+              capsuleBackgroundColor: COLORS.surfaceMuted,
+              selectedBackgroundColor: COLORS.primarySoft,
+              fontSizeFp: 10.5,
+              capsuleBorderRadius: 6,
+              buttonMinHeight: 26,
+              itemMinHeight: 22,
+              itemPaddingHorizontal: 5,
+              itemPaddingVertical: 2
+            })
+          }.layoutWeight(1)
+        }.width('100%').alignItems(VerticalAlign.Center)
+
+        if (this.coordMode === 0) {
+          Row({ space: 6 }) {
+            this.compactCoordCell('中心CX', 'centerX')
+            this.compactCoordCell('中心CY', 'centerY')
+          }.width('100%')
+          Row({ space: 6 }) {
+            this.compactCoordCell('宽 W', 'widthCenter')
+            this.compactCoordCell('高 H', 'heightCenter')
+          }.width('100%')
+        } else if (this.coordMode === 1) {
+          Row({ space: 6 }) {
+            this.compactCoordCell('左下X', 'x')
+            this.compactCoordCell('左下Y', 'y')
+          }.width('100%')
+          Row({ space: 6 }) {
+            this.compactCoordCell('宽 W', 'width')
+            this.compactCoordCell('高 H', 'height')
+          }.width('100%')
+        } else {
+          Row({ space: 6 }) {
+            this.compactCoordCell('左 X1', 'minXEdge')
+            this.compactCoordCell('下 Y1', 'minYEdge')
+          }.width('100%')
+          Row({ space: 6 }) {
+            this.compactCoordCell('右 X2', 'maxX')
+            this.compactCoordCell('上 Y2', 'maxY')
+          }.width('100%')
+        }
+      } else if (this.hasField('x') && this.hasField('y')) {
+        Row({ space: 6 }) {
+          this.compactCoordCell('锚点X', 'x')
+          this.compactCoordCell('锚点Y', 'y')
         }.width('100%')
       }
-      if (this.hasField('width') && this.hasField('height')) {
-        Row({ space: 8 }) {
-          SelectionPropertyField({
-            label: '宽',
-            unit: 'nm',
-            fieldKey: 'width',
-            compactCell: true,
-            bareInput: false,
-            stacked: false,
-            value: this.commonValue('width'),
-            selectionKey: this.selectionKey(),
-            editable: this.editable,
-            focusGuardId: this.focusGuardId(),
-            returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
-            saveShortcutAction: this.saveShortcutAction,
-            submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
-          }).layoutWeight(1)
-          SelectionPropertyField({
-            label: '高',
-            unit: 'nm',
-            fieldKey: 'height',
-            compactCell: true,
-            bareInput: false,
-            stacked: false,
-            value: this.commonValue('height'),
-            selectionKey: this.selectionKey(),
-            editable: this.editable,
-            focusGuardId: this.focusGuardId(),
-            returnCanvasFocusAction: () => this.returnCanvasFocusAction(),
-            saveShortcutAction: this.saveShortcutAction,
-            submitAction: (key: string, value: string, selection: string) => this.submit(key, value, selection)
-          }).layoutWeight(1)
-        }.width('100%')
+
+      // 实时几何摘要卡（微米读数，一眼看清中心、对角范围与面积）
+      Column({ space: 2 }) {
+        Text(this.singleGeometrySummaryLines()[0])
+          .fontSize(10)
+          .fontFamily(FONT_MONO)
+          .fontColor(COLORS.ink)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.singleGeometrySummaryLines()[1])
+          .fontSize(9.5)
+          .fontFamily(FONT_MONO)
+          .fontColor(COLORS.muted)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
+      .width('100%')
+      .padding({ left: 8, right: 8, top: 5, bottom: 5 })
+      .backgroundColor(COLORS.surfaceMuted)
+      .borderRadius(6)
+      .alignItems(HorizontalAlign.Start)
     }.width('100%')
+  }
+
+  @Builder
+  private InstanceArraySection() {
+    Column({ space: 6 }) {
+      Text('行列阵列 (GDSII AREF)')
+        .fontSize(10.5)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(COLORS.muted)
+        .width('100%')
+      Row({ space: 6 }) {
+        this.compactCoordCell('列数', 'arrayCols', '')
+        this.compactCoordCell('行数', 'arrayRows', '')
+      }.width('100%')
+      Row({ space: 6 }) {
+        this.compactCoordCell('列距X', 'arrayColStepX', 'nm')
+        this.compactCoordCell('行距Y', 'arrayRowStepY', 'nm')
+      }.width('100%')
+    }
+    .width('100%')
+    .padding({ top: 6 })
+    .border({ width: { top: 0.8 }, color: COLORS.border })
   }
 
   build() {
@@ -422,7 +527,7 @@ export struct ShapePropertiesPopover {
           .onClick(this.closeAction)
         }
         .width('100%')
-        .height(this.docked ? 56 : 44)
+        .height(this.docked ? 52 : 42)
         .padding({ left: this.docked ? UI.panelPadding : 12, right: this.docked ? UI.panelPadding : 10 })
         .border({ width: { bottom: 0.8 }, color: COLORS.border })
 
@@ -456,7 +561,7 @@ export struct ShapePropertiesPopover {
               if (this.enterInstanceAction !== null || this.flattenInstanceAction !== null) {
                 Row({ space: 8 }) {
                   if (this.enterInstanceAction !== null && this.targets().length === 1) {
-                    Button('进入 Cell', { type: ButtonType.Normal })
+                    Button('进入子 Cell', { type: ButtonType.Normal })
                       .utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier())
                       .layoutWeight(1)
                       .height(30)
@@ -471,7 +576,7 @@ export struct ShapePropertiesPopover {
                       })
                   }
                   if (this.flattenInstanceAction !== null) {
-                    Button('展开实例', { type: ButtonType.Normal })
+                    Button('展开打平', { type: ButtonType.Normal })
                       .utilityButton().attributeModifier(hongTuThemeState.luminousPointLightModifier())
                       .layoutWeight(1)
                       .height(30)
@@ -496,6 +601,10 @@ export struct ShapePropertiesPopover {
 
             this.GeometryGrid()
 
+            if (this.commonType() === ShapeType.INSTANCE) {
+              this.InstanceArraySection()
+            }
+
             this.propertyFields(['pathWidth', 'text'])
 
             if (this.detailsExpanded && this.commonType() === ShapeType.PATH) {
@@ -503,8 +612,8 @@ export struct ShapePropertiesPopover {
               this.propertyFields(['pathType', 'pathBeginExtension', 'pathEndExtension', 'pathWidthAbsolute'])
             }
             if (this.detailsExpanded && this.commonType() === ShapeType.INSTANCE) {
-              this.propertySection('阵列参数')
-              this.propertyFields(['arrayCols', 'arrayRows', 'arrayColStepX', 'arrayColStepY', 'arrayRowStepX', 'arrayRowStepY'])
+              this.propertySection('正交斜置阵列分量')
+              this.propertyFields(['arrayColStepY', 'arrayRowStepX'])
             }
             if (this.detailsExpanded && (this.commonType() === ShapeType.INSTANCE || this.commonType() === ShapeType.TEXT)) {
               this.propertySection(this.commonType() === ShapeType.TEXT ? '显示变换' : '实例变换')
@@ -599,7 +708,7 @@ export struct ShapePropertiesPopover {
         .layoutWeight(this.docked ? 1 : 0)
         .constraintSize({
           minHeight: 0,
-          maxHeight: this.docked ? this.panelHeight : Math.max(0, Math.min(420, this.panelHeight - 100))
+          maxHeight: this.docked ? this.panelHeight : Math.max(0, Math.min(440, this.panelHeight - 92))
         })
         .align(Alignment.Top)
         .scrollBar(BarState.Auto)
@@ -639,11 +748,11 @@ export struct ShapePropertiesPopover {
           .onClick(this.deleteAction)
         }
         .width('100%')
-        .height(this.docked ? 60 : 48)
+        .height(this.docked ? 56 : 46)
         .padding({ left: this.docked ? UI.panelPadding : 12, right: this.docked ? UI.panelPadding : 12 })
         .border({ width: { top: 0.8 }, color: COLORS.border })
       }
-      .width(this.docked ? '100%' : 274)
+      .width(this.docked ? '100%' : 284)
       .layoutWeight(this.docked ? 1 : 0)
       .attributeModifier(this.docked
         ? hongTuThemeState.luminousCardModifier(0, { radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
@@ -777,9 +886,9 @@ struct SelectionPropertyField {
     Row({ space: 4 }) {
       if (this.compactCell && this.label.length > 0) {
         Text(this.label)
-          .fontSize(11)
+          .fontSize(10.5)
           .fontColor(COLORS.muted)
-          .constraintSize({ minWidth: 14 })
+          .constraintSize({ minWidth: 28 })
           .maxLines(1)
       }
       TextInput({ text: this.draft, placeholder: this.bareInput ? 'L/D' : '多值' })
@@ -787,7 +896,7 @@ struct SelectionPropertyField {
         .fontFamily(FONT_MONO)
         .fontColor(COLORS.ink)
         .placeholderColor(COLORS.muted)
-        .height(32)
+        .height(30)
         .layoutWeight(1)
         .padding({ left: 2, right: 2 })
         .backgroundColor(Color.Transparent)
@@ -813,15 +922,15 @@ struct SelectionPropertyField {
         .onKeyEvent((event: KeyEvent) => this.handleInputKey(event))
       if (this.unit.length > 0) {
         Text(this.unit)
-          .fontSize(10)
+          .fontSize(9.5)
           .fontFamily(FONT_MONO)
           .fontColor(COLORS.muted)
           .maxLines(1)
       }
     }
     .width('100%')
-    .height(34)
-    .padding({ left: 8, right: 8 })
+    .height(32)
+    .padding({ left: 7, right: 7 })
     .backgroundColor(COLORS.surfaceMuted)
     .border({ width: 1, color: COLORS.border })
     .borderRadius(UI.controlRadius)

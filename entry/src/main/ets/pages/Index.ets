@@ -100,6 +100,8 @@ import { layoutCompareService, LayoutCompareRun } from '../services/LayoutCompar
 import { layerStackExportService } from '../services/LayerStackExportService';
 import { pythonWorkspaceService, PythonWorkspaceBundle, PythonEditorDraft, PythonTemplate } from '../services/PythonWorkspaceService';
 import { aiHarnessService, AiHarnessResult, HarnessToolState, HarnessContextUsage } from '../services/AiHarnessService';
+import { dshLayoutAgentService, DshLayoutBackendHost, DshCmosInverterParams, DshEditOperation, DshToolExecutionOutcome, DshAgentRunResult } from '../services/DshLayoutAgentService';
+import type { DshPermissionMode } from '../components/dsh/DshDesign';
 import { publishAiLiveStream, resetAiLiveStream, splitInlineThinking } from '../services/AiAgentPresentation';
 import type { AiProcessStep } from '../services/AiService';
 import { WorkspaceTabs } from '../components/workbench/WorkspaceTabs';
@@ -144,7 +146,7 @@ import type { HierarchyHitCandidate, HierarchyCandidatesResult } from '../servic
 import { WorkbenchCommand } from '../services/CommandSearchService';
 import { booleanPreviewService, BooleanPreview, BooleanPreviewOptions, BooleanPreviewResult, PreviewBooleanOp } from '../services/BooleanPreviewService';
 import { flattenPreviewService } from '../services/FlattenPreviewService';
-import { workspaceService, WorkspaceDocument, WorkspaceTab, WorkspaceHistory, PCellVariant, WorkspaceLocalProcessState, WorkspacePreparedDraft } from '../services/WorkspaceService';
+import { workspaceService, MAX_WORKSPACE_TABS, WorkspaceDocument, WorkspaceTab, WorkspaceHistory, PCellVariant, WorkspaceLocalProcessState, WorkspacePreparedDraft } from '../services/WorkspaceService';
 import { EditSessionState, EditStructureState } from '../services/EditService';
 import { PropertyCellOption, DecodedPCellProperty, decodePCellProperty } from '../services/ShapePropertyService';
 import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
@@ -221,7 +223,7 @@ import { menuIcon, menuSubmenuArrow, MENU_ITEM_STYLE, MENU_DANGER_ITEM_STYLE, me
 import { PanelHeading } from '../components/workbench/PanelHeading';
 import { defaultLayoutLayer, hasSky130DisplaySignature } from '../services/LayoutDisplayDefaults';
 import { BREAKPOINT_MD, BreakpointManager, DeviceType, LayoutConfig, breakpointManager } from '../common/BreakpointManager';
-import { setShiftHeld, setCtrlHeld, isShiftHeld, isCtrlHeld } from '../common/ModifierKeys';
+import { setShiftHeld, setCtrlHeld, setAltHeld, isShiftHeld, isCtrlHeld } from '../common/ModifierKeys';
 import { canvasKeyName } from '../common/CanvasKeyboard';
 import { promptAction, window, display } from '@kit.ArkUI';
 import { Elevation, SHADOW_BY_ELEVATION, BLUR_BY_LAYER } from '../common/MaterialTokens';
@@ -769,10 +771,12 @@ struct Index {
       initialCellIdProvider: (): number => this.resolveInitialInstanceCellId(),
       dbuProvider: (): number => cleanDbuNm(this.docStore.docPhysicalUnits),
       isCompact: this.isCompact(),
+      cellSpanProvider: (cellId: number): Point | null => this.computeCellBoundingSpan(cellId),
       viewportCenterProvider: (): Point => this.currentViewportWorldCenter(),
       contextProvider: (): string => this.parameterDialogContext(),
-      onConfirm: (cellId: number, x: number, y: number, rotation: number, mirror: number) => {
-        return this.placeInstance(cellId, x, y, rotation, mirror);
+      onConfirm: (cellId: number, x: number, y: number, rotation: number, mirror: number,
+        arrayCols?: number, arrayRows?: number, pitchX?: number, pitchY?: number) => {
+        return this.placeInstance(cellId, x, y, rotation, mirror, arrayCols ?? 1, arrayRows ?? 1, pitchX ?? 0, pitchY ?? 0);
       },
       onStartInteractiveStamp: (cellId: number, rotation: number, mirror: number): boolean => {
         return this.startCellStampSession(cellId, rotation, mirror);
@@ -2413,6 +2417,7 @@ struct Index {
             tabletMode: !this.isDesktopWorkspace() && !this.isCompact(),
             files: unwrapObserved(this.docStore.recentFiles),
             currentFilePath: this.docStore.currentFilePath,
+            activeDocumentTitle: this.currentFileDisplayName() || '未命名版图',
             docLibName: this.docStore.docLibName,
             docCellCount: this.docStore.docCellCount,
             docElementCount: this.docStore.docElementCount,
@@ -2459,6 +2464,8 @@ struct Index {
           cellTree: unwrapObserved(this.docStore.cellTreeData),
           cellDefinitionCount: this.placeableCells.length,
           currentTopCellId: this.docStore.currentEditingCellId,
+          rootTopCellId: editService.getTopCellId(),
+          currentEditingCellName: this.docStore.currentEditingCellName,
           presetNames: unwrapObserved(this.docStore.layerPresetNames),
           savePresetAction: () => {
             this.presetSaveContext = this.parameterDialogContext();
@@ -2493,6 +2500,9 @@ struct Index {
           },
           newCellAction: () => {
             this.openNewCellDialog();
+          },
+          placeCellInstanceAction: (cellId: number) => {
+            this.openInstanceDialogForCell(cellId);
           },
           deleteCellAction: (cellId: number) => {
             this.confirmDeleteCell(cellId);
@@ -2576,12 +2586,33 @@ struct Index {
           // 手机和平板保留水平工具栏；桌面端工具栏位于白画布左侧。
           if (!this.isDesktopWorkspace()) {
             DrawingToolbar({
+            draftStore: this.draftControlStore,
+            measureStore: this.measureStore,
+            multiSelectAdditive: this.viewportStore.multiSelectAdditive,
+            hierarchyDepth: this.docStore.hierarchyDepth,
             curveAction: (name: string) => this.openCurveDialog(name),
             interactiveCurveAction: (kind: string) => this.activateInteractiveCurve(kind),
             activeCurveKind: this.viewportStore.interactiveCurveKind,
             currentTool: this.viewportStore.currentTool,
             editable: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT,
             isCompact: this.isCompact(),
+            routingModeChangeAction: (mode: RoutingMode) => { this.viewportStore.routingMode = mode; },
+            pathWidthChangeAction: (w: string) => { this.draftControlStore.pathWidthStr = w; },
+            toggleAdditiveSelectAction: () => { this.viewportStore.multiSelectAdditive = !this.viewportStore.multiSelectAdditive; },
+            selectAllAction: () => { this.selectAllShapes(); },
+            clearSelectionAction: () => { this.handleShortcut(ShortcutAction.DESELECT); },
+            switchMoveToolAction: () => { this.switchToMoveTool(); },
+            fitAllAction: () => { this.fitAllShapes(); },
+            resetViewAction: () => { this.resetView(); },
+            viewBackAction: () => { this.viewBack(); },
+            setHierarchyDepthAction: (d: number) => { viewService.setHierarchyDepth(d); },
+            exactCreateRectAction: (minX: number, minY: number, maxX: number, maxY: number): boolean =>
+              this.createRectShape({ x: minX, y: minY }, { x: maxX, y: maxY }),
+            viewportCenterProvider: (): Point => this.currentViewportWorldCenter(),
+            placeInstanceDialogAction: () => { this.openInstanceDialogForCell(-1); },
+            placePCellDialogAction: () => { this.openPCellDialog(); },
+            makeCellFromSelectionAction: () => { this.openMakeCellDialog(); },
+            arrayCopySelectionAction: () => { this.openArrayCopyDialog(); },
             selectToolAction: (tool: ActiveTool, label: string) => {
               this.viewportStore.interactiveCurveKind = '';
               if (tool === ActiveTool.Instance) {
@@ -2729,7 +2760,8 @@ struct Index {
                 : COLORS.surface)
               .border({ width: { bottom: 0.8 }, color: COLORS.border })
           }
-          if (this.viewportStore.instanceScopeLabel.length > 0) {
+          if (this.viewportStore.instanceScopeLabel.length > 0 &&
+            (this.isDesktopWorkspace() || !this.isCompact() || this.viewportStore.pickedPlacement !== null || editService.getCurrentCellId() !== editService.getTopCellId())) {
           Row({ space: 8 }) {
             Text('共享定义').fontSize(UI.fontCaption).fontColor(COLORS.primary)
               .padding({ left: 6, right: 6, top: 4, bottom: 4 }).backgroundColor(COLORS.primarySoft).borderRadius(UI.chipRadius)
@@ -2839,6 +2871,9 @@ struct Index {
               },
               requestPathToolAction: (): void => {
                 this.viewportStore.currentTool = ActiveTool.Path;
+              },
+              fitAllAction: (): void => {
+                this.fitAllShapes();
               },
               selectionLayerFilter: this.viewportStore.selectionLayerFilter,
               selectionDatatypeFilter: this.viewportStore.selectionDatatypeFilter,
@@ -2960,6 +2995,10 @@ struct Index {
             })
             if (this.isDesktopWorkspace()) {
               DrawingToolbar({
+                draftStore: this.draftControlStore,
+                measureStore: this.measureStore,
+                multiSelectAdditive: this.viewportStore.multiSelectAdditive,
+                hierarchyDepth: this.docStore.hierarchyDepth,
                 curveAction: (name: string) => this.openCurveDialog(name),
                 interactiveCurveAction: (kind: string) => this.activateInteractiveCurve(kind),
                 activeCurveKind: this.viewportStore.interactiveCurveKind,
@@ -2967,6 +3006,23 @@ struct Index {
                 editable: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT,
                 vertical: true,
                 availableHeight: this.viewportStore.canvasViewportHeight - 28,
+                routingModeChangeAction: (mode: RoutingMode) => { this.viewportStore.routingMode = mode; },
+                pathWidthChangeAction: (w: string) => { this.draftControlStore.pathWidthStr = w; },
+                toggleAdditiveSelectAction: () => { this.viewportStore.multiSelectAdditive = !this.viewportStore.multiSelectAdditive; },
+                selectAllAction: () => { this.selectAllShapes(); },
+                clearSelectionAction: () => { this.handleShortcut(ShortcutAction.DESELECT); },
+                switchMoveToolAction: () => { this.switchToMoveTool(); },
+                fitAllAction: () => { this.fitAllShapes(); },
+                resetViewAction: () => { this.resetView(); },
+                viewBackAction: () => { this.viewBack(); },
+                setHierarchyDepthAction: (d: number) => { viewService.setHierarchyDepth(d); },
+                exactCreateRectAction: (minX: number, minY: number, maxX: number, maxY: number): boolean =>
+                  this.createRectShape({ x: minX, y: minY }, { x: maxX, y: maxY }),
+                viewportCenterProvider: (): Point => this.currentViewportWorldCenter(),
+                placeInstanceDialogAction: () => { this.openInstanceDialogForCell(-1); },
+                placePCellDialogAction: () => { this.openPCellDialog(); },
+                makeCellFromSelectionAction: () => { this.openMakeCellDialog(); },
+                arrayCopySelectionAction: () => { this.openArrayCopyDialog(); },
                 selectToolAction: (tool: ActiveTool, label: string) => {
                   this.viewportStore.interactiveCurveKind = '';
                   if (tool === ActiveTool.Instance) {
@@ -3102,7 +3158,7 @@ struct Index {
         .showSideBar(this.panelStore.sidebarVisible)
         .showControlButton(false)
         .sideBarWidth(this.sidebarWidth())
-        .minSideBarWidth(220)
+        .minSideBarWidth(196)
         .maxSideBarWidth(400)
         .autoHide(false)
         .minContentWidth(0)
@@ -3146,7 +3202,7 @@ struct Index {
     .padding({
       bottom: this.isDesktopWorkspace() || deviceInfo.sdkApiVersion < 20
         ? Math.max(0, this.safeAreaBottomVp)
-        : 76 + Math.max(8, this.safeAreaBottomVp)
+        : 68 + Math.min(10, Math.max(4, Math.round(this.safeAreaBottomVp * 0.35)))
     })
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
@@ -3564,25 +3620,39 @@ struct Index {
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
 
       if (this.panelStore.showProjectPanel) {
-        ProjectPanel({
-          panelWidth: Math.min(640, this.panelStore.windowWidthVp - 32),
-          actionStatus: this.panelStore.statusText,
-          history: unwrapObserved(this.docStore.workspaceHistory),
-          recoveryStatus: this.docStore.recoveryStatus,
-          engineeringDependencies: unwrapObserved(this.docStore.engineeringDependencies),
-          toolBundleAvailable: this.engineeringBundle !== undefined,
-          restoreToolContentsAction: () => { this.confirmRestoreEngineeringTools(); },
-          recentEdits: editService.getHistorySummary(8),
-          recoveryEntries: unwrapObserved(this.docStore.fileRecoveryEntries),
-          recoverAction: (item: ProjectRecoveryEntry) => { this.exportRecoveryCopy(item); },
-          closeAction: () => { this.panelStore.showProjectPanel = false; this.restoreCanvasFocusAfterPanelClose(); },
-          createAction: (library: string, top: string, dbu: number) => this.createWorkspaceDocument(library, top, dbu),
-          saveProjectAction: () => { this.saveProject(); },
-          saveProjectAsAction: () => { this.saveProject(true); },
-          openProjectAction: () => { this.openProject(); },
-          checkpointAction: () => { this.saveWorkspaceDraft(true); },
-          restoreAction: (item: WorkspaceHistory) => { this.restoreWorkspaceHistory(item); }
+        Stack({ alignContent: Alignment.Center }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor('rgba(15, 23, 42, 0.24)')
+            .onClick(() => { this.panelStore.showProjectPanel = false; this.restoreCanvasFocusAfterPanelClose(); })
+          ProjectPanel({
+            panelWidth: Math.min(640, this.panelStore.windowWidthVp - 24),
+            actionStatus: this.panelStore.statusText,
+            history: unwrapObserved(this.docStore.workspaceHistory),
+            recoveryStatus: this.docStore.recoveryStatus,
+            engineeringDependencies: unwrapObserved(this.docStore.engineeringDependencies),
+            toolBundleAvailable: this.engineeringBundle !== undefined,
+            restoreToolContentsAction: () => { this.confirmRestoreEngineeringTools(); },
+            recentEdits: editService.getHistorySummary(8),
+            recoveryEntries: unwrapObserved(this.docStore.fileRecoveryEntries),
+            recoverAction: (item: ProjectRecoveryEntry) => { this.exportRecoveryCopy(item); },
+            closeAction: () => { this.panelStore.showProjectPanel = false; this.restoreCanvasFocusAfterPanelClose(); },
+            createAction: (library: string, top: string, dbu: number) => this.createWorkspaceDocument(library, top, dbu),
+            saveProjectAction: () => { this.saveProject(); },
+            saveProjectAsAction: () => { this.saveProject(true); },
+            openProjectAction: () => { this.openProject(); },
+            checkpointAction: () => { this.saveWorkspaceDraft(true); },
+            restoreAction: (item: WorkspaceHistory) => { this.restoreWorkspaceHistory(item); }
+          })
+        }
+        .width('100%')
+        .height('100%')
+        .padding({
+          top: Math.max(8, this.safeAreaTopVp + 8),
+          bottom: this.isDesktopWorkspace() ? Math.max(12, this.safeAreaBottomVp + 8) : 78
         })
+        .zIndex(ZIndexTokens.projectPanel)
         .transition(this.modalTransition())
       }
       if (this.panelStore.showSearchPanel) {
@@ -3643,11 +3713,27 @@ struct Index {
       if (this.panelStore.showAiPanel) {
         AiAssistantPanel({
               desktopMode: this.isDesktopWorkspace(),
-              panelWidth: Math.min(460, this.panelStore.windowWidthVp - 24),
-              panelHeight: Math.max(320, this.panelStore.windowHeightVp - 144),
-              sessionMode: this.aiStore.aiSessionMode,
+              panelWidth: this.isDesktopWorkspace()
+                ? Math.min(460, Math.max(320, this.panelStore.windowWidthVp - 24))
+                : Math.min(480, Math.max(280, this.panelStore.windowWidthVp - 20)),
+              panelHeight: this.isDesktopWorkspace()
+                ? Math.max(320, this.panelStore.windowHeightVp - 88)
+                : Math.max(300, this.panelStore.windowHeightVp - Math.max(0, this.safeAreaTopVp) - 138),
+              sessionMode: this.aiStore.aiPermissionMode === 'readonly' ? 'readonly' : 'agent',
+              permissionMode: this.aiStore.aiPermissionMode,
+              changePermissionModeAction: (mode: DshPermissionMode) => {
+                this.aiStore.aiPermissionMode = mode;
+                this.aiStore.aiSessionMode = mode === 'readonly' ? 'readonly' : 'agent';
+              },
+              turnChangeSummary: this.aiStore.aiTurnChangeSummary,
+              runStartedAt: this.aiStore.aiRunStartedAt,
+              fitCanvasAction: () => { this.fitAllShapes(); },
               toggleSessionModeAction: () => {
-                this.aiStore.aiSessionMode = this.aiStore.aiSessionMode === 'agent' ? 'readonly' : 'agent';
+                const nextMode: DshPermissionMode = this.aiStore.aiPermissionMode === 'auto'
+                  ? 'review'
+                  : (this.aiStore.aiPermissionMode === 'review' ? 'readonly' : 'auto');
+                this.aiStore.aiPermissionMode = nextMode;
+                this.aiStore.aiSessionMode = nextMode === 'readonly' ? 'readonly' : 'agent';
               },
               minimizeAction: () => {
                 this.panelStore.showAiPanel = false;
@@ -3717,7 +3803,12 @@ struct Index {
               contextSummary: this.aiContextDetail()
             })
             .zIndex(ZIndexTokens.aiAssistantPanel)
-            .position({ x: this.isDesktopWorkspace() ? Math.max(16, this.panelStore.windowWidthVp - 476) : (this.isCompact() ? 12 : Math.max(16, this.panelStore.windowWidthVp - 396)), y: this.isDesktopWorkspace() ? 68 : (this.isCompact() ? 60 : 76) })
+            .position({
+              x: this.isDesktopWorkspace()
+                ? Math.max(16, this.panelStore.windowWidthVp - Math.min(460, Math.max(320, this.panelStore.windowWidthVp - 24)) - 16)
+                : Math.max(10, Math.round((this.panelStore.windowWidthVp - Math.min(480, Math.max(280, this.panelStore.windowWidthVp - 20))) / 2)),
+              y: this.isDesktopWorkspace() ? 64 + Math.max(0, this.safeAreaTopVp) : 52 + Math.max(0, this.safeAreaTopVp)
+            })
             .transition(this.floatingTransition(TransitionEdge.END))
       }
 
@@ -4234,6 +4325,7 @@ struct Index {
       if (this.nudgeTxActive) this.finishNudgeTransaction();
       setShiftHeld(false);
       setCtrlHeld(false);
+      setAltHeld(false);
       return;
     }
     const key: string = canvasKeyName(event.keyCode, event.keyText);
@@ -4244,6 +4336,10 @@ struct Index {
     }
     if (key === 'CTRL') {
       setCtrlHeld(down);
+      return;
+    }
+    if (key === 'ALT') {
+      setAltHeld(down);
       return;
     }
     if (!down) {
@@ -4267,6 +4363,7 @@ struct Index {
     }
     setCtrlHeld(ctrl);
     setShiftHeld(shift);
+    setAltHeld(alt);
     if (alt || event.metaKey !== 0) return;
 
     let handled: boolean = true;
@@ -4309,9 +4406,23 @@ struct Index {
         case 'ARROWDOWN': this.handleShortcut(ShortcutAction.NUDGE, 'down'); break;
         case 'ARROWLEFT': this.handleShortcut(ShortcutAction.NUDGE, 'left'); break;
         case 'ARROWRIGHT': this.handleShortcut(ShortcutAction.NUDGE, 'right'); break;
-        case '+': this.handleShortcut(ShortcutAction.ZOOM_IN); break;
-        case '-': this.handleShortcut(ShortcutAction.ZOOM_OUT); break;
+        case '+':
+        case ']': this.handleShortcut(ShortcutAction.ZOOM_IN); break;
+        case '-':
+        case '[': this.handleShortcut(ShortcutAction.ZOOM_OUT); break;
+        case 'F2': this.fitAllShapes(); break;
+        case 'HOME': this.resetView(); break;
+        case '*':
+          viewService.setHierarchyDepth(5);
+          this.panelStore.statusText = '层级展开深度: 全部 (5 层)';
+          break;
         default:
+          if (shift && key === 'K') {
+            this.measureStore.clearAll();
+            this.panelStore.statusText = '已清空全部测量标注与参考标尺';
+            handled = true;
+            break;
+          }
           handled = /^[A-Z]$/.test(key) && shortcutService.consumeInput(key);
           if (!handled) handled = key.length === 1 && this.handleSingleKey(key);
       }
@@ -5904,9 +6015,25 @@ struct Index {
     this.docStore.workspaceTabs = tabs;
   }
 
+  private isCurrentWorkspaceTabEmptyReusable(): boolean {
+    return this.docStore.workspaceReady &&
+      editService.getShapes().length === 0 &&
+      this.docPorts.length === 0 &&
+      !this.localPythonDraftDirty;
+  }
+
+  private availableAiArtifactSlots(): number {
+    const freeTabs: number = Math.max(0, MAX_WORKSPACE_TABS - this.docStore.workspaceTabs.length);
+    const reuseEmpty: number = (freeTabs === 0 && this.isCurrentWorkspaceTabEmptyReusable()) ? 1 : 0;
+    return Math.min(8, freeTabs + reuseEmpty);
+  }
+
   private canOpenWorkspaceDocument(): boolean {
     if (!this.docStore.workspaceReady) { this.panelStore.statusText = '正在恢复工作区，请稍候'; return false; }
-    if (this.docStore.workspaceTabs.length >= 8) { this.panelStore.statusText = '最多同时打开 8 个版图，请先关闭一个标签页'; return false; }
+    if (this.docStore.workspaceTabs.length >= MAX_WORKSPACE_TABS) {
+      this.panelStore.statusText = `最多同时打开 ${MAX_WORKSPACE_TABS} 个版图，请先关闭一个标签页`;
+      return false;
+    }
     return true;
   }
 
@@ -6926,6 +7053,7 @@ struct Index {
   private layersWithCounts(sourceLayers: UiLayer[], shapes: Shape[], preserveOwnFields: boolean = false): UiLayer[] {
     const counts: Map<string, number> = new Map<string, number>();
     for (const shape of shapes) {
+      if (shape.type === ShapeType.INSTANCE || shape.type === ShapeType.NODE) continue;
       const key: string = `${shape.layerNumber}:${shape.datatype}`;
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
@@ -6941,6 +7069,7 @@ struct Index {
 
     for (let i = 0; i < shapes.length; i++) {
       const shape = shapes[i];
+      if (shape.type === ShapeType.INSTANCE || shape.type === ShapeType.NODE) continue;
       const key: string = `${shape.layerNumber}:${shape.datatype}`;
       const queryKey: string = `${shape.layerNumber}:${shape.datatype === undefined ? 0 : shape.datatype}`;
       if (!included.has(queryKey)) {
@@ -8395,7 +8524,10 @@ struct Index {
       (artifact.sourceDocumentId !== id || revision !== start)) {
       this.panelStore.statusText = 'Python 输出对应的源文档已改变，请重新执行后载入'; return false;
     }
-    if (mode === 'replace' && !this.canOpenWorkspaceDocument()) return false;
+    const reuseEmptyActiveTab: boolean = mode === 'replace' &&
+      this.docStore.workspaceTabs.length >= MAX_WORKSPACE_TABS &&
+      this.isCurrentWorkspaceTabEmptyReusable();
+    if (mode === 'replace' && !reuseEmptyActiveTab && !this.canOpenWorkspaceDocument()) return false;
     if (mode === 'merge' && !this.assertEditMode()) return false;
     let parsed: GdsiiResult;
     onStage('parse', 'running', '正在解析生成的版图文件');
@@ -8416,7 +8548,7 @@ struct Index {
     }
     const resultDocument: WorkspaceDocument = workspaceService.cloneValidatedDocument(this.workspaceDocument());
     const top: number = parsed.primaryTopCellId >= 0 ? parsed.primaryTopCellId : 0;
-    resultDocument.id = workspaceService.newId(); resultDocument.title = artifact.name;
+    resultDocument.id = reuseEmptyActiveTab ? id : workspaceService.newId(); resultDocument.title = artifact.name;
     resultDocument.shapes = nativeShapesToShapes(parsed.shapes);
     if (requireGeometry && parsed.ports.length === 0 && !resultDocument.shapes.some((shape: Shape): boolean =>
       shape.type !== ShapeType.NODE && shape.type !== ShapeType.INSTANCE)) throw new Error('模型脚本未生成可绘制图形或有效端口，原文档已保留');
@@ -8443,10 +8575,17 @@ struct Index {
     onStage('parse', 'completed', `已解析 ${validated.shapes.length} 个图形、${validated.layers.length} 个图层`);
     if (!isCurrent()) return false;
     if (mode === 'replace') {
-      if (!this.canOpenWorkspaceDocument() || !isCurrent()) return false;
-      onStage('activate', 'running', '正在打开独立版图标签页');
+      const reuseNow: boolean = this.docStore.workspaceTabs.length >= MAX_WORKSPACE_TABS && this.isCurrentWorkspaceTabEmptyReusable();
+      if (!reuseNow && !this.canOpenWorkspaceDocument()) return false;
       if (!isCurrent()) return false;
-      this.captureWorkspaceDocument();
+      if (reuseNow && validated.id !== id) {
+        validated.id = id;
+      }
+      onStage('activate', 'running', reuseNow ? '正在当前空白标签页载入版图' : '正在打开独立版图标签页');
+      if (!isCurrent()) return false;
+      if (!reuseNow) {
+        this.captureWorkspaceDocument();
+      }
       try {
         // All geometry and named/empty layers are validated before native activation or publication.
         this.activateWorkspaceDocument(validated);
@@ -8457,9 +8596,9 @@ struct Index {
       this.workspaceDocuments.set(validated.id, validated);
       this.originalSourceCurrent = false;
       this.lvsNativeNets = []; this.verifyStore.lvsReports = []; this.verifyStore.comparisonCellName = '';
-      this.fitAllShapes(); this.panelStore.statusText = `已在新标签页载入 Python 版图：${artifact.name} · ${parsed.ports.length} 个端口${(parsed.portCapabilityDiagnostics ?? []).length > 0 ? `；${(parsed.portCapabilityDiagnostics ?? []).join('；')}` : ''}`;
+      this.fitAllShapes(); this.panelStore.statusText = `已${reuseNow ? '在当前空白标签页' : '在新标签页'}载入 Python 版图：${artifact.name} · ${parsed.ports.length} 个端口${(parsed.portCapabilityDiagnostics ?? []).length > 0 ? `；${(parsed.portCapabilityDiagnostics ?? []).join('；')}` : ''}`;
       this.refreshWorkspaceTabs(); this.scheduleWorkspaceDraft();
-      onStage('activate', 'completed', '已打开独立标签页，原文档保留');
+      onStage('activate', 'completed', reuseNow ? '已载入当前空白标签页' : '已打开独立标签页，原文档保留');
       return true;
     }
     return this.insertLibraryEntry({ id: `python-${Date.now()}`, title: artifact.name, category: 'Python', createdAt: Date.now(),
@@ -8860,6 +8999,7 @@ struct Index {
       this.aiStore.aiCanCancel = true;
       this.aiStore.aiError = '';
       this.aiStore.aiLastResult = '';
+      this.aiStore.aiTurnChangeSummary = '';
       // AI-15: 流式增量显示——清空 streamingText 与节流缓冲，并立即开启 V1 实时流状态
       this.clearAiStreamUiBuffer(true);
       publishAiLiveStream(true, this.panelStore.statusText, [], '');
@@ -8871,38 +9011,14 @@ struct Index {
       context = this.filteredAiContext(context);
       this.aiStore.aiMessages = aiService.getChatHistory().slice().concat([{ role: ChatRole.USER, content: prompt, timestamp: Date.now() }]);
       if (aiService.getConfig().provider !== AiProvider.DEMO_MODE) {
-        const resumeCheckpoint: AiTaskCheckpoint | undefined = aiService.getTaskCheckpoint();
-        if (resumeTask && resumeCheckpoint !== undefined && resumeCheckpoint.documentIdentity !== this.docStore.activeWorkspaceId &&
-          !['applied', 'completed'].includes(resumeCheckpoint.phase)) throw new Error('恢复任务属于另一份文档，请切回原文档后继续，或输入当前文档的新任务');
-        task = aiService.createAgentTask(prompt, resumeTask, forceReadOnly || this.aiStore.aiSessionMode === 'readonly');
-        const config: AiModelConfig = aiService.getConfig();
-        let compressionNotice: string = '';
-        const budget = buildAiContextBudget(aiService.getContextHistory(), context, prompt, config, '', false, task.originalRequest);
-        const compressedCount: number = aiService.getCompression()?.sourceMessageCount ?? 0;
-        if (config.autoCompress && aiService.getContextOptions().includeHistory && budget.shouldCompress &&
-          aiService.getChatHistory().length >= 6 && aiService.getChatHistory().length - 4 > compressedCount) {
-          try {
-            await this.compressAiHistory(ticket, aiService.getActiveConversationId(),
-              (redact: (text: string) => string): void => { redactPreparation = redact; });
-          } catch (error) {
-            this.assertAiRequestCurrent(ticket, requestContext);
-            if (!(error instanceof AiCompressionNotBeneficialError) || budget.exceedsWindow) {
-              const failure: Error = error instanceof Error ? error : new Error(String(error));
-              throw failure;
-            }
-            compressionNotice = '自动压缩没有降低占用；上下文仍在配置窗口内，本次保留原上下文继续回复';
-            this.panelStore.statusText = compressionNotice;
-          }
-          this.assertAiRequestCurrent(ticket, requestContext);
-          this.clearAiStreamUiBuffer(true); this.aiStore.aiToolCalls = [];
-          this.aiStore.aiMessages = aiService.getChatHistory().slice().concat([{ role: ChatRole.USER, content: prompt, timestamp: Date.now() }]);
-        }
+        const effectivePerm: DshPermissionMode = forceReadOnly ? 'readonly' : this.aiStore.aiPermissionMode;
         harnessStarted = true;
-        await this.runAiHarnessPrompt(prompt, context, ticket, requestContext, task, resumeTask);
-        if (this.pageAlive && generation === this.pageGeneration && compressionNotice.length > 0 && ticket === this.aiRequestGeneration && this.aiStore.aiError.length === 0) {
-          this.aiStore.aiLastResult += `\n\n${compressionNotice}`;
-          this.panelStore.statusText += '（本次保留原上下文）';
-        }
+        await this.runDshNativeAgentPrompt(prompt, ticket, effectivePerm);
+        return;
+      }
+      if (this.aiStore.aiPermissionMode === 'auto' && /^(?:画|生成|创建|绘制).*(?:cmos\s*)?(?:反相器|inverter)/i.test(prompt.trim())) {
+        harnessStarted = true;
+        await this.runDemoDirectInverter(prompt, ticket);
         return;
       }
       this.panelStore.statusText = '演示模式：使用本地指令，不调用真实模型';
@@ -9084,6 +9200,12 @@ struct Index {
       this.aiNativeCancellation.then((result: PythonCancellationResult): void => { this.aiStore.aiLastResult = result.message; });
       return;
     }
+    if (this.aiPythonPhase === 'dsh_native') {
+      dshLayoutAgentService.cancel();
+      this.aiStore.aiLastResult = '已停止当前 Agent 推理；已完成步骤保留，可随时一键撤销版图修改';
+      this.panelStore.statusText = this.aiStore.aiLastResult;
+      return;
+    }
     if (this.aiPythonPhase === 'harness') {
       const cancelledGeneration: number = this.aiRequestGeneration;
       const cancelledConversation: string = this.aiStore.aiActiveConversationId;
@@ -9165,6 +9287,668 @@ struct Index {
     if (status === 'running') this.panelStore.statusText = detail;
   }
 
+  private ensureDshLayerExists(layerNumber: number, datatype: number, englishName: string, chineseName: string, colorHex: string): void {
+    const exists: boolean = this.docStore.layers.some(
+      (l: UiLayer): boolean => l.layerNumber === layerNumber && l.datatype === datatype
+    );
+    if (exists) {
+      return;
+    }
+    const created: UiLayer = {
+      layerNumber,
+      datatype,
+      englishName: englishName.length > 0 ? englishName : `L${layerNumber}_${datatype}`,
+      chineseName: chineseName.length > 0 ? chineseName : (englishName.length > 0 ? englishName : `图层 ${layerNumber}/${datatype}`),
+      color: colorHex,
+      visible: true,
+      locked: false,
+      selectable: true,
+      group: LayerGroup.INTERCONNECT,
+      elementCount: 0
+    };
+    this.docStore.layers = this.docStore.layers.concat([created]);
+    this.syncLayerVisibilityMirror();
+  }
+
+  private executeDshInverterGeometry(params: DshCmosInverterParams, permission: DshPermissionMode): DshToolExecutionOutcome {
+    const gl: number = Math.max(50, Math.round(params.gateLengthNm));
+    const nw: number = Math.max(100, Math.round(params.nmosWidthNm));
+    const pw: number = Math.max(100, Math.round(params.pmosWidthNm));
+    const unit: number = Math.max(3, Math.min(gl, nw, pw));
+    const cut: number = Math.max(1, Math.floor(unit / 3));
+    const metal: number = 3 * cut;
+    const sdWidth: number = 4 * unit;
+    const span: number = 2 * sdWidth + gl;
+    const gateX: number = sdWidth;
+    const gap: number = 6 * unit;
+    const ny: number = 0;
+    const py: number = nw + gap;
+    const railH: number = 2 * unit;
+    const vssY: number = -4 * unit - railH;
+    const vddY: number = py + pw + 4 * unit;
+    const outX: number = span + 2 * unit;
+    const tapSize: number = 3 * cut;
+    const tapX: number = span + 4 * unit + Math.floor(unit / 2);
+    const ntapY: number = vssY + Math.floor((railH - tapSize) / 2);
+    const ptapY: number = vddY + Math.floor((railH - tapSize) / 2);
+    const inContactX: number = gateX - sdWidth;
+    const inPadX: number = inContactX - cut;
+    const midY: number = nw + Math.floor(gap / 2);
+    const nCy: number = ny + Math.floor((nw - cut) / 2);
+    const pCy: number = py + Math.floor((pw - cut) / 2);
+    const sxL: number = Math.floor((sdWidth - cut) / 2);
+    const dxR: number = sdWidth + gl + Math.floor((sdWidth - cut) / 2);
+    const nwellMargin: number = 3 * unit;
+
+    const commands: ParsedCommand[] = [
+      // 1/0 NWELL covering PMOS + VDD PTAP
+      { type: AiCommandType.CREATE_RECT, params: { layer: 1, datatype: 0, x: -nwellMargin, y: py - nwellMargin, width: (tapX + tapSize + 2 * unit) - (-nwellMargin), height: (ptapY + tapSize + 2 * unit) - (py - nwellMargin) }, description: 'NWELL (1/0) PMOS 与衬底接触阱区' },
+      // 2/0 ACTIVE (NMOS, PMOS, NTAP, PTAP)
+      { type: AiCommandType.CREATE_RECT, params: { layer: 2, datatype: 0, x: 0, y: ny, width: span, height: nw }, description: `NMOS 有源区 ${span}×${nw}nm` },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 2, datatype: 0, x: 0, y: py, width: span, height: pw }, description: `PMOS 有源区 ${span}×${pw}nm` },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 2, datatype: 0, x: tapX, y: ntapY, width: tapSize, height: tapSize }, description: 'VSS P+ 衬底接触有源区' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 2, datatype: 0, x: tapX, y: ptapY, width: tapSize, height: tapSize }, description: 'VDD N+ 阱接触有源区' },
+      // 4/0 NPLUS (NMOS + PTAP) & 5/0 PPLUS (PMOS + NTAP)
+      { type: AiCommandType.CREATE_RECT, params: { layer: 4, datatype: 0, x: -unit, y: ny - unit, width: span + 2 * unit, height: nw + 2 * unit }, description: 'NMOS N+ 注入区 (4/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 4, datatype: 0, x: tapX - unit, y: ptapY - unit, width: tapSize + 2 * unit, height: tapSize + 2 * unit }, description: 'VDD N+ 阱接触注入 (4/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 5, datatype: 0, x: -unit, y: py - unit, width: span + 2 * unit, height: pw + 2 * unit }, description: 'PMOS P+ 注入区 (5/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 5, datatype: 0, x: tapX - unit, y: ntapY - unit, width: tapSize + 2 * unit, height: tapSize + 2 * unit }, description: 'VSS P+ 衬底接触注入 (5/0)' },
+      // 3/0 POLY gate + input extension
+      { type: AiCommandType.CREATE_RECT, params: { layer: 3, datatype: 0, x: gateX, y: ny - 2 * unit, width: gl, height: (py + pw + 2 * unit) - (ny - 2 * unit) }, description: `多晶硅共栅 ${gl}nm (3/0)` },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 3, datatype: 0, x: inPadX, y: midY - cut - Math.floor(cut / 2), width: (gateX + gl) - inPadX, height: 3 * cut }, description: '多晶硅栅输入引出端 (3/0)' },
+      // 6/0 CONTACT cuts (NMOS S/D, PMOS S/D, Gate IN, NTAP, PTAP)
+      { type: AiCommandType.CREATE_RECT, params: { layer: 6, datatype: 0, x: sxL, y: nCy, width: cut, height: cut }, description: 'NMOS 源极接触孔 (6/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 6, datatype: 0, x: dxR, y: nCy, width: cut, height: cut }, description: 'NMOS 漏极接触孔 (6/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 6, datatype: 0, x: sxL, y: pCy, width: cut, height: cut }, description: 'PMOS 源极接触孔 (6/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 6, datatype: 0, x: dxR, y: pCy, width: cut, height: cut }, description: 'PMOS 漏极接触孔 (6/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 6, datatype: 0, x: inContactX, y: midY - Math.floor(cut / 2), width: cut, height: cut }, description: '输入栅接触孔 (6/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 6, datatype: 0, x: tapX + cut, y: ntapY + cut, width: cut, height: cut }, description: 'VSS 衬底接触孔 (6/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 6, datatype: 0, x: tapX + cut, y: ptapY + cut, width: cut, height: cut }, description: 'VDD 阱接触孔 (6/0)' },
+      // 7/0 METAL1 rails, S/D straps, IN pad & OUT bus
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: -2 * unit, y: vssY, width: (tapX + tapSize + 2 * unit) - (-2 * unit), height: railH }, description: 'VSS 金属1 电源轨 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: -2 * unit, y: vddY, width: (tapX + tapSize + 2 * unit) - (-2 * unit), height: railH }, description: 'VDD 金属1 电源轨 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: tapX, y: Math.min(vssY, ntapY), width: tapSize, height: Math.max(vssY + railH, ntapY + tapSize) - Math.min(vssY, ntapY) }, description: 'VSS 衬底接触金属连线 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: tapX, y: Math.min(vddY, ptapY), width: tapSize, height: Math.max(vddY + railH, ptapY + tapSize) - Math.min(vddY, ptapY) }, description: 'VDD 阱接触金属连线 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: sxL - cut, y: vssY, width: metal, height: (nCy + 2 * cut) - vssY }, description: 'NMOS 源极接 VSS 金属条 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: sxL - cut, y: pCy - cut, width: metal, height: (vddY + railH) - (pCy - cut) }, description: 'PMOS 源极接 VDD 金属条 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: dxR - cut, y: nCy - cut, width: (outX + metal) - (dxR - cut), height: metal }, description: 'NMOS 漏极输出支路 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: dxR - cut, y: pCy - cut, width: (outX + metal) - (dxR - cut), height: metal }, description: 'PMOS 漏极输出支路 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: outX, y: nCy - cut, width: metal, height: (pCy + 2 * cut) - (nCy - cut) }, description: 'OUT 漏极汇流金属线 (7/0)' },
+      { type: AiCommandType.CREATE_RECT, params: { layer: 7, datatype: 0, x: inPadX, y: midY - cut - Math.floor(cut / 2), width: metal, height: 3 * cut }, description: 'IN 输入金属焊盘 (7/0)' },
+      // 8/0 PIN_LABEL
+      { type: AiCommandType.CREATE_TEXT, params: { layer: 8, datatype: 0, x: inPadX, y: midY, text: 'IN' }, description: '端口标签 IN (8/0)' },
+      { type: AiCommandType.CREATE_TEXT, params: { layer: 8, datatype: 0, x: outX + metal, y: midY, text: 'OUT' }, description: '端口标签 OUT (8/0)' },
+      { type: AiCommandType.CREATE_TEXT, params: { layer: 8, datatype: 0, x: 0, y: vssY + Math.floor(railH / 2), text: 'VSS' }, description: '端口标签 VSS (8/0)' },
+      { type: AiCommandType.CREATE_TEXT, params: { layer: 8, datatype: 0, x: 0, y: vddY + Math.floor(railH / 2), text: 'VDD' }, description: '端口标签 VDD (8/0)' }
+    ];
+
+    if (permission === 'review') {
+      const ctx: AiContext = this.filteredAiContext(this.buildAiContext());
+      this.aiStore.pendingAiCommands = commands;
+      this.aiStore.pendingAiContext = ctx;
+      this.pendingAiRevision = this.docStore.editorRevision;
+      this.pendingAiDocumentId = this.docStore.activeWorkspaceId;
+      this.pendingAiSelection = editService.getSelectedIds().join(',');
+      this.pendingAiCell = editService.getCurrentCellId();
+      this.pendingAiLayer = this.viewportStore.selectedLayerNumber;
+      this.pendingAiDatatype = this.viewportStore.selectedDatatype;
+      this.prepareAiReview(commands);
+      return {
+        success: true,
+        stagedPending: true,
+        summary: `已生成 CMOS 反相器预览方案（${commands.length} 项图元），等待确认写入`,
+        payloadJson: JSON.stringify({
+          success: true,
+          stagedPending: true,
+          cellName: params.cellName,
+          operations: commands.length,
+          message: '已在画布生成 CMOS 反相器几何预览，待用户点击「应用修改」后写入。'
+        })
+      };
+    }
+
+    if (!this.assertEditMode()) {
+      this.setViewMode(ViewMode.EDIT);
+    }
+
+    // Decide whether to write in-place or create a clean tab
+    const currentShapesInCell: number = editService.getShapes().filter(
+      (s: Shape): boolean => (s.ownerCellId ?? editService.getTopCellId()) === editService.getCurrentCellId()
+    ).length;
+    if (params.target === 'new_tab' || (params.target === 'auto' && currentShapesInCell > 0)) {
+      if (!this.isCurrentWorkspaceTabEmptyReusable() && this.docStore.workspaceTabs.length < MAX_WORKSPACE_TABS) {
+        this.createWorkspaceDocument('GENERIC_CMOS', params.cellName, 1);
+      }
+    } else if (currentShapesInCell === 0 && params.cellName.length > 0 &&
+      this.docStore.currentEditingCellName !== params.cellName) {
+      this.performRenameCell(editService.getCurrentCellId(), params.cellName);
+    }
+
+    // Ensure standard 8 generic CMOS layers exist with clear EDA colors
+    this.ensureDshLayerExists(1, 0, 'NWELL', 'N阱', '#D97706');
+    this.ensureDshLayerExists(2, 0, 'ACTIVE', '有源区', '#16A34A');
+    this.ensureDshLayerExists(3, 0, 'POLY', '多晶硅栅', '#DC2626');
+    this.ensureDshLayerExists(4, 0, 'NPLUS', 'N+注入', '#CA8A04');
+    this.ensureDshLayerExists(5, 0, 'PPLUS', 'P+注入', '#9333EA');
+    this.ensureDshLayerExists(6, 0, 'CONTACT', '接触孔', '#64748B');
+    this.ensureDshLayerExists(7, 0, 'METAL1', '金属1', '#2563EB');
+    this.ensureDshLayerExists(8, 0, 'PIN_LABEL', '端口标签', '#0891B2');
+
+    const beforeMarker: Object | null = editService.getUndoMarker();
+    const execCtx: AiContext = this.buildAiContext();
+    editService.beginBatch();
+    let createdCount: number = 0;
+    try {
+      for (let i = 0; i < commands.length; i++) {
+        const res: CommandResult = aiExecutor.execute(commands[i], execCtx);
+        if (res.success) {
+          createdCount += Math.max(1, res.affectedShapeIds.length);
+        }
+      }
+    } finally {
+      editService.endBatch();
+    }
+
+    // Add 4 semantic ports (IN, OUT, VSS, VDD) to current cell
+    const ownerCell: number = editService.getCurrentCellId();
+    const portDefs: Array<[string, number, number, number, number]> = [
+      ['IN', inPadX, midY, 180, 3 * cut],
+      ['OUT', outX + metal, midY, 0, 3 * cut],
+      ['VSS', -2 * unit, vssY + Math.floor(railH / 2), 180, railH],
+      ['VDD', -2 * unit, vddY + Math.floor(railH / 2), 180, railH]
+    ];
+    let addedPorts: number = 0;
+    for (let pi = 0; pi < portDefs.length; pi++) {
+      const pDef = portDefs[pi];
+      try {
+        const draft: LayoutPortDraft = portDraft(ownerCell);
+        draft.name = pDef[0];
+        draft.center = { x: pDef[1], y: pDef[2] };
+        draft.orientationDeg = pDef[3];
+        draft.widthNm = pDef[4];
+        draft.layerNumber = 7;
+        draft.datatype = 0;
+        draft.portType = 'electrical';
+        const existingIdx: number = this.docPorts.findIndex(
+          (p: LayoutPort): boolean => p.ownerCellId === ownerCell && p.name === pDef[0]
+        );
+        const builtPort: LayoutPort = portFromDraft(draft);
+        if (existingIdx >= 0) {
+          const copy: LayoutPort[] = this.docPorts.slice();
+          copy[existingIdx] = builtPort;
+          this.docPorts = copy;
+        } else {
+          this.docPorts = this.docPorts.concat([builtPort]);
+          addedPorts++;
+        }
+      } catch (_) {}
+    }
+
+    this.syncShapesFromEditService();
+    this.rebuildCellTree();
+    this.refreshProjectedPorts();
+    this.fitAllShapes();
+    this.aiUndoMarker = editService.getUndoMarker();
+    this.aiStore.aiCanUndo = this.aiUndoMarker !== beforeMarker;
+    this.scheduleWorkspaceDraft();
+
+    let drcSummary: string = '';
+    try {
+      this.runDrc(true);
+      drcSummary = this.aiDrcResultSummary();
+    } catch (e) {
+      drcSummary = `DRC 复检跳过：${String(e)}`;
+    }
+
+    return {
+      success: true,
+      addedShapes: createdCount,
+      addedPorts,
+      drcSummary,
+      summary: `已在单元 ${this.docStore.currentEditingCellName} 原生生成 CMOS 反相器（${createdCount} 个图元，${addedPorts} 个端口）`,
+      payloadJson: JSON.stringify({
+        success: true,
+        cellName: this.docStore.currentEditingCellName,
+        gateLengthNm: gl,
+        nmosWidthNm: nw,
+        pmosWidthNm: pw,
+        addedShapes: createdCount,
+        addedPorts,
+        layers: ['1/0 NWELL', '2/0 ACTIVE', '3/0 POLY', '4/0 NPLUS', '5/0 PPLUS', '6/0 CONTACT', '7/0 METAL1', '8/0 PIN_LABEL'],
+        ports: ['IN', 'OUT', 'VSS', 'VDD'],
+        drcSummary,
+        note: '通用 CMOS 教学/工程几何版图（未绑定晶圆厂 PDK 签核规则）'
+      })
+    };
+  }
+
+  private buildDshBackendHost(ticket: number): DshLayoutBackendHost {
+    const generation: number = this.pageGeneration;
+    return {
+      isPageCurrent: (): boolean => this.pageAlive && generation === this.pageGeneration && ticket === this.aiRequestGeneration,
+      inspectLayout: (): string => {
+        const ctx: AiContext = this.filteredAiContext(this.buildAiContext());
+        return JSON.stringify({
+          documentId: this.docStore.activeWorkspaceId,
+          title: this.currentFileDisplayName() || '未命名版图',
+          libraryName: this.docStore.docLibName,
+          topCell: this.docStore.docTopCellName,
+          currentCell: { id: editService.getCurrentCellId(), name: this.docStore.currentEditingCellName || ctx.currentCellName },
+          dbuNm: cleanDbuNm(this.docStore.docPhysicalUnits),
+          shapeCount: editService.getShapes().length,
+          selectedCount: this.viewportStore.selectedShapeCount,
+          selectedShapes: ctx.selectedShapes.slice(0, 16),
+          activeLayer: { layer: this.viewportStore.selectedLayerNumber, datatype: this.viewportStore.selectedDatatype },
+          layers: this.docStore.layers.map((l: UiLayer): Record<string, Object> => ({
+            layer: l.layerNumber,
+            datatype: l.datatype,
+            name: l.englishName,
+            chineseName: l.chineseName,
+            visible: l.visible
+          })),
+          portCount: this.docPorts.filter((p: LayoutPort): boolean => p.ownerCellId === editService.getCurrentCellId()).length,
+          drcSummary: this.aiDrcResultSummary(),
+          openTabs: this.docStore.workspaceTabs.length,
+          maxTabs: MAX_WORKSPACE_TABS
+        });
+      },
+      queryLayout: async (argsJson: string): Promise<string> => {
+        let parsed: Record<string, Object> = {};
+        try { parsed = JSON.parse(argsJson) as Record<string, Object>; } catch (_) {}
+        const kindRaw: string = typeof parsed['kind'] === 'string' ? (parsed['kind'] as string) : 'shapes';
+        const query: AiEditorQuery = {
+          kind: kindRaw as 'shapes' | 'cells' | 'drc' | 'rules' | 'ports',
+          cellId: typeof parsed['cellId'] === 'number' ? (parsed['cellId'] as number) : undefined,
+          layer: typeof parsed['layer'] === 'number' ? (parsed['layer'] as number) : undefined,
+          datatype: typeof parsed['datatype'] === 'number' ? (parsed['datatype'] as number) : undefined,
+          offset: typeof parsed['offset'] === 'number' ? (parsed['offset'] as number) : 0,
+          limit: typeof parsed['limit'] === 'number' ? (parsed['limit'] as number) : 32
+        };
+        const snapshot: AiContext = this.filteredAiContext(this.buildAiContext());
+        const counts: Map<number, number> = new Map<number, number>();
+        const children: Map<number, Set<number>> = new Map<number, Set<number>>();
+        if (query.kind === 'cells') {
+          for (const shape of editService.getShapes()) {
+            const owner: number = shape.ownerCellId ?? editService.getTopCellId();
+            counts.set(owner, (counts.get(owner) ?? 0) + 1);
+            if (shape.type === ShapeType.INSTANCE && shape.cellId !== undefined) {
+              let ids: Set<number> | undefined = children.get(owner);
+              if (ids === undefined) { ids = new Set<number>(); children.set(owner, ids); }
+              ids.add(shape.cellId);
+            }
+          }
+        }
+        const allCells: AiCellInfo[] = query.kind === 'cells'
+          ? this.propertyCellOptions().map((cell: PropertyCellOption): AiCellInfo => ({
+            id: cell.id,
+            name: cell.name,
+            shapeCount: counts.get(cell.id) ?? 0,
+            children: Array.from(children.get(cell.id) ?? new Set<number>())
+          }))
+          : [];
+        const reply: AiEditorReply = queryAiWorkbench(query, {
+          context: snapshot,
+          shapes: editService.getShapes(),
+          cells: allCells,
+          drc: drcService.getLastResult()?.violations ?? [],
+          rules: drcService.getRules(),
+          ports: this.docPorts.filter((port: LayoutPort): boolean => port.ownerCellId === (query.cellId ?? editService.getCurrentCellId())),
+          drcCurrent: this.verifyStore.drcHasRun && this.drcSnapshotRevision === this.docStore.editorRevision,
+          ruleSource: `${drcService.ruleSourceText()}；${this.aiDrcResultSummary()}`
+        });
+        return JSON.stringify(reply);
+      },
+      createCmosInverter: async (params: DshCmosInverterParams, permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        return this.executeDshInverterGeometry(params, permission);
+      },
+      editLayout: async (operations: DshEditOperation[], permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        const commands: ParsedCommand[] = [];
+        for (let i = 0; i < operations.length; i++) {
+          const op: DshEditOperation = operations[i];
+          const layer: number = op.layer ?? this.viewportStore.selectedLayerNumber;
+          const dt: number = op.datatype ?? this.viewportStore.selectedDatatype;
+          if (op.layer !== undefined) {
+            this.ensureDshLayerExists(layer, dt, op.layerName ?? `L${layer}`, op.layerName ?? `图层${layer}`, '#3B82F6');
+          }
+          const cmdType: AiCommandType = op.action as AiCommandType;
+          const pts: Point[] | undefined = op.points !== undefined
+            ? op.points.map((pt: Record<string, number>): Point => ({ x: Number(pt['x'] ?? 0), y: Number(pt['y'] ?? 0) }))
+            : undefined;
+          commands.push({
+            type: cmdType,
+            params: {
+              layer,
+              datatype: dt,
+              x: op.x,
+              y: op.y,
+              width: op.width,
+              height: op.height,
+              points: pts,
+              pathWidth: op.pathWidth,
+              text: op.text,
+              shapeIds: op.shapeIds,
+              rows: op.rows,
+              cols: op.cols,
+              spacingX: op.spacingX,
+              spacingY: op.spacingY,
+              dx: op.dx,
+              dy: op.dy,
+              degrees: op.degrees,
+              horizontal: op.horizontal,
+              scale: op.scale,
+              centerX: op.centerX,
+              centerY: op.centerY
+            },
+            description: `${op.action} (L${layer}/D${dt})`
+          });
+        }
+
+        if (permission === 'review') {
+          const ctx: AiContext = this.filteredAiContext(this.buildAiContext());
+          this.aiStore.pendingAiCommands = commands;
+          this.aiStore.pendingAiContext = ctx;
+          this.pendingAiRevision = this.docStore.editorRevision;
+          this.pendingAiDocumentId = this.docStore.activeWorkspaceId;
+          this.pendingAiSelection = editService.getSelectedIds().join(',');
+          this.pendingAiCell = editService.getCurrentCellId();
+          this.pendingAiLayer = this.viewportStore.selectedLayerNumber;
+          this.pendingAiDatatype = this.viewportStore.selectedDatatype;
+          this.prepareAiReview(commands);
+          return {
+            success: true,
+            stagedPending: true,
+            summary: `已生成 ${commands.length} 项版图修改预览，等待确认`,
+            payloadJson: JSON.stringify({ success: true, stagedPending: true, operations: commands.length })
+          };
+        }
+
+        if (!this.assertEditMode()) {
+          this.setViewMode(ViewMode.EDIT);
+        }
+        const beforeMarker: Object | null = editService.getUndoMarker();
+        const beforeCount: number = editService.getShapes().length;
+        const execCtx: AiContext = this.buildAiContext();
+        editService.beginBatch();
+        const messages: string[] = [];
+        let allOk: boolean = true;
+        try {
+          for (let i = 0; i < commands.length; i++) {
+            const res: CommandResult = aiExecutor.execute(commands[i], execCtx);
+            messages.push(res.message);
+            if (!res.success) {
+              allOk = false;
+              break;
+            }
+          }
+        } finally {
+          editService.endBatch();
+        }
+        this.syncShapesFromEditService();
+        this.rebuildCellTree();
+        if (editService.getShapes().length > beforeCount) {
+          this.fitAllShapes();
+        }
+        const afterCount: number = editService.getShapes().length;
+        this.aiUndoMarker = editService.getUndoMarker();
+        this.aiStore.aiCanUndo = this.aiUndoMarker !== beforeMarker;
+        this.scheduleWorkspaceDraft();
+        const added: number = Math.max(0, afterCount - beforeCount);
+        const deleted: number = Math.max(0, beforeCount - afterCount);
+        return {
+          success: allOk,
+          addedShapes: added,
+          deletedShapes: deleted,
+          summary: messages.slice(0, 4).join('；'),
+          payloadJson: JSON.stringify({
+            success: allOk,
+            operations: commands.length,
+            addedShapes: added,
+            deletedShapes: deleted,
+            totalShapesNow: afterCount,
+            messages: messages.slice(0, 8)
+          })
+        };
+      },
+      runDrcCheck: async (): Promise<DshToolExecutionOutcome> => {
+        this.runDrc(true);
+        const summary: string = this.aiDrcResultSummary();
+        const last = drcService.getLastResult();
+        const sampleViolations = (last?.violations ?? []).slice(0, 24).map((v: DrcViolation): Record<string, Object> => ({
+          id: v.id,
+          ruleType: v.ruleType,
+          severity: v.severity,
+          message: v.message,
+          x: v.x,
+          y: v.y
+        }));
+        return {
+          success: true,
+          drcSummary: summary,
+          summary,
+          payloadJson: JSON.stringify({
+            success: true,
+            summary,
+            errors: last?.errors ?? 0,
+            warnings: last?.warnings ?? 0,
+            violations: sampleViolations
+          })
+        };
+      },
+      listNativeTools: (category: string, offset: number, toolName: string): string => {
+        return JSON.stringify(aiNativeTools(category, offset, toolName));
+      },
+      callNativeTool: async (toolName: string, argumentsJson: string, permission: DshPermissionMode): Promise<DshToolExecutionOutcome> => {
+        const call: AiNativeCall = parseAiNativeCall(toolName, argumentsJson);
+        const def = aiNativeTool(call.name);
+        if (def.mode === 'read') {
+          const readRes: AiNativeResult = this.readAiNativeTool(call);
+          return { success: readRes.success, summary: readRes.message, payloadJson: JSON.stringify(readRes) };
+        }
+        if (permission === 'readonly') {
+          throw new Error(`工具 ${call.name} 会修改版图，当前为只读问答模式`);
+        }
+        if (permission === 'review') {
+          const stagedCmd: ParsedCommand = {
+            type: AiCommandType.NATIVE_TOOL,
+            params: { nativeTool: call.name, argumentsJson },
+            description: `${def.title} (${call.name})`
+          };
+          this.aiStore.pendingAiCommands = [stagedCmd];
+          this.aiStore.pendingAiContext = this.filteredAiContext(this.buildAiContext());
+          this.pendingAiRevision = this.docStore.editorRevision;
+          this.pendingAiDocumentId = this.docStore.activeWorkspaceId;
+          this.pendingAiSelection = editService.getSelectedIds().join(',');
+          this.pendingAiCell = editService.getCurrentCellId();
+          this.pendingAiLayer = this.viewportStore.selectedLayerNumber;
+          this.pendingAiDatatype = this.viewportStore.selectedDatatype;
+          this.prepareAiReview([stagedCmd]);
+          return {
+            success: true,
+            stagedPending: true,
+            summary: `已准备原生工具 ${def.title} 待确认`,
+            payloadJson: JSON.stringify({ success: true, stagedPending: true, tool: call.name })
+          };
+        }
+        if (def.mode === 'edit') {
+          const beforeCount: number = editService.getShapes().length;
+          const beforeMarker: Object | null = editService.getUndoMarker();
+          const res: AiNativeResult = this.runAiNativeEdit(call);
+          this.syncShapesFromEditService();
+          this.rebuildCellTree();
+          this.aiUndoMarker = editService.getUndoMarker();
+          this.aiStore.aiCanUndo = this.aiUndoMarker !== beforeMarker;
+          this.scheduleWorkspaceDraft();
+          const afterCount: number = editService.getShapes().length;
+          return {
+            success: res.success,
+            addedShapes: Math.max(0, afterCount - beforeCount),
+            deletedShapes: Math.max(0, beforeCount - afterCount),
+            summary: res.message,
+            payloadJson: JSON.stringify(res)
+          };
+        }
+        const actRes: AiNativeResult = await this.runAiNativeAction(call);
+        return { success: actRes.success, summary: actRes.message, payloadJson: JSON.stringify(actRes) };
+      },
+      executeKlayoutPython: async (script: string, applyMode: 'replace' | 'merge'): Promise<DshToolExecutionOutcome> => {
+        const connected: boolean = await pythonBridgeService.checkConnection(false);
+        if (!connected) {
+          return {
+            success: false,
+            summary: '当前设备未连接桌面 Python 伴随服务，请直接改用 create_cmos_inverter / edit_layout / call_native_tool 原生绘制',
+            payloadJson: JSON.stringify({
+              success: false,
+              error: '当前运行在纯鸿蒙原生直连模式（未启动桌面 Python 伴随进程）。请直接使用 create_cmos_inverter、edit_layout 或 call_native_tool 在当前版图中原生完成绘制与 DRC 检查，无需 Python 脚本。'
+            })
+          };
+        }
+        const pyRes: AiNativeResult = await this.runAiNativePython(
+          parseAiNativeCall('python.run', JSON.stringify({ script, inputMode: 'document', applyMode, parameters: '{}' }))
+        );
+        return {
+          success: pyRes.success,
+          mutatedLayout: pyRes.success,
+          addedShapes: pyRes.success ? 1 : 0,
+          summary: pyRes.message,
+          payloadJson: JSON.stringify(pyRes)
+        } as DshToolExecutionOutcome;
+      }
+    };
+  }
+
+  private async runDemoDirectInverter(prompt: string, ticket: number): Promise<void> {
+    const conversationId: string = aiService.getActiveConversationId();
+    const outcome: DshToolExecutionOutcome = this.executeDshInverterGeometry({
+      cellName: 'INVERTER',
+      gateLengthNm: 200,
+      nmosWidthNm: 600,
+      pmosWidthNm: 1200,
+      target: 'auto'
+    }, 'auto');
+    const toolItem: AiChatToolState = {
+      id: `demo-inv-${Date.now()}`,
+      name: 'create_cmos_inverter',
+      status: 'completed',
+      arguments: '{"cellName":"INVERTER","gateLengthNm":200,"nmosWidthNm":600,"pmosWidthNm":1200}',
+      result: outcome.payloadJson
+    };
+    const steps: AiProcessStep[] = [{
+      id: 'demo-step-inv',
+      kind: 'tool',
+      title: 'create_cmos_inverter',
+      text: '',
+      status: 'completed',
+      tool: toolItem
+    }];
+    const replyText: string =
+      `已在单元 **${this.docStore.currentEditingCellName}** 原生生成完整通用 CMOS 反相器版图（共 **${outcome.addedShapes ?? 32}** 个几何图元、**${outcome.addedPorts ?? 4}** 个电气端口 \`IN / OUT / VSS / VDD\`），并自动完成视图适配。\n\n- **图层结构**：\`1/0 NWELL\`、\`2/0 ACTIVE\`、\`3/0 POLY\`、\`4/0 NPLUS\`、\`5/0 PPLUS\`、\`6/0 CONTACT\`、\`7/0 METAL1\`、\`8/0 PIN_LABEL\`\n- **DRC 状态**：${outcome.drcSummary ?? '已完成检查'}\n- *说明：该版图为通用 CMOS 教学/工程示例，可随时点击下方「撤销」回退。*`;
+    this.aiStore.aiTurnChangeSummary = `本轮版图变更：+${outcome.addedShapes ?? 32} 图元 · +${outcome.addedPorts ?? 4} 端口 · ${outcome.drcSummary ?? ''}`;
+    this.aiStore.aiLastResult = outcome.summary;
+    this.panelStore.statusText = outcome.summary;
+    const demoTask: AiAgentTask = aiService.createAgentTask(prompt, false, false);
+    aiService.recordHarnessResult(prompt, replyText, '', [toolItem], true, 'executed', conversationId, ticket !== this.aiRequestGeneration, demoTask, steps);
+    this.refreshAiConversation();
+  }
+
+  private async runDshNativeAgentPrompt(prompt: string, ticket: number, permission: DshPermissionMode): Promise<void> {
+    const generation: number = this.pageGeneration;
+    const isCurrentPage = (): boolean => this.pageAlive && generation === this.pageGeneration;
+    const conversationId: string = aiService.getActiveConversationId();
+    const config: AiModelConfig = aiService.getConfig();
+    const history: ChatMessage[] = aiService.getContextOptions().includeHistory ? aiService.getContextHistory().slice() : [];
+    const compSummary: string = aiService.getCompression()?.summary ?? '';
+    const task: AiAgentTask = aiService.createAgentTask(prompt, false, permission === 'readonly');
+    let capturedSteps: AiProcessStep[] = [];
+    let capturedTools: AiChatToolState[] = [];
+    let capturedReasoning: string = '';
+    let capturedAnswer: string = '';
+    let succeeded: boolean = false;
+    let commandStatus: 'pending' | 'executed' | 'failed' | undefined = undefined;
+
+    this.aiPythonPhase = 'dsh_native';
+    try {
+      const result: DshAgentRunResult = await dshLayoutAgentService.run(
+        prompt,
+        config,
+        history,
+        compSummary,
+        permission,
+        this.buildDshBackendHost(ticket),
+        {
+          onStatus: (statusText: string): void => {
+            if (isCurrentPage() && ticket === this.aiRequestGeneration) {
+              this.panelStore.statusText = statusText;
+              this.flushAiStreamUiNow();
+            }
+          },
+          onProgress: (steps: AiProcessStep[], liveAnswer: string, tools: AiChatToolState[]): void => {
+            capturedSteps = steps.slice();
+            capturedTools = tools.slice();
+            capturedAnswer = liveAnswer;
+            if (isCurrentPage() && ticket === this.aiRequestGeneration) {
+              this.aiStore.aiToolCalls = tools.slice();
+              this.aiStreamBufferedSteps = steps.slice();
+              this.aiStreamBufferedAnswer = liveAnswer;
+              this.flushAiStreamUiNow();
+            }
+          }
+        }
+      );
+      capturedSteps = result.steps;
+      capturedTools = result.tools;
+      capturedReasoning = result.fullReasoning;
+      capturedAnswer = result.finalAnswer;
+      succeeded = true;
+      commandStatus = result.stagedPending ? 'pending' : (result.mutatedLayout ? 'executed' : undefined);
+      if (isCurrentPage() && ticket === this.aiRequestGeneration) {
+        this.aiStore.aiTurnChangeSummary = result.turnChangeSummary;
+        this.aiStore.aiLastResult = result.turnChangeSummary.length > 0 ? result.turnChangeSummary : 'AI 回复已就绪';
+        this.panelStore.statusText = this.aiStore.aiLastResult;
+        this.aiStore.aiError = '';
+        if (!this.panelStore.showAiPanel) {
+          this.aiStore.aiMinimizedNotice = this.aiStore.aiLastResult;
+        }
+      }
+    } catch (err) {
+      const rawErr: string = err instanceof Error ? err.message : String(err);
+      const cancelled: boolean = ticket !== this.aiRequestGeneration || rawErr.includes('取消');
+      capturedTools = capturedTools.map((t: AiChatToolState): AiChatToolState =>
+        t.status === 'running' ? { id: t.id, name: t.name, status: 'failed', arguments: t.arguments, result: rawErr } : t
+      );
+      capturedSteps = capturedSteps.map((s: AiProcessStep): AiProcessStep =>
+        s.status === 'running' ? { id: s.id, kind: s.kind, title: s.title, text: s.text, status: 'failed', tool: s.tool } : s
+      );
+      if (cancelled) {
+        capturedAnswer = capturedAnswer.length > 0 ? `${capturedAnswer}\n\n*（已手动停止生成）*` : '已停止本次生成。';
+      } else {
+        if (isCurrentPage()) {
+          this.aiStore.aiError = rawErr;
+          this.panelStore.statusText = `Agent 提示：${rawErr}`;
+        }
+        capturedAnswer = capturedAnswer.length > 0 ? `${capturedAnswer}\n\n${rawErr}` : rawErr;
+      }
+      commandStatus = cancelled ? undefined : 'failed';
+    } finally {
+      try {
+        aiService.recordHarnessResult(
+          prompt,
+          aiService.redactConversationText(capturedAnswer),
+          aiService.redactConversationText(capturedReasoning),
+          capturedTools,
+          succeeded,
+          commandStatus,
+          conversationId,
+          ticket !== this.aiRequestGeneration,
+          task,
+          capturedSteps
+        );
+        if (isCurrentPage()) {
+          this.refreshAiConversation();
+        }
+      } catch (_) {}
+    }
+  }
+
   private async runAiHarnessPrompt(prompt: string, context: AiContext, ticket: number, requestContext: string, task: AiAgentTask, resumeTask: boolean): Promise<void> {
     const generation: number = this.pageGeneration;
     const isCurrentPage: () => boolean = (): boolean => this.pageAlive && generation === this.pageGeneration;
@@ -9207,9 +9991,13 @@ struct Index {
       };
     try { previousDraft = JSON.stringify(pythonWorkspaceService.draft() ?? null); } catch (_) {}
     try {
+      const availableSlots: number = this.availableAiArtifactSlots();
+      if (availableSlots === 0 && !task.readOnly && task.artifactGenerationAllowed && task.requiredValidationProfile !== undefined) {
+        throw new Error(`当前已打开满 ${MAX_WORKSPACE_TABS} 个非空版图标签页，无法新建独立版图；请先关闭一个不用的标签页后再生成`);
+      }
       this.aiPythonPhase = 'harness';
       reply = await aiHarnessService.run(prompt, context, aiService.getConfig(), aiService.getContextHistory().slice(),
-        Math.max(0, 8 - this.docStore.workspaceTabs.length), {
+        availableSlots, {
           onHistoryInput: (request: string, savedTask: AiAgentTask | undefined, redact: (text: string) => string): void => {
             historyPrompt = request;
             if (savedTask !== undefined) historyTask = savedTask;
@@ -9325,7 +10113,9 @@ struct Index {
       if (reply.artifacts.length > 1) throw new Error('助手单次返回了多个产物，未载入，请每次生成一个版图');
       if (reply.artifacts.length > 0) {
         if (task.readOnly || !task.artifactGenerationAllowed) throw new Error('原任务未授权自动生成版图，助手产物未下载或载入');
-        if (this.docStore.workspaceTabs.length + reply.artifacts.length > 8) throw new Error('最多打开 8 个文档，请关闭一个标签后重新生成');
+        if (this.docStore.workspaceTabs.length + reply.artifacts.length > MAX_WORKSPACE_TABS && !this.isCurrentWorkspaceTabEmptyReusable()) {
+          throw new Error(`最多同时打开 ${MAX_WORKSPACE_TABS} 个文档，请关闭一个标签页后重新生成`);
+        }
         const ids: string[] = [];
         const hostContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
         this.aiPythonPhase = 'artifact';
@@ -9337,7 +10127,9 @@ struct Index {
           const artifact: PythonLayoutArtifact = await pythonBridgeService.loadAssistantArtifact(item.artifactId, hostContext);
           artifacts.push(artifact);
           this.assertAiRequestCurrent(ticket, requestContext);
-          if (this.docStore.workspaceTabs.length + reply.artifacts.length > 8) throw new Error('最多打开 8 个文档，请关闭一个标签后重新生成');
+          if (this.docStore.workspaceTabs.length + reply.artifacts.length > MAX_WORKSPACE_TABS && !this.isCurrentWorkspaceTabEmptyReusable()) {
+            throw new Error(`最多同时打开 ${MAX_WORKSPACE_TABS} 个文档，请关闭一个标签页后重新生成`);
+          }
           if (!artifact.script || artifact.script !== item.script || artifact.originalRequest !== prompt) {
             throw new Error('助手产物与本次需求或脚本不一致，未载入');
           }
@@ -9448,7 +10240,8 @@ struct Index {
         `助手未完成：${error instanceof Error ? error.message : String(error)}`;
       if (isCurrentPage()) this.aiStore.aiToolCalls = capturedTools.slice();
       const partial: string = reply?.text ?? capturedText;
-      message = `${partial}${partial.length > 0 ? '\n\n' : ''}${detail}。` +
+      const cleanDetail: string = detail.replace(/[。．.]+$/, '');
+      message = `${partial}${partial.length > 0 ? '\n\n' : ''}${cleanDetail}。` +
         (published > 0 ? `已载入 ${published} 个独立版图；剩余结果未载入，原文档保留。` : '原文档未修改。');
       businessSummary = detail.replace(/\s+/g, ' ').substring(0, 120);
       if (isCurrentPage() && ticket === this.aiRequestGeneration) this.aiStore.aiError = detail;
@@ -9509,7 +10302,10 @@ struct Index {
       } catch (_) {}
     }
     if (!artifactId || (checkpoint.loadedArtifacts ?? []).includes(artifactId)) { this.aiStore.aiError = '没有尚未载入的生成产物；已载入的产物不会重复打开'; return; }
-    if (this.docStore.workspaceTabs.length >= 8) { this.aiStore.aiError = '请先关闭一个标签页，再恢复生成产物'; return; }
+    if (this.docStore.workspaceTabs.length >= MAX_WORKSPACE_TABS && !this.isCurrentWorkspaceTabEmptyReusable()) {
+      this.aiStore.aiError = `最多同时打开 ${MAX_WORKSPACE_TABS} 个版图，请先关闭一个标签页再恢复生成产物`;
+      return;
+    }
     const ticket: number = ++this.aiRequestGeneration;
     const expected: string = this.aiRequestContext();
     this.aiStore.aiLoading = true; this.aiStore.aiCanCancel = true; this.aiPythonPhase = 'artifact';
@@ -11273,10 +12069,55 @@ struct Index {
     return allowed[allowed.length - 1].id;
   }
 
-  private placeInstance(cellId: number, x: number, y: number, rotation: number, mirror: number): boolean {
+  private computeCellBoundingSpan(cellId: number): Point | null {
+    if (cellId < 0) return null;
+    const all: Shape[] = editService.getShapes();
+    const topId: number = editService.getTopCellId();
+    let minX: number = Number.POSITIVE_INFINITY;
+    let minY: number = Number.POSITIVE_INFINITY;
+    let maxX: number = Number.NEGATIVE_INFINITY;
+    let maxY: number = Number.NEGATIVE_INFINITY;
+    let found: boolean = false;
+    for (let i = 0; i < all.length; i++) {
+      const s: Shape = all[i];
+      if ((s.ownerCellId ?? topId) !== cellId || s.type === ShapeType.NODE || s.points.length === 0) continue;
+      const b: ShapeBounds = getShapeBounds(s);
+      if (Number.isFinite(b.minX) && Number.isFinite(b.maxX) && Number.isFinite(b.minY) && Number.isFinite(b.maxY)) {
+        minX = Math.min(minX, b.minX);
+        maxX = Math.max(maxX, b.maxX);
+        minY = Math.min(minY, b.minY);
+        maxY = Math.max(maxY, b.maxY);
+        found = true;
+      }
+    }
+    if (!found || maxX <= minX || maxY <= minY) return null;
+    return { x: maxX - minX, y: maxY - minY };
+  }
+
+  private openInstanceDialogForCell(cellId: number): void {
+    if (!this.assertEditMode()) return;
+    if (cellId >= 0) {
+      this.preferredInstanceTargetId = cellId;
+    }
+    this.instanceDialogContext = this.parameterDialogContext();
+    this.openCanvasDialog(this.placeInstanceController);
+    this.panelStore.statusText = '引用子单元：可选择单个实例 (SREF) 或行列阵列 (AREF)';
+  }
+
+  private placeInstance(
+    cellId: number,
+    x: number,
+    y: number,
+    rotation: number,
+    mirror: number,
+    arrayCols: number = 1,
+    arrayRows: number = 1,
+    pitchX: number = 0,
+    pitchY: number = 0
+  ): boolean {
     if (!this.validateParameterDialogContext(this.instanceDialogContext)) return false;
     if (!this.hasPlaceableCell(cellId)) {
-      this.panelStore.statusText = '当前文档没有可放置的 Cell，请先打开包含子 Cell 的版图文件';
+      this.panelStore.statusText = '当前文档没有可放置的 Cell，请先新建子 Cell';
       return false;
     }
     if (editService.wouldCreateCellCycle(editService.getCurrentCellId(), cellId)) {
@@ -11285,7 +12126,7 @@ struct Index {
     }
     const cellName: string = this.cellName(cellId);
     try {
-      const newId: number = editService.createInstance(cellId, x, y, rotation, mirror, cellName);
+      const newId: number = editService.createInstance(cellId, x, y, rotation, mirror, cellName, arrayCols, arrayRows, pitchX, pitchY);
       this.preferredInstanceTargetId = cellId;
       if (this.draftControlStore.stampActive && !this.draftControlStore.stampIsPCell) {
         this.pendingStampCellId = cellId;
@@ -11294,10 +12135,12 @@ struct Index {
       }
       editService.selectShape(newId);
       this.syncShapesFromEditService();
+      this.rebuildCellTree();
       this.viewportStore.selectedShapeId = newId;
-      this.panelStore.statusText = `已放置实例 ${cellName} 于 (${x}, ${y}) 旋转 ${rotation}°`;
+      const arrDesc: string = (arrayCols > 1 || arrayRows > 1) ? ` 阵列 ${arrayCols}×${arrayRows}` : '';
+      this.panelStore.statusText = `已放置${arrDesc}实例 ${cellName} 于 (${x}, ${y}) 旋转 ${rotation}°`;
       if (macroService.isRecording()) {
-        this.recordMacroStep(`放置实例 ${cellName} @(${x},${y}) 旋转${rotation}°`,
+        this.recordMacroStep(`放置实例 ${cellName}${arrDesc} @(${x},${y}) 旋转${rotation}°`,
           `create_instance|${cellId}|${x}|${y}|${rotation}|${mirror}|${cellName}`);
       }
       return true;
@@ -11308,14 +12151,7 @@ struct Index {
   }
 
   private openInstanceDialog(): void {
-    if (!this.assertEditMode()) return;
-    if (this.placeableInstanceCells().length === 0) {
-      this.panelStore.statusText = '当前 Cell 没有可安全放置的子 Cell，请先新建子 Cell 或使用参数化器件';
-      return;
-    }
-    this.instanceDialogContext = this.parameterDialogContext();
-    this.openCanvasDialog(this.placeInstanceController);
-    this.panelStore.statusText = '放置实例：请在弹窗中选择 Cell 并输入坐标';
+    this.openInstanceDialogForCell(-1);
   }
 
   private hasPlaceableCell(cellId: number): boolean {
@@ -11459,7 +12295,23 @@ struct Index {
       return false;
     }
     if (this.cellNameDialogMode === 'new') {
-      return this.createNewCell(name);
+      const ok: boolean = this.createNewCell(name);
+      if (ok) {
+        const createdId: number = this.placeableCells.length - 1;
+        const rootId: number = editService.getTopCellId();
+        const rootName: string = this.cellName(rootId);
+        if (createdId >= 0) {
+          this.enterCellDefinition(createdId);
+          this.panelStore.statusText = `已新建并进入子单元 ${name}（空白画布）：画好结构后点左侧「回顶层」即可做实例或阵列引用`;
+          showAppSnackBar(this.getUIContext(), `已进入新子单元 ${name}，画完单元后可回顶层 ${rootName} 做阵列引用`, {
+            actionText: '回顶层',
+            onAction: () => {
+              this.enterCellDefinition(rootId);
+            }
+          });
+        }
+      }
+      return ok;
     }
     if (this.cellNameDialogMode === 'selection') {
       if (!this.assertEditMode()) return false;
@@ -14050,19 +14902,58 @@ struct Index {
         this.panelStore.statusText = '当前工具: 多边形';
         return true;
       case 'L':
+      case 'W':
+        this.exitStampSession();
+        this.viewportStore.interactiveCurveKind = '';
         this.viewportStore.currentTool = ActiveTool.Path;
-        this.panelStore.statusText = '当前工具: 路径';
+        this.panelStore.statusText = '当前工具: 路径 / 波导';
         return true;
       case 'X':
+      case 'T':
+        this.exitStampSession();
+        this.viewportStore.interactiveCurveKind = '';
         this.viewportStore.currentTool = ActiveTool.Text;
-        this.panelStore.statusText = '当前工具: 文本';
+        this.panelStore.statusText = '当前工具: 文本标签';
         return true;
       case 'I':
         this.activateInstanceToolSmart();
         return true;
       case 'R':
+      case 'K':
+        this.exitStampSession();
+        this.viewportStore.interactiveCurveKind = '';
         this.viewportStore.currentTool = ActiveTool.Measure;
-        this.panelStore.statusText = '当前工具: 测量';
+        this.panelStore.statusText = '当前工具: 测量与标尺';
+        return true;
+      case 'Z':
+        this.exitStampSession();
+        this.viewportStore.interactiveCurveKind = '';
+        this.viewportStore.currentTool = ActiveTool.BoxZoom;
+        this.panelStore.statusText = '框选缩放：拖拽矩形区域局部放大';
+        return true;
+      case 'O':
+        this.activateInteractiveCurve('CIRCLE');
+        return true;
+      case '0':
+        viewService.setHierarchyDepth(1);
+        this.panelStore.statusText = '层级展开深度: 1 层（仅当前单元本地图形）';
+        return true;
+      case '1':
+      case '2':
+      case '3':
+      case '4':
+      case '5': {
+        const d: number = Number(key);
+        viewService.setHierarchyDepth(d);
+        this.panelStore.statusText = `层级展开深度: ${d} 层`;
+        return true;
+      }
+      case '6':
+      case '7':
+      case '8':
+      case '9':
+        viewService.setHierarchyDepth(5);
+        this.panelStore.statusText = '层级展开深度: 全部展开 (5 层)';
         return true;
       case 'M':
         this.switchToMoveTool();
