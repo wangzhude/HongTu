@@ -69,7 +69,7 @@ function parseToolDiffBadge(tool: AiChatToolState): DshToolDiffBadge {
 @Component
 struct DshRunningClockLabel {
   @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
-  private dark(): boolean { return this.effectiveIsDark || this.dark(); }
+  private dark(): boolean { return this.effectiveIsDark || DshDesign.isDark(); }
   @Prop startedAt: number = 0;
   @Prop statusHint: string = '';
   @State private elapsedSec: number = 0;
@@ -131,7 +131,7 @@ struct DshRunningClockLabel {
 @Component
 export struct DshRunningTail {
   @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
-  private dark(): boolean { return this.effectiveIsDark || this.dark(); }
+  private dark(): boolean { return this.effectiveIsDark || DshDesign.isDark(); }
   @Prop startedAt: number = 0;
   @Prop statusHint: string = '';
 
@@ -168,7 +168,7 @@ export struct DshRunningTail {
 @Component
 export struct DshTaskDock {
   @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
-  private dark(): boolean { return this.effectiveIsDark || this.dark(); }
+  private dark(): boolean { return this.effectiveIsDark || DshDesign.isDark(); }
   @Prop steps: AiPlanStepView[] = [];
   @State private expanded: boolean = false;
 
@@ -262,7 +262,7 @@ export struct DshTaskDock {
 @Component
 export struct DshTurnChangesCard {
   @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
-  private dark(): boolean { return this.effectiveIsDark || this.dark(); }
+  private dark(): boolean { return this.effectiveIsDark || DshDesign.isDark(); }
   @Prop summaryText: string = '';
   @Prop canUndo: boolean = false;
   onFitView: () => void = (): void => {};
@@ -338,7 +338,7 @@ export struct DshTurnChangesCard {
 @Component
 export struct DshProcessView {
   @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
-  private dark(): boolean { return this.effectiveIsDark || this.dark(); }
+  private dark(): boolean { return this.effectiveIsDark || DshDesign.isDark(); }
   @Prop turnKey: string = 'live';
   @Prop isLive: boolean = false;
   @Prop defaultExpanded: boolean = true;
