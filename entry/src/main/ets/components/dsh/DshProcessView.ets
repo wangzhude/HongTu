@@ -1092,16 +1092,16 @@ export struct DshWebSourcesRow {
 
   build() {
     if (this.sources.length > 0) {
-      Scroll() {
-        Row({ space: 6 }) {
-          ForEach(this.sources, (src: DshWebSearchItem, idx: number) => {
+      Flex({ wrap: FlexWrap.Wrap }) {
+        ForEach(this.sources, (src: DshWebSearchItem, idx: number) => {
+          Row() {
             Chip({
               prefixSymbol: {
                 normal: new SymbolGlyphModifier($r('sys.symbol.square_link_square')).fontSize(12).fontColor([COLORS.primary]),
                 activated: new SymbolGlyphModifier($r('sys.symbol.square_link_square')).fontSize(12).fontColor([COLORS.primary])
               },
               label: {
-                text: src.title.length > 22 ? `${src.title.substring(0, 21)}…` : src.title,
+                text: src.title.length > 24 ? `${src.title.substring(0, 23)}…` : src.title,
                 fontSize: 11,
                 fontColor: COLORS.ink
               },
@@ -1113,12 +1113,10 @@ export struct DshWebSourcesRow {
                 this.onSelectSource(src);
               }
             })
-          }, (src: DshWebSearchItem, idx: number): string => `${idx}:${src.url}`)
-        }.padding({ right: 12 }).alignItems(VerticalAlign.Center)
+          }.margin({ right: 6, bottom: 6 })
+        }, (src: DshWebSearchItem, idx: number): string => `${idx}:${src.url}`)
       }
       .width('100%')
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
       .margin({ top: 4, bottom: 2 })
     }
   }

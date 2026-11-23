@@ -123,14 +123,14 @@ export class DocumentDomainStore {
   @Trace nativeJobProgress: number = -1;
   @Trace nativeJobCancelRequested: boolean = false;
 
-  /** 原生 C++ g_layout 展开仅在快照已同步且无未保存几何差异时启用 */
-  canPreferNativeExpand(isDirty: boolean): boolean {
-    return this.nativeSnapshotCurrent && !isDirty;
+  /** 原生 C++ g_layout 展开在快照已同步（含冷启动恢复或切页同步后的未保存草稿）时直接启用；一旦发生实时几何编辑立即置 false */
+  canPreferNativeExpand(_isDirty: boolean = false): boolean {
+    return this.nativeSnapshotCurrent;
   }
 
-  /** 当 g_layout 未同步或存在未保存编辑时，向渲染器提供当前 ArkTS 快照 */
-  needsRenderSnapshot(isDirty: boolean): boolean {
-    return !this.nativeSnapshotCurrent || isDirty;
+  /** 仅当 g_layout 尚未与当前 ArkTS 几何同步时，才构建跨桥渲染快照 */
+  needsRenderSnapshot(_isDirty: boolean = false): boolean {
+    return !this.nativeSnapshotCurrent;
   }
 }
 

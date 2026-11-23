@@ -44,7 +44,7 @@ function validateSource(s: ViewSceneSource): void {
   if (!s.sourceId || !s.sourceDocumentId || !Number.isSafeInteger(s.revision) || s.revision < 0 ||
     !Number.isInteger(s.cellId) || s.cellId < 0 || s.cellId >= s.cellNames.length ||
     !Number.isInteger(s.topCellId) || s.topCellId < 0 || s.topCellId >= s.cellNames.length ||
-    !Number.isInteger(s.depth) || s.depth < 1 || s.depth > 32 ||
+    !Number.isInteger(s.depth) || s.depth < 1 || s.depth > 256 ||
     !Number.isFinite(s.opacity) || s.opacity < 0 || s.opacity > 1 || !isFiniteViewAffine(s.transform)) {
     throw new Error(`来源 ${s.sourceId} 的版本、Cell 或显示变换无效`);
   }
@@ -269,16 +269,17 @@ export class ViewRenderSceneService {
           definitions.packedReady = true;
         }
       }
+      const safeDepth: number = Math.max(1, Math.min(32, s.depth));
       return { sourceId: sourceIdentity(s), revision: s.revision,
         snapshot: {
           shapes: s.shapes,
           cellNames: s.cellNames,
           topCellId: s.topCellId,
-          packedCoords: definitions?.packedCoords,
-          shapePointOffsets: definitions?.shapePointOffsets,
-          shapePointCounts: definitions?.shapePointCounts,
+          packedCoords: definitions?.packedCoords?.buffer,
+          shapePointOffsets: definitions?.shapePointOffsets?.buffer,
+          shapePointCounts: definitions?.shapePointCounts?.buffer,
         },
-        cellId: s.cellId, depth: s.depth, transform: s.transform, opacity: s.opacity, styles: styles };
+        cellId: s.cellId, depth: safeDepth, transform: s.transform, opacity: s.opacity, styles: styles };
     });
   }
 

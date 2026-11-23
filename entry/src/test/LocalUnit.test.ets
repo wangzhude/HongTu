@@ -61,6 +61,17 @@ import {
   formatAttachmentSize
 } from '../main/ets/services/AiAttachmentService';
 import { aiNativeTool, aiNativeTools, AiNativeToolPage } from '../main/ets/services/AiNativeTools';
+import { ViewRenderSceneService } from '../main/ets/services/ViewRenderSceneService';
+import type { ViewSceneSource } from '../main/ets/models/ViewRenderScene';
+import { DocumentDomainStore } from '../main/ets/store/WorkbenchDomainStore';
+import { engineeringProjectService } from '../main/ets/services/EngineeringProjectService';
+import type {
+  EngineeringDependency,
+  EngineeringDependencyReport,
+  EngineeringEnvironment,
+  EngineeringProjectBundle,
+  EngineeringProjectSnapshot
+} from '../main/ets/services/EngineeringProjectService';
 
 function buildMinimalWorkspaceDocument(cellNames: string[], shapes: Shape[]): WorkspaceDocument {
   const emptyCellProps: LayoutPropRecord[][] = cellNames.map((): LayoutPropRecord[] => []);
@@ -1115,6 +1126,101 @@ export default function localUnitTest(): void {
       ]);
       expect(filteredHits.length).assertEqual(1);
       expect(filteredHits[0].url).assertEqual('https://klayout.de/doc/manual/drc_basic.html');
+
+      // v10 MateBook retest regression suite:
+      // 1) Synchronized dirty-draft native fast path + immediate invalidation on live geometry edit
+      const docDomain: DocumentDomainStore = new DocumentDomainStore();
+      docDomain.nativeSnapshotCurrent = true;
+      expect(docDomain.canPreferNativeExpand(true)).assertTrue();
+      expect(docDomain.needsRenderSnapshot(true)).assertFalse();
+      const dirtySyncedEditor: EditService = new EditService();
+      dirtySyncedEditor.markDirty();
+      dirtySyncedEditor.setNativeSnapshotCurrent(true);
+      expect(dirtySyncedEditor.isDirty()).assertTrue();
+      expect(dirtySyncedEditor.canPreferNativeExpand()).assertTrue();
+      dirtySyncedEditor.createRect(1, 0, 0, 100, 100, 0);
+      expect(dirtySyncedEditor.canPreferNativeExpand()).assertFalse();
+
+      // 2) ViewRenderSceneService ArrayBuffer packed wire buffers (>8192 pts) + depth clamping
+      const denseShapes: Shape[] = [];
+      for (let idx: number = 0; idx < 300; idx++) {
+        const polyPts: Point[] = [];
+        for (let k: number = 0; k < 32; k++) {
+          polyPts.push({ x: idx * 500 + k * 10, y: k * 10 });
+        }
+        denseShapes.push({
+          id: idx + 1,
+          type: ShapeType.POLYGON,
+          layerNumber: 1,
+          datatype: 0,
+          points: polyPts,
+          selected: false,
+          ownerCellId: 0
+        });
+      }
+      const sceneSvc: ViewRenderSceneService = new ViewRenderSceneService();
+      const sceneInput: ViewSceneSource = {
+        sourceId: 'main:doc-bjut-v10',
+        sourceDocumentId: 'doc-bjut-v10',
+        revision: 3,
+        shapes: denseShapes,
+        cellNames: ['zhengban_1'],
+        layers: [{
+          layerNumber: 1,
+          datatype: 0,
+          englishName: 'L1',
+          chineseName: '图层1',
+          color: '#3B82F6',
+          visible: true,
+          elementCount: denseShapes.length,
+          group: LayerGroup.INTERCONNECT
+        }],
+        cellId: 0,
+        topCellId: 0,
+        depth: 64,
+        transform: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 },
+        opacity: 1,
+        readOnly: false
+      };
+      const builtSources = sceneSvc.nativeSources([sceneInput]);
+      expect(builtSources.length).assertEqual(1);
+      expect(builtSources[0].depth).assertEqual(32);
+      expect(builtSources[0].snapshot.packedCoords instanceof ArrayBuffer).assertTrue();
+      expect((builtSources[0].snapshot.packedCoords as ArrayBuffer).byteLength).assertEqual(300 * 32 * 16);
+      expect((builtSources[0].snapshot.shapePointOffsets as ArrayBuffer).byteLength).assertEqual(300 * 4);
+
+      // 3) Embedded PocketPy 2.2.0 dependency report status & version propagation
+      const snapSpec: EngineeringProjectSnapshot = {
+        workspaceId: 'doc-v10-deps',
+        python: {
+          templates: [{
+            id: 1,
+            name: 'PCSEL 5x5',
+            script: 'import hongtu as db\n',
+            parameters: '{}',
+            inputMode: 'new'
+          }]
+        }
+      };
+      const depBundle: EngineeringProjectBundle = engineeringProjectService.buildBundle(snapSpec);
+      const depVersions: Record<string, string> = {
+        'Python': 'PocketPy 2.2.0',
+        'KLayout': 'klayout.db 兼容层'
+      };
+      const depEnv: EngineeringEnvironment = {
+        availablePCells: [],
+        pythonAvailable: true,
+        pythonEmbedded: true,
+        klayoutAvailable: true,
+        klayoutEmbeddedCompat: true,
+        toolVersions: depVersions
+      };
+      const depReport: EngineeringDependencyReport = engineeringProjectService.dependencyReport(depBundle, depEnv);
+      expect(depReport.canRegenerate).assertTrue();
+      const pyDep: EngineeringDependency | undefined = depReport.dependencies.find((d: EngineeringDependency): boolean => d.name === 'Python');
+      expect(pyDep !== undefined).assertTrue();
+      expect(pyDep!.status).assertEqual('embedded');
+      expect(pyDep!.version).assertEqual('PocketPy 2.2.0');
     });
   });
 }

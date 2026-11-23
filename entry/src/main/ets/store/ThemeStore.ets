@@ -900,6 +900,10 @@ export class ThemeState {
     this.syncWindowSystemBar();
   }
 
+  getMainWindow(): window.Window | undefined {
+    return this._mainWindow;
+  }
+
   unbindMainWindow(win?: window.Window): void {
     if (win === undefined || this._mainWindow === win) {
       this._mainWindow = undefined;

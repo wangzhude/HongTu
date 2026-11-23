@@ -754,7 +754,7 @@ export struct LayoutCanvasView {
           shapes: this.renderSceneProvider !== null ? [] : this.currentCellShapes(),
           fallbackShapesProvider: () => this.fallbackDrawResult().shapes,
           fallbackOverflowProvider: () => this.fallbackDrawResult().overflow,
-          renderSnapshotProvider: () => editService.isDirty() ? {
+          renderSnapshotProvider: () => !this.preferNativeExpand ? {
             cellNames: this.renderCellNames,
             topCellId: editService.getTopCellId(),
             shapes: this.shapes
@@ -769,8 +769,8 @@ export struct LayoutCanvasView {
           lightBackground: !this.effectiveIsDark,
           currentCellId: editService.getCurrentCellId(),
           hierarchyDepth: this.hierarchyDepth,
-          // 编辑后 native g_layout 未同步：必须走 ArkTS 已展开 shapes，避免 GL 画旧几何
-          preferNativeExpand: this.preferNativeExpand && !editService.isDirty(),
+          // nativeSnapshotCurrent=true 表示 C++ g_layout 与当前几何严格一致（任何实时编辑均立即置 false）
+          preferNativeExpand: this.preferNativeExpand,
           onGlActiveChange: (active: boolean) => {
             this.glActive = active;
           },

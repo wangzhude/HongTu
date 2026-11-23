@@ -113,12 +113,12 @@ export struct ProjectPanel {
             ForEach(this.engineeringDependencies, (item: EngineeringDependency) => {
               Column({ space: 6 }) {
                 Row({ space: 10 }) {
-                  WorkbenchIcon({ name: item.kind.toLowerCase().includes('python') ? 'macro' : 'data', iconSize: 16, color: COLORS.muted })
+                  WorkbenchIcon({ name: `${item.kind}:${item.name}`.toLowerCase().includes('python') ? 'macro' : 'data', iconSize: 16, color: (item.status === 'embedded' || item.status === 'available') ? COLORS.primary : COLORS.muted })
                   Text(item.name).fontSize(13).fontColor(COLORS.ink).layoutWeight(1).maxLines(2)
                   if (this.panelWidth >= 480) {
-                    Text(item.version || '版本未实测').fontSize(12).fontColor(COLORS.muted).width(110)
+                    Text(item.version || '版本未实测').fontSize(12).fontColor(COLORS.muted).width(110).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
                   }
-                  Text(this.dependencyStatus(item.status)).fontSize(12).fontColor(item.status === 'missing' ? COLORS.danger : COLORS.muted).width(72)
+                  Text(this.dependencyStatus(item.status)).fontSize(12).fontColor(item.status === 'missing' ? COLORS.danger : ((item.status === 'embedded' || item.status === 'available') ? COLORS.primary : COLORS.muted)).width(72)
                 }.width('100%')
                 if (this.panelWidth < 480) { Text(item.version || '版本未实测').utilityHint() }
                 Text(item.message).utilityHint()

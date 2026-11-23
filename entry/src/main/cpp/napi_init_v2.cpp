@@ -1437,22 +1437,39 @@ static void ReadContextFields(napi_env env,napi_value doc,GdsiiParseResult& layo
 }
 
 static double GetObjDouble(napi_env env, napi_value obj, const char* name, double def) {
-    napi_value v;
-    if (!GetObjProp(env, obj, name, &v)) {
+    napi_value v = nullptr;
+    if (!GetObjProp(env, obj, name, &v) || v == nullptr) {
+        return def;
+    }
+    napi_valuetype t = napi_undefined;
+    if (napi_typeof(env, v, &t) != napi_ok || t != napi_number) {
         return def;
     }
     double d = def;
-    napi_get_value_double(env, v, &d);
+    if (napi_get_value_double(env, v, &d) != napi_ok) {
+        return def;
+    }
     return d;
 }
 
 static int32_t GetObjInt(napi_env env, napi_value obj, const char* name, int32_t def) {
-    napi_value v;
-    if (!GetObjProp(env, obj, name, &v)) {
+    napi_value v = nullptr;
+    if (!GetObjProp(env, obj, name, &v) || v == nullptr) {
+        return def;
+    }
+    napi_valuetype t = napi_undefined;
+    if (napi_typeof(env, v, &t) != napi_ok || t != napi_number) {
         return def;
     }
     int32_t i = def;
-    napi_get_value_int32(env, v, &i);
+    if (napi_get_value_int32(env, v, &i) != napi_ok) {
+        double raw = 0.0;
+        if (napi_get_value_double(env, v, &raw) == napi_ok && std::isfinite(raw) &&
+            raw >= static_cast<double>(INT32_MIN) && raw <= static_cast<double>(INT32_MAX)) {
+            return static_cast<int32_t>(std::trunc(raw));
+        }
+        return def;
+    }
     return i;
 }
 
@@ -1729,8 +1746,37 @@ static GdsiiParseResult ReadLayoutDocumentSnapshot(napi_env env, napi_value doc)
             napi_typedarray_type type = napi_int8_array;
             napi_value backing = nullptr;
             size_t byteOffset = 0;
-            return napi_get_typedarray_info(env, value, &type, count, raw, &backing, &byteOffset) == napi_ok &&
-                type == expectedType && *raw != nullptr;
+            size_t taLen = 0;
+            void* taRaw = nullptr;
+            if (napi_get_typedarray_info(env, value, &type, &taLen, &taRaw, &backing, &byteOffset) != napi_ok ||
+                type != expectedType || taRaw == nullptr) {
+                return false;
+            }
+            void* abData = nullptr;
+            size_t abBytes = 0;
+            const bool hasBacking = backing != nullptr &&
+                napi_get_arraybuffer_info(env, backing, &abData, &abBytes) == napi_ok &&
+                abData != nullptr && byteOffset <= abBytes;
+            const double jsByteLen = GetObjDouble(env, value, "byteLength", -1.0);
+            if (jsByteLen >= 0.0 && std::isfinite(jsByteLen) && jsByteLen == std::floor(jsByteLen)) {
+                const size_t viewBytes = static_cast<size_t>(jsByteLen);
+                if (viewBytes % bytesPerValue != 0 || (hasBacking && viewBytes > abBytes - byteOffset)) {
+                    return false;
+                }
+                *count = viewBytes / bytesPerValue;
+            } else if (hasBacking && taLen > (abBytes - byteOffset) / bytesPerValue &&
+                       taLen <= (abBytes - byteOffset) && (taLen % bytesPerValue) == 0) {
+                // Guard against ACE NAPI engines returning TypedArray byteLength in length.
+                *count = taLen / bytesPerValue;
+            } else {
+                *count = taLen;
+            }
+            if (hasBacking && taRaw == abData && byteOffset > 0) {
+                *raw = static_cast<uint8_t*>(abData) + byteOffset;
+            } else {
+                *raw = taRaw;
+            }
+            return *raw != nullptr;
         };
         if (hasPacked) {
             napi_valuetype packedType = napi_undefined;
@@ -1755,7 +1801,8 @@ static GdsiiParseResult ReadLayoutDocumentSnapshot(napi_env env, napi_value doc)
 
     napi_value shapesVal;
     if (GetObjProp(env, doc, "shapes", &shapesVal)) {
-        const uint32_t n = arrayLength(shapesVal, 2000000, "Document shapes exceed supported budget or are unreadable");
+        const uint32_t n = arrayLength(shapesVal, static_cast<uint32_t>(kMaxInteractiveStoredShapes),
+                                       "Document shapes exceed supported budget or are unreadable");
         const bool hasDocPacked = docPackedCoords != nullptr;
         if (hasDocPacked && (docOffsetsLen != n || docCountsLen != n))
             throw std::invalid_argument("Document packed coordinate index does not match shape count");
@@ -1779,9 +1826,12 @@ static GdsiiParseResult ReadLayoutDocumentSnapshot(napi_env env, napi_value doc)
             ls.pathType = GetObjInt(env, sObj, "pathType", ls.pathType);
             ls.pathBeginExtension = GetObjDouble(env, sObj, "pathBeginExtension", 0);
             ls.pathEndExtension = GetObjDouble(env, sObj, "pathEndExtension", 0);
-            napi_value absoluteWidthValue;
-            if (GetObjProp(env, sObj, "pathWidthAbsolute", &absoluteWidthValue)) {
-                napi_get_value_bool(env, absoluteWidthValue, &ls.pathWidthAbsolute);
+            napi_value absoluteWidthValue = nullptr;
+            if (GetObjProp(env, sObj, "pathWidthAbsolute", &absoluteWidthValue) && absoluteWidthValue != nullptr) {
+                napi_valuetype abType = napi_undefined;
+                if (napi_typeof(env, absoluteWidthValue, &abType) == napi_ok && abType == napi_boolean) {
+                    napi_get_value_bool(env, absoluteWidthValue, &ls.pathWidthAbsolute);
+                }
             }
             ls.arrayCols = GetObjInt(env, sObj, "arrayCols", 0);
             ls.arrayRows = GetObjInt(env, sObj, "arrayRows", 0);
@@ -2395,11 +2445,12 @@ static napi_value NapiRenderSceneToSurface(napi_env env, napi_callback_info info
                 throw std::invalid_argument("Composite sourceId must be bounded, nonempty and unique");
             const double revision = ReadHierarchyRenderNumber(env, ReadHierarchyRenderField(env, item, "revision"), "revision");
             const double cell = ReadHierarchyRenderNumber(env, ReadHierarchyRenderField(env, item, "cellId"), "cellId");
-            const double depth = ReadHierarchyRenderNumber(env, ReadHierarchyRenderField(env, item, "depth"), "depth");
+            const double requestedDepth = ReadHierarchyRenderNumber(env, ReadHierarchyRenderField(env, item, "depth"), "depth");
             if (revision < 0 || revision > 9007199254740991.0 || revision != std::floor(revision) ||
                 cell < 0 || cell > std::numeric_limits<int>::max() || cell != std::floor(cell) ||
-                depth < 1 || depth > 32 || depth != std::floor(depth))
+                requestedDepth < 1 || requestedDepth > 256 || requestedDepth != std::floor(requestedDepth))
                 throw std::invalid_argument("Composite source revision/cell/depth must be supported integers");
+            const int depth = static_cast<int>(std::max(1.0, std::min(32.0, requestedDepth)));
             HierarchyRenderSource source;
             source.sourceOrder = static_cast<int>(index);
             source.opacity = ReadHierarchyRenderNumber(env, ReadHierarchyRenderField(env, item, "opacity"), "opacity");
@@ -2418,7 +2469,14 @@ static napi_value NapiRenderSceneToSurface(napi_env env, napi_callback_info info
             auto* cached = sceneCache->find(id, revision, shapes, metadata);
             if (!cached) {
             auto snapshot = ReadLayoutDocumentSnapshot(env, document);
-            for (const auto& shape : snapshot.shapes) {
+            for (auto& shape : snapshot.shapes) {
+                if (shape.type != "instance" && shape.type != "text") {
+                    if (!std::isfinite(shape.magnification) || shape.magnification <= 0.0) shape.magnification = 1.0;
+                    if (!std::isfinite(shape.rotation)) shape.rotation = 0.0;
+                    if (shape.mirror < 0 || shape.mirror > 2) shape.mirror = 0;
+                    if (shape.arrayCols < 0) shape.arrayCols = 0;
+                    if (shape.arrayRows < 0) shape.arrayRows = 0;
+                }
                 if (shape.ownerCellId < 0 || shape.ownerCellId >= static_cast<int>(snapshot.cells.size()) ||
                     (shape.type == "instance" && (shape.cellId < 0 || shape.cellId >= static_cast<int>(snapshot.cells.size()))))
                     throw std::invalid_argument("Composite snapshot contains an invalid owner or unresolved Cell");
@@ -2444,10 +2502,10 @@ static napi_value NapiRenderSceneToSurface(napi_env env, napi_callback_info info
             if (storedShapes > kMaxInteractiveStoredShapes ||
                 storedCoordinates > kMaxInteractiveCoordinates ||
                 expandedObjects > kMaxInteractiveExpandedObjects)
-                throw std::length_error("Composite scene exceeds aggregate stored/expanded geometry budget (2000000 shapes / 25000000 coordinates / 10000000 expanded objects)");
+                throw std::length_error("Composite scene exceeds aggregate stored/expanded geometry budget (5000000 shapes / 50000000 coordinates / 1000000000 expanded objects)");
             if (!cached->layout->findCell(static_cast<int>(cell))) throw std::invalid_argument("Composite source Cell no longer exists");
-            AppendReadonlySceneFingerprint(fingerprint, id, *cached, static_cast<int>(cell), static_cast<int>(depth), source, styles);
-            requests.push_back({cached->layout, source, styles, static_cast<int>(cell), static_cast<int>(depth)});
+            AppendReadonlySceneFingerprint(fingerprint, id, *cached, static_cast<int>(cell), depth, source, styles);
+            requests.push_back({cached->layout, source, styles, static_cast<int>(cell), depth});
         }
         const auto key = fingerprint.str();
         sceneCache->prune(identities);

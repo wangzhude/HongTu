@@ -253,9 +253,9 @@ export class EditService {
     return this.nativeSnapshotCurrent;
   }
 
-  /** 原生 C++ 展开与 R-Tree 点查询仅在 g_layout 已同步且无未保存编辑时启用 */
+  /** 原生 C++ 展开与 R-Tree 点查询在 g_layout 已同步时启用（任何实时几何编辑均会立即将 nativeSnapshotCurrent 置 false） */
   canPreferNativeExpand(): boolean {
-    return this.nativeSnapshotCurrent && !this.dirty;
+    return this.nativeSnapshotCurrent;
   }
 
   clearClipboard(): void {

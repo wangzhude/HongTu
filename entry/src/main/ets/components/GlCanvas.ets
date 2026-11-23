@@ -769,8 +769,9 @@ export struct GlCanvas {
       this.clearSceneSurface();
       const fallback = styledScene ?? this.sceneService.draw(sources, tightVp, 2000, this.zoomScale);
       const cleanOverflowMsg: string = fallback.message.replace(/^当前场景未完整绘制[：:]\s*Error:\s*/i, '当前场景未完整绘制：').replace(/^Error:\s*/i, '');
-      this.renderError = fallback.overflow ? cleanOverflowMsg : (nativeError.length > 0 ? nativeError :
-        (needsArkUiTight || surfaceNotReady ? '' : '原生场景不可用，使用内置绘制'));
+      this.renderError = fallback.overflow
+        ? (nativeError.length > 0 ? `${cleanOverflowMsg}（${nativeError}）` : cleanOverflowMsg)
+        : (nativeError.length > 0 ? nativeError : (needsArkUiTight || surfaceNotReady ? '' : '原生场景不可用，使用内置绘制'));
       if (!this.capacityFallbackActive) this.onGlActiveChange(false);
       this.capacityFallbackActive = true;
 

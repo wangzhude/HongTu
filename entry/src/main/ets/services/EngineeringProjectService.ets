@@ -41,7 +41,9 @@ export interface EngineeringProjectSnapshot {
 export interface EngineeringEnvironment {
   availablePCells: string[];
   pythonAvailable?: boolean;
+  pythonEmbedded?: boolean;
   klayoutAvailable?: boolean;
+  klayoutEmbeddedCompat?: boolean;
   toolVersions?: Record<string, string>;
   availableDeckIds?: string[];
   verifierAvailable?: boolean;
@@ -384,12 +386,34 @@ export class EngineeringProjectService {
         item.status = environment.availablePCells.indexOf(item.name) >= 0 ? 'available' : 'missing';
         item.message = item.status === 'available' ? '同名 PCell 已提供，仍需核对参数与几何结果' : `缺少 PCell ${item.name}，现有几何可查看与编辑，参数不能重生成`;
       } else if (item.kind === 'runtime') {
-        const available: boolean | undefined = item.name === 'Python' ? environment.pythonAvailable : item.name === 'KLayout' ? environment.klayoutAvailable : undefined;
-        item.status = available === true ? 'available' : available === false ? 'missing' : 'unknown';
+        const isEmbedded: boolean = (item.name === 'Python' && environment.pythonEmbedded === true) ||
+          (item.name === 'KLayout' && environment.klayoutEmbeddedCompat === true);
+        const available: boolean | undefined = item.name === 'Python'
+          ? (environment.pythonAvailable ?? (isEmbedded ? true : undefined))
+          : item.name === 'KLayout'
+            ? (environment.klayoutAvailable ?? (isEmbedded ? true : undefined))
+            : undefined;
         const actual: string = environment.toolVersions?.[item.name] ?? '';
-        if (available === true && item.version.length > 0 && actual !== item.version) {
-          item.status = 'unknown'; item.message = `${item.name} 版本需确认：工程 ${item.version} / 当前 ${actual || '未实测'}`;
-        } else item.message = `${item.name} ${actual || '版本未实测'}：${item.status === 'available' ? '运行环境可用' : item.status === 'missing' ? '运行环境缺失' : '运行环境尚未确认'}`;
+        if (item.version.length === 0 && actual.length > 0) {
+          item.version = actual;
+        }
+        if (isEmbedded && (item.version.length === 0 || actual.length === 0 || item.version === actual)) {
+          item.status = 'embedded';
+          if (item.version.length === 0) {
+            item.version = item.name === 'Python' ? 'PocketPy 2.2.0' : 'klayout.db 兼容层';
+          }
+          item.message = item.name === 'Python'
+            ? `端侧内置 ${item.version} 已就绪，可直接离线执行参数化版图脚本`
+            : '端侧已内置 hongtu / klayout.db 几何与 Clipper2 布尔兼容层';
+        } else {
+          item.status = available === true ? 'available' : available === false ? 'missing' : 'unknown';
+          if (available === true && item.version.length > 0 && actual.length > 0 && actual !== item.version) {
+            item.status = 'unknown';
+            item.message = `${item.name} 版本需确认：工程 ${item.version} / 当前 ${actual}`;
+          } else {
+            item.message = `${item.name} ${actual || item.version || '版本未实测'}：${item.status === 'available' ? '运行环境可用' : item.status === 'missing' ? '运行环境缺失' : '运行环境尚未确认'}`;
+          }
+        }
       } else if (item.kind === 'deck') {
         item.status = environment.availableDeckIds === undefined ? 'unknown' : environment.availableDeckIds.indexOf(item.name) >= 0 ? 'available' : 'missing';
         item.message = `${item.name}：${item.status === 'available' ? '已注册验证 deck，执行资格按其配置检查' : item.status === 'missing' ? '验证 deck 缺失' : '验证 deck 尚未确认'}`;

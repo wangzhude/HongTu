@@ -5334,8 +5334,7 @@ struct Index {
   }
 
   private viewWorkspaceRenderScene(): ViewSceneSource[] {
-    const useLiveArkSnapshot: boolean = !this.docStore.nativeSnapshotCurrent || editService.isDirty();
-    const mainShapes: Shape[] = useLiveArkSnapshot ? editService.getShapes() : this.shapes;
+    const mainShapes: Shape[] = editService.getShapes();
     const mainRevision: number = editService.getSessionRevision() * 2 + (this.canPreferNativeExpand() ? 0 : 1);
     const main: ViewSceneSource = { sourceId: `main:${this.docStore.activeWorkspaceId}`, sourceDocumentId: this.docStore.activeWorkspaceId,
       revision: mainRevision, shapes: mainShapes,
@@ -6906,7 +6905,11 @@ struct Index {
     if (JSON.stringify(local) === JSON.stringify(this.localPythonDraft)) return;
     this.localPythonDraft = local;
     this.localPythonDraftDirty = true;
+    const keepNativeGeometry: boolean = this.docStore.nativeSnapshotCurrent && editService.isNativeSnapshotCurrent();
     editService.markDirty();
+    if (keepNativeGeometry) {
+      this.setNativeSnapshotCurrent(true);
+    }
     this.docStore.documentDirty = true;
     this.refreshWorkspaceTabs(); this.scheduleWorkspaceDraft();
   }
@@ -6993,9 +6996,16 @@ struct Index {
     const deck: EngineeringRuleSnapshot = { name: drcService.captureConfiguration().ruleSourceLabel, rules: drcService.getRules() };
     const source: PythonWorkspaceBundle = pythonWorkspaceService.exportBundle();
     const python: EngineeringPythonBundle = { draft: source.draft, templates: source.templates };
+    const pyInfo = nativeHongTuService.getEmbeddedPythonInfo();
+    const toolVersions: Record<string, string> = {};
+    if (pyInfo.available) {
+      toolVersions['Python'] = pyInfo.version || 'PocketPy 2.2.0';
+      toolVersions['KLayout'] = 'klayout.db 兼容层';
+    }
     const snapshot: EngineeringProjectSnapshot = { workspaceId: document.id, python,
       macrosJson: macroService.exportAllMacros(), drcDeckJson: JSON.stringify(deck),
-      technologyJson: technologyService.serialize(), pcells: pcells ?? document.pcells };
+      technologyJson: technologyService.serialize(), pcells: pcells ?? document.pcells,
+      toolVersions: pyInfo.available ? toolVersions : undefined };
     const tools: EngineeringProjectBundle = engineeringProjectService.buildBundle(snapshot);
     return document.id === this.docStore.activeWorkspaceId ? engineeringProjectService.refreshReviewBundle(tools, this.captureEngineeringReview(document.id)) : tools;
   }
@@ -7034,7 +7044,20 @@ struct Index {
   private refreshEngineeringDependencies(): void {
     if (this.engineeringBundle === undefined) { this.docStore.engineeringDependencies = []; return; }
     const names: string[] = nativeHongTuService.listPCells().map((item): string => item.name);
-    const environment: EngineeringEnvironment = { availablePCells: names };
+    const pyInfo = nativeHongTuService.getEmbeddedPythonInfo();
+    const toolVersions: Record<string, string> = {};
+    if (pyInfo.available) {
+      toolVersions['Python'] = pyInfo.version || 'PocketPy 2.2.0';
+      toolVersions['KLayout'] = 'klayout.db 兼容层';
+    }
+    const environment: EngineeringEnvironment = {
+      availablePCells: names,
+      pythonAvailable: pyInfo.available ? true : undefined,
+      pythonEmbedded: pyInfo.available,
+      klayoutAvailable: pyInfo.available ? true : undefined,
+      klayoutEmbeddedCompat: pyInfo.available,
+      toolVersions: pyInfo.available ? toolVersions : undefined
+    };
     this.docStore.engineeringDependencies = engineeringProjectService.dependencyReport(this.engineeringBundle, environment).dependencies;
   }
 
@@ -9996,6 +10019,10 @@ struct Index {
 
   private async attachCurrentCanvasSnapshotToChat(): Promise<void> {
     try {
+      // 等待 .bindMenu 浮动菜单子窗口完成收起动画，防止截取到菜单子窗口或弹窗遮挡主窗口画布合成帧
+      await new Promise<void>((resolve: () => void) => {
+        setTimeout((): void => resolve(), 180);
+      });
       const outcome: DshToolExecutionOutcome = await this.captureWorkbenchOrCanvasPng('canvas_viewport', 1440, 960, false, false);
       const att: AiChatAttachment | undefined = outcome.visualAttachment ?? outcome.generatedAttachment;
       if (att !== undefined) {
@@ -10225,9 +10252,16 @@ struct Index {
     if (target === 'workbench_window' || target === 'canvas_viewport') {
       let pixmap: image.PixelMap | null = null;
       try {
+        const resolveMainWin = async (): Promise<window.Window> => {
+          const bound: window.Window | undefined = this.themeState.getMainWindow() ?? hongTuThemeState.getMainWindow();
+          if (bound !== undefined) {
+            return bound;
+          }
+          return await window.getLastWindow(context);
+        };
         if (target === 'workbench_window') {
           try {
-            const win = await window.getLastWindow(context);
+            const win = await resolveMainWin();
             pixmap = await win.snapshot();
             captureMethod = 'window.snapshot';
           } catch (_) {
@@ -10236,9 +10270,9 @@ struct Index {
           }
         } else {
           // XComponent(SURFACE) OpenGL ES 硬件帧由 Rosen 直接合成，componentSnapshot 仅能截取 ArkUI 节点会导致画布空白；
-          // 统一通过 window.snapshot() 抓取合成帧，并按 getRectangleById('hongtu-canvas-stage') 的窗口像素区域精确裁剪！
+          // 始终优先对应用主窗口执行 snapshot()（规避 .bindMenu 浮动子窗口被 getLastWindow 误抓取），再按画布区域精确裁剪！
           try {
-            const win = await window.getLastWindow(context);
+            const win = await resolveMainWin();
             pixmap = await win.snapshot();
             captureMethod = 'window.snapshot+crop(canvas)';
             try {

@@ -226,6 +226,30 @@ export struct AiMarkdownBody {
     return TextAlign.Start;
   }
 
+  private extractCellHttpUrl(rawCell: string): string {
+    const mdMatch: RegExpExecArray | null = /\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/i.exec(rawCell);
+    if (mdMatch !== null && mdMatch[1]) {
+      return mdMatch[1].trim();
+    }
+    const bareMatch: RegExpExecArray | null = /(https?:\/\/[^\s<>")\]]+)/i.exec(rawCell);
+    return bareMatch !== null && bareMatch[1] ? bareMatch[1].trim() : '';
+  }
+
+  private async openTableCellUrl(rawUrl: string): Promise<void> {
+    if (this.disposed || rawUrl.length === 0) return;
+    try {
+      const parsed: url.URL = url.URL.parseURL(rawUrl);
+      if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || !parsed.hostname ||
+        parsed.username.length > 0 || parsed.password.length > 0) {
+        return;
+      }
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await context.openLink(parsed.href, { appLinkingOnly: false });
+    } catch (_) {
+      try { promptAction.showToast({ message: '无法直接打开链接，已支持长按复制', duration: 1500 }); } catch (_) {}
+    }
+  }
+
   private async copyTable(table: AiGfmTable): Promise<void> {
     try {
       const tsv: string = formatGfmTableTsv(table);
@@ -289,12 +313,22 @@ export struct AiMarkdownBody {
                 Column() {
                   Text(stripInlineMarkdownDecorators(cellVal) || ' ')
                     .fontSize(12)
-                    .fontColor(this.muted ? COLORS.muted : COLORS.ink)
+                    .fontColor(this.extractCellHttpUrl(cellVal).length > 0 ? COLORS.primary : (this.muted ? COLORS.muted : COLORS.ink))
+                    .decoration({
+                      type: this.extractCellHttpUrl(cellVal).length > 0 ? TextDecorationType.Underline : TextDecorationType.None,
+                      color: COLORS.primary
+                    })
                     .textAlign(this.cellAlign(table.aligns[colIdx] ?? 'left'))
                     .lineHeight(18)
                     .copyOption(CopyOptions.LocalDevice)
                     .width('100%')
                 }
+                .onClick(() => {
+                  const linkUrl: string = this.extractCellHttpUrl(cellVal);
+                  if (linkUrl.length > 0) {
+                    this.openTableCellUrl(linkUrl);
+                  }
+                })
                 .width(table.columnWidths[colIdx] ?? 120)
                 .padding({ left: 10, right: 10, top: 7, bottom: 7 })
                 .backgroundColor(rowIdx % 2 === 1 ? withAlpha(COLORS.surfaceMuted, 0.45) : COLORS.surface)

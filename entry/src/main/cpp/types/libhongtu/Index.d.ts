@@ -223,9 +223,9 @@ export interface NativeRenderShape {
 
 export interface NativeRenderSnapshot {
   cellNames: string[]; topCellId: number; shapes: NativeRenderShape[];
-  packedCoords?: Float64Array;
-  shapePointOffsets?: Int32Array;
-  shapePointCounts?: Int32Array;
+  packedCoords?: Float64Array | ArrayBuffer;
+  shapePointOffsets?: Int32Array | ArrayBuffer;
+  shapePointCounts?: Int32Array | ArrayBuffer;
   cellKeys?: string[]; ports?: NativeLayoutPort[]; crossSections?: NativeLayoutCrossSection[];
   layoutContextRecords?: LayoutContextRecord[]; cellContextRecords?: LayoutContextRecord[][];
 }
