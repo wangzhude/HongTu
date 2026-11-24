@@ -6176,7 +6176,7 @@ struct CanvasModeButton {
   @Prop actionEnabled: boolean = true;
   activateAction: () => void = () => {};
 
-  private fgColor(): ResourceColor {
+  private fgColor(): string {
     if (!this.actionEnabled) return COLORS.muted;
     if (this.danger) return COLORS.danger;
     if (this.active) return COLORS.primary;

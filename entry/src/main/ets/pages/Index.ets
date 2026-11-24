@@ -17,6 +17,7 @@ import {
 } from '../services/SystemCollaborationService';
 import { CursorStore, MeasureStore, VertexStore } from '../common/UiStores';
 import { CanvasFocusReturnFrame } from '../common/CanvasFocusReturnFrame';
+import { FONT_MONO } from '../common/Fonts';
 import type { LayoutPropRecord } from '../../cpp/types/libhongtu/Index';
 import { LayoutPort, LayoutCrossSection, LayoutContextRecord, LayoutPortDraft, PortEndpoint, ResolvedPort,
   newLayoutIdentity, remapCellSemantics, mergeLayoutSemantics, reconcileGeneratedPorts, portFromDraft, markCellLineage, appendCellSemantics } from '../models/LayoutPort';
