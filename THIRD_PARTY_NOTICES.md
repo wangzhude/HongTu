@@ -23,3 +23,9 @@ node tools/markdown_dependency_host_check.mjs
 The verification script never installs or patches dependencies. Both native transitive packages include x86_64 and arm64-v8a ELF libraries and declare minimum API 12. Package metadata and ELF checks alone do not establish API 24 build or device rendering success.
 
 Integration uses text mode with reactive updates and the existing outer chat scroll. HTML preview, Mermaid preview, Web preview pooling and image loading are disabled. A deliberate click on a valid HTTP(S) link opens it through the native system URL handler; other schemes are rejected. A wrapper neutralizes the upstream `$rawfile(` image shortcut before rendering because that shortcut bypasses the upstream image proxy. Original chat text and tool arguments remain unchanged. Library code/table blocks supply horizontal scrolling; no custom Markdown parser or renderer is introduced.
+
+# Embedded CPython
+
+HongTu packages CPython 3.12.3 for HarmonyOS as `libpython3.12.so` for arm64-v8a and x86_64, with a bytecode standard-library archive and headers for native integration. The platform builds statically include selected CPython extension modules.
+
+The [CPython 3.12.3 source](https://github.com/python/cpython/tree/v3.12.3) is distributed under the upstream [license and notices](entry/src/main/resources/rawfile/cpython312-LICENSE.txt), which are also packaged with the app.

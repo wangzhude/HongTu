@@ -3531,6 +3531,16 @@ static napi_value NapiRunEmbeddedPythonAsync(napi_env env, napi_callback_info in
                     asyncData->req.timeoutMs = static_cast<int64_t>(ReadDoubleArg(env, tmVal));
                 }
             }
+            napi_value inspVal = nullptr;
+            if (napi_get_named_property(env, args[0], "inspectOnly", &inspVal) == napi_ok && inspVal != nullptr) {
+                napi_valuetype ivt = napi_undefined;
+                napi_typeof(env, inspVal, &ivt);
+                if (ivt == napi_boolean) {
+                    bool b = false;
+                    napi_get_value_bool(env, inspVal, &b);
+                    asyncData->req.inspectOnly = b;
+                }
+            }
         }
     }
     napi_value promise = nullptr;

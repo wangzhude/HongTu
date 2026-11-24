@@ -223,6 +223,7 @@ const GRID_MAX_SCREEN_SPACING: number = 96;
 const GRID_MAJOR_INTERVAL: number = 5;
 /** 光标命中测试最小间隔（ms）：hitTest 回退路径为全图线性扫描，需节流 */
 const CURSOR_HIT_THROTTLE_MS: number = 60;
+const EMPTY_SHAPES: Shape[] = [];
 /** 标尺拖拽判定阈值（屏幕 px）：小于该位移视为单击，落水平标尺 */
 const RULER_DRAG_MIN_PX: number = 12;
 /** 测量/标尺模式条占用的屏幕高度（px）：落点在此范围内视为命中模式条，不参与测量/标尺 */
@@ -430,6 +431,7 @@ export struct LayoutCanvasView {
   private selectionCacheRevision: number = -1;
   private selectionFlagIds: Set<number> = new Set<number>();
   @State styleRenderRevision: number = 0;
+  private lastLayersStyleSig: string = '';
   // Cache is deliberately not @State: build reads it without scheduling another
   // build. Geometry/style revisions and camera values invalidate the key.
   private fallbackDrawCacheKey: string = '';
@@ -602,6 +604,7 @@ export struct LayoutCanvasView {
 
   aboutToAppear(): void {
     // CANVAS-13: hierarchyDepth 已改为 @Prop 由父组件传入，不再在此初始化
+    this.lastLayersStyleSig = this.computeLayersStyleSig();
     this.draftControlStore.routingMode = this.routingMode;
     this.draftControlStore.curveKind = this.interactiveCurveKind;
     this.draftControlStore.pathWidthStr = this.pathWidthStr;
@@ -672,7 +675,21 @@ export struct LayoutCanvasView {
     this.styleRenderRevision++;
   }
 
+  private computeLayersStyleSig(): string {
+    const parts: string[] = [];
+    for (let i: number = 0; i < this.layers.length; i++) {
+      const l: UiLayer = this.layers[i];
+      parts.push(`${l.layerNumber}:${l.datatype}:${l.visible !== false ? 1 : 0}:${l.color}:${l.transparency ?? ''}:${l.fillStyle ?? ''}:${l.lineStyle ?? ''}:${l.lineWidth ?? ''}:${l.highlighted ? 1 : 0}:${l.animated ? 1 : 0}`);
+    }
+    return parts.join('|');
+  }
+
   onLayersChange(): void {
+    const sig: string = this.computeLayersStyleSig();
+    if (sig === this.lastLayersStyleSig) {
+      return;
+    }
+    this.lastLayersStyleSig = sig;
     this.styleRenderRevision++;
     if (this.anyLayerAnimated()) {
       this.startLayerBlink();
@@ -751,7 +768,7 @@ export struct LayoutCanvasView {
         GlCanvas({
           renderSceneProvider: this.renderSceneProvider,
           sceneRevision: this.sceneRevision,
-          shapes: this.renderSceneProvider !== null ? [] : this.currentCellShapes(),
+          shapes: this.renderSceneProvider !== null ? EMPTY_SHAPES : this.currentCellShapes(),
           fallbackShapesProvider: () => this.fallbackDrawResult().shapes,
           fallbackOverflowProvider: () => this.fallbackDrawResult().overflow,
           renderSnapshotProvider: () => !this.preferNativeExpand ? {
@@ -1320,8 +1337,8 @@ export struct LayoutCanvasView {
     }
     // A queued old-node callback must never forward a previous document's
     // layer, geometry or cell reference after IDs are reused by a new file.
-    const shape: Shape | undefined = editService.getShapes().find((candidate: Shape) =>
-      candidate.id === capturedShape.id && editService.isShapeInCurrentCell(candidate));
+    const rawShape: Shape | undefined = editService.getShapeById(capturedShape.id);
+    const shape: Shape | undefined = (rawShape !== undefined && editService.isShapeInCurrentCell(rawShape)) ? rawShape : undefined;
     if (shape === undefined || !this.isShapeInteractable(shape)) return;
     const now: number = Date.now();
     const maxDblClickDistVp: number = this.lastInputIsTouch ? Math.max(24, TOUCH_DRAG_SLOP_VP * 2.4) : 12;
@@ -1345,7 +1362,6 @@ export struct LayoutCanvasView {
       editService.selectMultiple(currentIds);
       this.multiSelectIds = currentIds;
       this.selectMultipleAction(currentIds);
-      this.requestRenderAction();
       this.lastShapeClickId = shape.id;
       this.lastShapeClickAt = now;
       this.lastShapeClickScreenX = this.lastPointerScreenX;
@@ -2364,7 +2380,9 @@ export struct LayoutCanvasView {
     }
     const horizontal: number = event.getHorizontalAxisValue();
     const vertical: number = event.getVerticalAxisValue();
-    if (event.scrollStep !== undefined && Math.abs(vertical) > 0.001) {
+    const isMouseWheel: boolean = event.scrollStep !== undefined ||
+      (event.sourceTool !== SourceTool.TOUCHPAD && Math.abs(horizontal) <= 0.001);
+    if (isMouseWheel && Math.abs(vertical) > 0.001) {
       if (isShiftHeld() && !isCtrlHeld()) {
         this.panCanvasAction(0, -vertical * 2.4);
         return;
@@ -2559,7 +2577,7 @@ export struct LayoutCanvasView {
       }
     }
 
-    const baseKey: string = `${this.documentKey}:${this.geometryRenderRevision}:${this.styleRenderRevision}:${editService.getSessionRevision()}:` +
+    const baseKey: string = `${this.documentKey}:${this.styleRenderRevision}:${editService.getSessionRevision()}:` +
       `${editService.getCurrentCellId()}:${this.hierarchyDepth}:${excluded.join(',')}`;
 
     if (isHeavyVertexDoc) {
@@ -3426,23 +3444,21 @@ export struct LayoutCanvasView {
         this.onHitCandidates(hits, 0);
       }
       let hitId: number = hits.candidates.length > 0 ? hits.candidates[0].rootShapeId : -1;
-      if (hitId >= 0) {
-        const hitShapeCheck: Shape | undefined = this.shapes.find((s: Shape) => s.id === hitId);
-        if (hitShapeCheck === undefined || !this.isShapeInteractable(hitShapeCheck)) {
-          hitId = -1;
-        }
+      let hitShape: Shape | undefined = hitId >= 0 ? editService.getShapeById(hitId) : undefined;
+      if (hitId >= 0 && (hitShape === undefined || !this.isShapeInteractable(hitShape))) {
+        hitId = -1;
+        hitShape = undefined;
       }
       if (hitId < 0 && this.lastShapeClickId >= 0 &&
         Date.now() - this.lastShapeClickAt <= DOUBLE_CLICK_THRESHOLD &&
         Math.hypot(screenX - this.lastShapeClickScreenX, screenY - this.lastShapeClickScreenY) <= this.activeDragSlopVp()) {
-        const recentInst: Shape | undefined = this.shapes.find((s: Shape) =>
-          s.id === this.lastShapeClickId && s.type === ShapeType.INSTANCE);
-        if (recentInst !== undefined && this.isShapeInteractable(recentInst)) {
+        const recentInst: Shape | undefined = editService.getShapeById(this.lastShapeClickId);
+        if (recentInst !== undefined && recentInst.type === ShapeType.INSTANCE && this.isShapeInteractable(recentInst)) {
           hitId = recentInst.id;
+          hitShape = recentInst;
         }
       }
       this.pendingClickShapeId = hitId;
-      const hitShape: Shape | undefined = this.shapes.find((shape: Shape) => shape.id === hitId);
       if (this.editable && hitShape !== undefined && editService.canEditLayer(hitShape.layerNumber, hitShape.datatype) &&
         editService.getSelectedIds().indexOf(hitId) >= 0) {
         const rich: RichSnapResult = this.snapRichWorld(userX, userY);
@@ -3472,7 +3488,7 @@ export struct LayoutCanvasView {
       if (this.selectedShapeId < 0 || editService.getSelectedIds().length <= 1) {
         const hit: HierarchyHitResult = this.hitVisibleShape(userX, userY, tolerance);
         if (hit.ok && hit.shapeId >= 0) {
-          const hitShape: Shape | undefined = this.shapes.find((s: Shape): boolean => s.id === hit.shapeId);
+          const hitShape: Shape | undefined = editService.getShapeById(hit.shapeId);
           if (hitShape !== undefined && this.isShapeInteractable(hitShape) &&
             editService.canEditLayer(hitShape.layerNumber, hitShape.datatype)) {
             this.selectShapeAction(hitShape);
@@ -4241,6 +4257,18 @@ export struct LayoutCanvasView {
   /** 框选释放：计算与选择框相交的所有图形，调 editService.selectMultiple */
   private finishBoxSelect(): void {
     const box: BoxSelectRect = this.boxSelectRect;
+    // 空白区域轻点（未拖拽形成选框）：直接清空选择，绝不扫描全库图元或重复重建整树
+    if (box.w <= 2 && box.h <= 2) {
+      if (!isShiftHeld() && !this.multiSelectAdditive &&
+        (this.multiSelectIds.length > 0 || editService.getSelectedIds().length > 0 || this.selectedShapeId >= 0)) {
+        this.multiSelectIds = [];
+        editService.clearSelection();
+        this.selectMultipleAction([]);
+      }
+      this.isBoxSelecting = false;
+      this.boxSelectRect = { x: 0, y: 0, w: 0, h: 0 };
+      return;
+    }
     // 选择框屏幕坐标 → 用户坐标
     const x1: number = this.screenToWorldX(box.x);
     const x2: number = this.screenToWorldX(box.x + box.w);
@@ -4268,9 +4296,14 @@ export struct LayoutCanvasView {
             (layer === this.selectionLayerFilter && (this.selectionDatatypeFilter < 0 || datatype === this.selectionDatatypeFilter))),
         1000000, 4000000, (text: string): number => this.measureSceneText(text)) : undefined;
 
+    const currentCellId: number = editService.getCurrentCellId();
+    const topCellId: number = editService.getTopCellId();
     const ids: number[] = [];
     for (let i = 0; i < this.shapes.length; i++) {
       const s = this.shapes[i];
+      if ((s.ownerCellId !== undefined ? s.ownerCellId : topCellId) !== currentCellId) {
+        continue;
+      }
       if (!this.isShapeInteractable(s)) {
         continue;
       }
@@ -4312,18 +4345,15 @@ export struct LayoutCanvasView {
       editService.selectMultiple(existing);
       this.multiSelectIds = existing;
       this.selectMultipleAction(existing);
-      this.requestRenderAction();
     } else if (ids.length > 0) {
       editService.selectMultiple(ids);
       this.multiSelectIds = ids;
       this.selectMultipleAction(ids);
-      this.requestRenderAction();
     } else {
       // 空框选 → 清除多选
       this.multiSelectIds = [];
       editService.clearSelection();
       this.selectMultipleAction([]);
-      this.requestRenderAction();
     }
     this.isBoxSelecting = false;
     this.boxSelectRect = { x: 0, y: 0, w: 0, h: 0 };
@@ -4360,11 +4390,11 @@ export struct LayoutCanvasView {
   }
 
   private getHierarchyBoundsResolver(): HierarchyBoundsResolver {
-    const key: string = `${this.geometryRenderRevision}:${this.styleRenderRevision}:${editService.getSessionRevision()}:` +
+    const key: string = `${this.documentKey}:${this.styleRenderRevision}:${editService.getSessionRevision()}:` +
       `${editService.getCurrentCellId()}:${this.hierarchyDepth}`;
     if (this.selectionBoundsResolver === null || this.selectionBoundsKey !== key) {
       this.selectionBoundsKey = key;
-      this.selectionBoundsResolver = new HierarchyBoundsResolver(this.shapes, editService.getTopCellId(),
+      this.selectionBoundsResolver = new HierarchyBoundsResolver(editService.getShapes(), editService.getTopCellId(),
         (layer: number, datatype: number): boolean => this.isLayerVisible(layer, datatype), 1000000, 4000000,
         (text: string): number => this.measureSceneText(text));
     }
@@ -4373,13 +4403,13 @@ export struct LayoutCanvasView {
 
   private hitVisibleShape(x: number, y: number, tolerance: number): HierarchyHitResult {
     return this.getHierarchyBoundsResolver().hitTestCell(editService.getCurrentCellId(), this.hierarchyDepth,
-      x, y, tolerance, (shape: Shape): boolean => this.isShapeInteractable(shape), true, 1000000, 8000000);
+      x, y, tolerance, (shape: Shape): boolean => this.isShapeInteractable(shape), true, 200000, 1000000);
   }
 
   private hitVisibleCandidates(x: number, y: number, tolerance: number): HierarchyCandidatesResult {
     return this.getHierarchyBoundsResolver().hitCandidatesCell(editService.getCurrentCellId(), this.hierarchyDepth,
       x, y, tolerance, (shape: Shape): boolean => this.isShapeInteractable(shape), {
-        maxCandidates: 64, maxNodes: 1000000, maxPoints: 8000000,
+        maxCandidates: 64, maxNodes: 200000, maxPoints: 1000000,
         layerNumber: this.selectionLayerFilter, datatype: this.selectionDatatypeFilter >= 0 ? this.selectionDatatypeFilter : undefined,
         types: this.selectionTypeFilter, leafSelectable: (shape: Shape): boolean => editService.canSelectLayer(shape.layerNumber, shape.datatype)
       });
@@ -4403,7 +4433,7 @@ export struct LayoutCanvasView {
     if (next < 0) { this.clearHitCandidates(); return; }
     this.hitCandidates = fresh.candidates; this.hitCandidateIndex = next; this.hitCandidatesMessage = fresh.message;
     const candidate: HierarchyHitCandidate = fresh.candidates[next];
-    const shape: Shape | undefined = editService.getShapes().find((s: Shape) => s.id === candidate.rootShapeId);
+    const shape: Shape | undefined = editService.getShapeById(candidate.rootShapeId);
     if (shape === undefined || !this.isShapeInteractable(shape)) { this.clearHitCandidates(); return; }
     this.lastShapeClickId = -1; this.lastShapeClickAt = 0;
     this.selectShapeAction(shape); this.onPickCandidate(candidate); this.onHitCandidates(fresh, next);
@@ -4421,7 +4451,7 @@ export struct LayoutCanvasView {
   }
 
   private updateCandidatePreview(candidate: HierarchyHitCandidate): void {
-    const leaf: Shape | undefined = editService.getShapes().find((s: Shape) => s.id === candidate.leafShapeId);
+    const leaf: Shape | undefined = editService.getShapeById(candidate.leafShapeId);
     if (leaf === undefined) return;
     const step: InstancePathStep | undefined = candidate.path[candidate.path.length - 1];
     const m = step?.transform;
@@ -4564,7 +4594,7 @@ export struct LayoutCanvasView {
   private commitPendingShapeClick(): void {
     const id: number = this.pendingClickShapeId;
     this.pendingClickShapeId = -1;
-    const shape: Shape | undefined = editService.getShapes().find((s: Shape) => s.id === id);
+    const shape: Shape | undefined = editService.getShapeById(id);
     if (shape !== undefined) this.handleShapeClick(shape);
     const candidate: HierarchyHitCandidate | undefined = this.hitCandidates[this.hitCandidateIndex];
     if (candidate !== undefined && candidate.rootShapeId === id) { this.onPickCandidate(candidate); this.updateCandidatePreview(candidate); }

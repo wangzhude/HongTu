@@ -115,7 +115,7 @@ export interface EditSelectionState {
 
 export interface EditAction {
   label?: string;
-  type: 'create' | 'delete' | 'move' | 'modify' | 'transaction' | 'structure';
+  type: 'create' | 'delete' | 'move' | 'modify' | 'transaction' | 'structure' | 'cell_refs';
   shapeId: number;
   /** 操作前的图形数据（撤销用） */
   before?: Shape;
@@ -128,6 +128,10 @@ export interface EditAction {
   orderAfter?: number[];
   /** 仅 'transaction'：组成该事务的子记录 */
   steps?: EditAction[];
+  /** 仅 'cell_refs'：紧凑压缩的五元组 [shapeId, prevOwner, nextOwner, prevCellId, nextCellId]（-2 表示 undefined） */
+  cellRefDeltas?: Int32Array;
+  /** 仅 'cell_refs'：去重后的受影响图层对 [layerNumber, datatype, ...] */
+  cellRefLayers?: number[];
   structureBefore?: EditStructureState;
   structureAfter?: EditStructureState;
   /** LYP-only metadata history; ordinary structure replay keeps its live-view policy. */
@@ -178,6 +182,10 @@ export interface EditSessionState {
 export class EditService {
   /** 撤销/重做栈上限，超过则丢弃最旧记录 */
   private static readonly MAX_UNDO_STACK: number = 50;
+  /** 撤销/重做栈子步骤权重总预算（防止大版图连续批量编辑撑爆 ArkTS 堆内存） */
+  private static readonly MAX_UNDO_TOTAL_STEPS: number = 40000;
+  /** cell_refs 压缩编码中表示 undefined 的哨兵值 */
+  private static readonly CELL_REF_UNSET: number = -2;
 
   private shapes: Shape[] = [];
   private nextId: number = 1;
@@ -527,6 +535,9 @@ export class EditService {
     for (const shape of this.shapes) byId.set(shape.id, shape);
     const nextIds: Set<number> = new Set<number>();
     const steps: EditAction[] = [];
+    const cellRefDeltaList: number[] = [];
+    const cellRefLayerSeen: Set<string> = new Set<string>();
+    const cellRefLayers: number[] = [];
     for (const next of nextShapes) {
       if (nextIds.has(next.id) || !Number.isInteger(next.id) || next.id <= 0) return false;
       nextIds.add(next.id);
@@ -534,10 +545,35 @@ export class EditService {
       if (previous === undefined) {
         if (!this.canEditLayer(next.layerNumber, next.datatype)) return false;
         steps.push({ type: 'create', shapeId: next.id, after: this.cloneShape(next) });
-      } else if (JSON.stringify(previous) !== JSON.stringify(next)) {
-        if (!this.canEditLayer(previous.layerNumber, previous.datatype) || !this.canEditLayer(next.layerNumber, next.datatype)) return false;
-        steps.push({ type: 'modify', shapeId: next.id, before: this.cloneShape(previous), after: this.cloneShape(next) });
+      } else {
+        const diffKind: 'same' | 'cell_refs' | 'modified' = EditService.diffShapeForStructure(previous, next);
+        if (diffKind === 'cell_refs') {
+          if (!this.canEditLayer(previous.layerNumber, previous.datatype)) return false;
+          cellRefDeltaList.push(
+            next.id,
+            previous.ownerCellId !== undefined ? previous.ownerCellId : EditService.CELL_REF_UNSET,
+            next.ownerCellId !== undefined ? next.ownerCellId : EditService.CELL_REF_UNSET,
+            previous.cellId !== undefined ? previous.cellId : EditService.CELL_REF_UNSET,
+            next.cellId !== undefined ? next.cellId : EditService.CELL_REF_UNSET
+          );
+          const layerKey: string = `${previous.layerNumber}/${previous.datatype}`;
+          if (!cellRefLayerSeen.has(layerKey)) {
+            cellRefLayerSeen.add(layerKey);
+            cellRefLayers.push(previous.layerNumber, previous.datatype);
+          }
+        } else if (diffKind === 'modified') {
+          if (!this.canEditLayer(previous.layerNumber, previous.datatype) || !this.canEditLayer(next.layerNumber, next.datatype)) return false;
+          steps.push({ type: 'modify', shapeId: next.id, before: this.cloneShape(previous), after: this.cloneShape(next) });
+        }
       }
+    }
+    if (cellRefDeltaList.length > 0) {
+      steps.push({
+        type: 'cell_refs',
+        shapeId: 0,
+        cellRefDeltas: new Int32Array(cellRefDeltaList),
+        cellRefLayers
+      });
     }
     for (const previous of this.shapes) {
       if (nextIds.has(previous.id)) continue;
@@ -568,7 +604,7 @@ export class EditService {
       steps.push(step);
     }
     if (steps.length === 0 && !orderChanged) return true;
-    const rollback: EditSessionState = this.captureSession(recordLayerProperties);
+    const rollback: EditSessionState = this.captureRollbackSession(recordLayerProperties);
     const sealSelectionHistory: boolean = recordSelectionHistory || finalSelectedIds !== undefined;
     const selectionBefore: EditSelectionState | undefined = sealSelectionHistory ? this.captureSelectionState() : undefined;
     try {
@@ -598,7 +634,7 @@ export class EditService {
       // A structure listener publishes Cell/units metadata outside this service.
       // Geometry, allocator, selection, dirty baseline and history must return
       // together if that publication fails, before attempting metadata restore.
-      this.restoreSession(rollback, recordLayerProperties);
+      this.restoreRollbackSession(rollback, recordLayerProperties);
       let restoreFailure: string = '';
       if (this.structureRestoreAction !== null) {
         try { this.structureRestoreAction(this.cloneStructure(recordedBefore, recordLayerProperties)); }
@@ -606,7 +642,7 @@ export class EditService {
       }
       // Restoring external metadata may itself reenter editing. Reassert the
       // exact pre-transaction session after that callback completes or throws.
-      this.restoreSession(rollback, recordLayerProperties);
+      this.restoreRollbackSession(rollback, recordLayerProperties);
       throw new Error(`结构事务未提交：${String(error)}${restoreFailure}`);
     }
   }
@@ -630,7 +666,7 @@ export class EditService {
       let hasStructure: boolean = false;
       const collect = (step: EditAction): void => {
         if (step.shapeId > 0) affected.add(step.shapeId);
-        if (step.type === 'structure') hasStructure = true;
+        if (step.type === 'structure' || step.type === 'cell_refs') hasStructure = true;
         for (const child of step.steps ?? []) collect(child);
       };
       collect(action);
@@ -646,6 +682,8 @@ export class EditService {
       index: action.index, orderBefore: action.orderBefore?.slice(), orderAfter: action.orderAfter?.slice(),
       before: action.before === undefined ? undefined : this.cloneShape(action.before),
       after: action.after === undefined ? undefined : this.cloneShape(action.after),
+      cellRefDeltas: action.cellRefDeltas === undefined ? undefined : new Int32Array(action.cellRefDeltas),
+      cellRefLayers: action.cellRefLayers?.slice(),
       structureBefore: action.structureBefore === undefined ? undefined : this.cloneStructure(action.structureBefore, action.layerPropertiesHistory === true),
       structureAfter: action.structureAfter === undefined ? undefined : this.cloneStructure(action.structureAfter, action.layerPropertiesHistory === true),
       selectionBefore: action.selectionBefore === undefined ? undefined : this.cloneSelectionState(action.selectionBefore),
@@ -735,8 +773,8 @@ export class EditService {
     return {
       shapes: incrementalSnapshotEngine.captureReadOnlyShapes(docKey, this.shapes),
       nextId: this.nextId,
-      undoStack: this.undoStack.map((a: EditAction) => this.cloneAction(a)),
-      redoStack: this.redoStack.map((a: EditAction) => this.cloneAction(a)),
+      undoStack: this.undoStack.slice(),
+      redoStack: this.redoStack.slice(),
       selectedId: this.selectedId,
       selectedIds: Array.from(this.selectedIds),
       topCellId: this.topCellId,
@@ -747,6 +785,50 @@ export class EditService {
       editDepth: this.editDepth,
       cleanBaselineReachable: this.cleanBaselineReachable
     };
+  }
+
+  /**
+   * 事务回滚专用轻量会话快照：
+   * undoStack / redoStack 中已落盘的历史节点不可变，回滚仅需浅拷贝栈数组引用，
+   * 避免大版图连续删 Cell 时每次事务都深拷贝整条历史栈导致 ArkTS 堆 OOM。
+   */
+  captureRollbackSession(preserveOwnFields: boolean = false): EditSessionState {
+    this.forceCloseTransaction();
+    return {
+      shapes: preserveOwnFields ? cloneShapeArray(this.shapes, true) as Shape[] : this.shapes.map((s: Shape) => this.cloneShape(s)),
+      nextId: this.nextId,
+      undoStack: this.undoStack.slice(),
+      redoStack: this.redoStack.slice(),
+      selectedId: this.selectedId,
+      selectedIds: Array.from(this.selectedIds),
+      topCellId: this.topCellId,
+      currentCellStack: this.currentCellStack.slice(),
+      navigationPath: this.getNavigationPath(),
+      clipboard: this.clipboard.slice(),
+      dirty: this.dirty,
+      editDepth: this.editDepth,
+      cleanBaselineReachable: this.cleanBaselineReachable
+    };
+  }
+
+  restoreRollbackSession(state: EditSessionState, preserveOwnFields: boolean = false): void {
+    this.shapes = preserveOwnFields ? cloneShapeArray(state.shapes, true) as Shape[] : state.shapes.map((s: Shape) => this.cloneShape(s));
+    this.nextId = state.nextId;
+    this.undoStack = state.undoStack.slice();
+    this.redoStack = state.redoStack.slice();
+    this.selectedId = state.selectedId;
+    this.selectedIds = new Set<number>(state.selectedIds);
+    this.topCellId = state.topCellId;
+    this.currentCellStack = state.currentCellStack.length > 0 ? state.currentCellStack.slice() : [state.topCellId];
+    this.navigationPath = this.clonePath(state.navigationPath ?? []);
+    this.dirty = state.dirty;
+    this.editDepth = state.editDepth;
+    this.cleanBaselineReachable = state.cleanBaselineReachable;
+    this.nativeSnapshotCurrent = false;
+    this.txDepth = 0;
+    this.txSteps = [];
+    this.invalidateShapeIndex();
+    this.sessionRevision++;
   }
 
   captureSession(preserveOwnFields: boolean = false): EditSessionState {
@@ -967,6 +1049,9 @@ export class EditService {
 
   /** 顶点列表逐项相等（nm 精确比较）：用于丢弃「手势回到原位」的空事务 */
   private static samePoints(a: Point[], b: Point[]): boolean {
+    if (a === b) {
+      return true;
+    }
     if (a.length !== b.length) {
       return false;
     }
@@ -976,6 +1061,86 @@ export class EditService {
       }
     }
     return true;
+  }
+
+  private static samePropRecords(a: LayoutPropRecord[] | undefined, b: LayoutPropRecord[] | undefined): boolean {
+    if (a === b) return true;
+    const la: number = a !== undefined ? a.length : 0;
+    const lb: number = b !== undefined ? b.length : 0;
+    if (la !== lb) return false;
+    if (la === 0) return true;
+    for (let i = 0; i < la; i++) {
+      if (a![i].attr !== b![i].attr || a![i].value !== b![i].value) return false;
+    }
+    return true;
+  }
+
+  /**
+   * 零 JSON 结构化图元差异判定：
+   * - 'same'：完全一致，无需写入撤销记录
+   * - 'cell_refs'：仅 ownerCellId / cellId 索引发生重排，走紧凑 Int32Array 压缩历史
+   * - 'modified'：存在几何或属性变更，走常规 modify 快照
+   */
+  private static diffShapeForStructure(a: Shape, b: Shape): 'same' | 'cell_refs' | 'modified' {
+    if (
+      a.type !== b.type ||
+      a.layerNumber !== b.layerNumber ||
+      a.datatype !== b.datatype ||
+      a.selected !== b.selected ||
+      a.pathWidth !== b.pathWidth ||
+      a.pathType !== b.pathType ||
+      a.rotation !== b.rotation ||
+      a.mirror !== b.mirror ||
+      a.magnification !== b.magnification ||
+      a.text !== b.text ||
+      a.cellName !== b.cellName ||
+      a.textPresentation !== b.textPresentation ||
+      a.pathBeginExtension !== b.pathBeginExtension ||
+      a.pathEndExtension !== b.pathEndExtension ||
+      a.pathWidthAbsolute !== b.pathWidthAbsolute ||
+      a.arrayCols !== b.arrayCols ||
+      a.arrayRows !== b.arrayRows ||
+      a.arrayColStepX !== b.arrayColStepX ||
+      a.arrayColStepY !== b.arrayColStepY ||
+      a.arrayRowStepX !== b.arrayRowStepX ||
+      a.arrayRowStepY !== b.arrayRowStepY ||
+      !EditService.samePoints(a.points, b.points) ||
+      !EditService.samePropRecords(a.properties, b.properties)
+    ) {
+      return 'modified';
+    }
+    if (a.ownerCellId !== b.ownerCellId || a.cellId !== b.cellId) {
+      return 'cell_refs';
+    }
+    return 'same';
+  }
+
+  private actionMemoryWeight(action: EditAction): number {
+    if (action.type === 'transaction') {
+      const steps: EditAction[] = action.steps ?? [];
+      let total: number = 0;
+      for (let i = 0; i < steps.length; i++) {
+        total += this.actionMemoryWeight(steps[i]);
+      }
+      return Math.max(1, total);
+    }
+    if (action.type === 'cell_refs') {
+      const entries: number = action.cellRefDeltas !== undefined ? Math.floor(action.cellRefDeltas.length / 5) : 0;
+      return Math.max(1, Math.ceil(entries / 64));
+    }
+    return 1;
+  }
+
+  private trimStackMemoryBudget(stack: EditAction[]): void {
+    let totalWeight: number = 0;
+    for (let i = 0; i < stack.length; i++) {
+      totalWeight += this.actionMemoryWeight(stack[i]);
+    }
+    while (stack.length > 3 && totalWeight > EditService.MAX_UNDO_TOTAL_STEPS) {
+      const dropped: EditAction | undefined = stack.shift();
+      if (dropped === undefined) break;
+      totalWeight -= this.actionMemoryWeight(dropped);
+    }
   }
 
   /** 按 editDepth 同步 dirty：撤销回基线则 clean */
@@ -2378,15 +2543,17 @@ export class EditService {
       }
       // Trimming history does not undo its edits or move the saved baseline.
     }
+    this.trimStackMemoryBudget(this.undoStack);
     this.syncDirtyFromEditDepth();
   }
 
-  /** 压入 redo 栈，并在超过 MAX_UNDO_STACK 时丢弃最旧记录 */
+  /** 压入 redo 栈，并在超过 MAX_UNDO_STACK 或权重预算时丢弃最旧记录 */
   private pushRedo(action: EditAction): void {
     this.redoStack.push(action);
     while (this.redoStack.length > EditService.MAX_UNDO_STACK) {
       this.redoStack.shift();
     }
+    this.trimStackMemoryBudget(this.redoStack);
   }
 
   /**
@@ -2523,7 +2690,7 @@ export class EditService {
     const structural: boolean = this.hasStructureAction(action);
     const recordedSelection: boolean = this.hasSelectionAction(action);
     const atomic: boolean = structural || recordedSelection;
-    const rollback: EditSessionState | undefined = atomic ? this.captureSession(layerPropertiesHistory) : undefined;
+    const rollback: EditSessionState | undefined = atomic ? this.captureRollbackSession(layerPropertiesHistory) : undefined;
     const metadata: EditStructureState | undefined = structural && this.structureStateProvider !== null ?
       this.liveStructureState(layerPropertiesHistory) : undefined;
     try {
@@ -2552,13 +2719,13 @@ export class EditService {
     return true;
     } catch (error) {
       if (rollback === undefined) throw new Error(String(error));
-      this.restoreSession(rollback, layerPropertiesHistory);
+      this.restoreRollbackSession(rollback, layerPropertiesHistory);
       let restoreFailure: string = '';
       try {
         if (metadata !== undefined && this.structureRestoreAction !== null) this.structureRestoreAction(this.cloneStructure(metadata, layerPropertiesHistory));
         else this.notifyStructure(action, true, false);
       } catch (failure) { restoreFailure = `；结构恢复回调失败：${String(failure)}`; }
-      finally { this.restoreSession(rollback, layerPropertiesHistory); }
+      finally { this.restoreRollbackSession(rollback, layerPropertiesHistory); }
       throw new Error(`结构撤销未提交：${String(error)}${restoreFailure}`);
     }
   }
@@ -2574,6 +2741,21 @@ export class EditService {
           if (action.layerPropertiesHistory !== true) this.restoreStructure(action.structureAfter, action.structureBefore);
         }
         break;
+      case 'cell_refs': {
+        const deltas: Int32Array | undefined = action.cellRefDeltas;
+        if (deltas !== undefined && deltas.length >= 5) {
+          const byId: Map<number, Shape> = this.ensureShapeByIdMap();
+          for (let i = 0; i + 4 < deltas.length; i += 5) {
+            const target: Shape | undefined = byId.get(deltas[i]);
+            if (target === undefined) continue;
+            const prevOwner: number = deltas[i + 1];
+            const prevCellId: number = deltas[i + 3];
+            target.ownerCellId = prevOwner === EditService.CELL_REF_UNSET ? undefined : prevOwner;
+            target.cellId = prevCellId === EditService.CELL_REF_UNSET ? undefined : prevCellId;
+          }
+        }
+        break;
+      }
       case 'transaction': {
         const txSteps: EditAction[] = action.steps ?? [];
         for (let i = txSteps.length - 1; i >= 0; i--) {
@@ -2583,7 +2765,10 @@ export class EditService {
       }
       case 'create':
         const createIdx = this.shapes.findIndex(s => s.id === action.shapeId);
-        if (createIdx >= 0) this.shapes.splice(createIdx, 1);
+        if (createIdx >= 0) {
+          this.shapes.splice(createIdx, 1);
+          this.invalidateShapeIndex();
+        }
         break;
       case 'delete':
         if (action.before) {
@@ -2592,6 +2777,7 @@ export class EditService {
           restored.selected = true;
           const position: number = action.index === undefined ? this.shapes.length : Math.max(0, Math.min(action.index, this.shapes.length));
           this.shapes.splice(position, 0, restored);
+          this.invalidateShapeIndex();
           this.selectedIds.add(restored.id);
           if (this.selectedId < 0) {
             this.selectedId = restored.id;
@@ -2600,12 +2786,11 @@ export class EditService {
         break;
       case 'move':
       case 'modify':
-        const shape = this.shapes.find(s => s.id === action.shapeId);
+        const shape = this.getShapeById(action.shapeId);
         if (shape && action.before) {
-          const beforePts: Point[] = [];
-          for (let i = 0; i < action.before.points.length; i++) {
-            beforePts.push({ x: action.before.points[i].x, y: action.before.points[i].y });
-          }
+          const beforePts: Point[] = isImmutablePointArray(action.before.points)
+            ? action.before.points
+            : action.before.points.map((pt: Point): Point => ({ x: pt.x, y: pt.y }));
           shape.points = beforePts;
           shape.type = action.before.type;
           shape.pathWidth = action.before.pathWidth;
@@ -2650,7 +2835,7 @@ export class EditService {
     const structural: boolean = this.hasStructureAction(action);
     const recordedSelection: boolean = this.hasSelectionAction(action);
     const atomic: boolean = structural || recordedSelection;
-    const rollback: EditSessionState | undefined = atomic ? this.captureSession(layerPropertiesHistory) : undefined;
+    const rollback: EditSessionState | undefined = atomic ? this.captureRollbackSession(layerPropertiesHistory) : undefined;
     const metadata: EditStructureState | undefined = structural && this.structureStateProvider !== null ?
       this.liveStructureState(layerPropertiesHistory) : undefined;
     try {
@@ -2672,13 +2857,13 @@ export class EditService {
     return true;
     } catch (error) {
       if (rollback === undefined) throw new Error(String(error));
-      this.restoreSession(rollback, layerPropertiesHistory);
+      this.restoreRollbackSession(rollback, layerPropertiesHistory);
       let restoreFailure: string = '';
       try {
         if (metadata !== undefined && this.structureRestoreAction !== null) this.structureRestoreAction(this.cloneStructure(metadata, layerPropertiesHistory));
         else this.notifyStructure(action, false, false);
       } catch (failure) { restoreFailure = `；结构恢复回调失败：${String(failure)}`; }
-      finally { this.restoreSession(rollback, layerPropertiesHistory); }
+      finally { this.restoreRollbackSession(rollback, layerPropertiesHistory); }
       throw new Error(`结构重做未提交：${String(error)}${restoreFailure}`);
     }
   }
@@ -2691,6 +2876,21 @@ export class EditService {
           if (action.layerPropertiesHistory !== true) this.restoreStructure(action.structureBefore, action.structureAfter);
         }
         break;
+      case 'cell_refs': {
+        const deltas: Int32Array | undefined = action.cellRefDeltas;
+        if (deltas !== undefined && deltas.length >= 5) {
+          const byId: Map<number, Shape> = this.ensureShapeByIdMap();
+          for (let i = 0; i + 4 < deltas.length; i += 5) {
+            const target: Shape | undefined = byId.get(deltas[i]);
+            if (target === undefined) continue;
+            const nextOwner: number = deltas[i + 2];
+            const nextCellId: number = deltas[i + 4];
+            target.ownerCellId = nextOwner === EditService.CELL_REF_UNSET ? undefined : nextOwner;
+            target.cellId = nextCellId === EditService.CELL_REF_UNSET ? undefined : nextCellId;
+          }
+        }
+        break;
+      }
       case 'transaction': {
         const txSteps: EditAction[] = action.steps ?? [];
         for (let i = 0; i < txSteps.length; i++) {
@@ -2704,6 +2904,7 @@ export class EditService {
           // 重做创建 ⇒ 该图元入选，与「新建即选中」的手势语义一致
           recreated.selected = true;
           this.shapes.push(recreated);
+          this.invalidateShapeIndex();
           this.selectedIds.add(recreated.id);
           if (this.selectedId < 0) {
             this.selectedId = recreated.id;
@@ -2712,16 +2913,18 @@ export class EditService {
         break;
       case 'delete':
         const delIdx = this.shapes.findIndex(s => s.id === action.shapeId);
-        if (delIdx >= 0) this.shapes.splice(delIdx, 1);
+        if (delIdx >= 0) {
+          this.shapes.splice(delIdx, 1);
+          this.invalidateShapeIndex();
+        }
         break;
       case 'move':
       case 'modify':
-        const shape = this.shapes.find(s => s.id === action.shapeId);
+        const shape = this.getShapeById(action.shapeId);
         if (shape && action.after) {
-          const afterPts: Point[] = [];
-          for (let i = 0; i < action.after.points.length; i++) {
-            afterPts.push({ x: action.after.points[i].x, y: action.after.points[i].y });
-          }
+          const afterPts: Point[] = isImmutablePointArray(action.after.points)
+            ? action.after.points
+            : action.after.points.map((pt: Point): Point => ({ x: pt.x, y: pt.y }));
           shape.points = afterPts;
           shape.type = action.after.type;
           shape.pathWidth = action.after.pathWidth;
@@ -2806,9 +3009,18 @@ export class EditService {
       }
       return true;
     }
+    if (action.type === 'cell_refs') {
+      const layers: number[] | undefined = action.cellRefLayers;
+      if (layers !== undefined) {
+        for (let i = 0; i + 1 < layers.length; i += 2) {
+          if (!this.canEditLayer(layers[i], layers[i + 1])) return false;
+        }
+      }
+      return true;
+    }
     if (action.before !== undefined && !this.canEditLayer(action.before.layerNumber, action.before.datatype)) return false;
     if (action.after !== undefined && !this.canEditLayer(action.after.layerNumber, action.after.datatype)) return false;
-    const current: Shape | undefined = this.shapes.find((s: Shape) => s.id === action.shapeId);
+    const current: Shape | undefined = this.getShapeById(action.shapeId);
     return current === undefined || this.canEditLayer(current.layerNumber, current.datatype);
   }
 

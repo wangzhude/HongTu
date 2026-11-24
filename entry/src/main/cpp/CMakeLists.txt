@@ -45,7 +45,22 @@ set_source_files_properties(vendor/pocketpy/pocketpy.c PROPERTIES
     COMPILE_OPTIONS "-w"
 )
 
-# 链接鸿蒙 NAPI 运行时 + OpenGL ES + EGL + XComponent + NativeVSync + 日志 + zlib(OASIS CBLOCK)
+# 端侧完整 CPython 3.12.3 动态库（arm64-v8a & x86_64，内建静态 C 标准库扩展）
+set(HONGTU_CPYTHON_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/${OHOS_ARCH}/libpython3.12.so")
+set(HONGTU_CPYTHON_INC "${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpython/include")
+set(HONGTU_CPYTHON_CFG "${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpython/config/${OHOS_ARCH}")
+if(EXISTS "${HONGTU_CPYTHON_LIB}" AND EXISTS "${HONGTU_CPYTHON_INC}/Python.h" AND EXISTS "${HONGTU_CPYTHON_CFG}/pyconfig.h")
+    message(STATUS "HongTu: Linking embedded CPython 3.12.3 for ${OHOS_ARCH}: ${HONGTU_CPYTHON_LIB}")
+    add_library(python312 SHARED IMPORTED)
+    set_target_properties(python312 PROPERTIES IMPORTED_LOCATION "${HONGTU_CPYTHON_LIB}")
+    target_compile_definitions(hongtu PRIVATE HONGTU_HAS_CPYTHON=1)
+    target_include_directories(hongtu PRIVATE "${HONGTU_CPYTHON_CFG}" "${HONGTU_CPYTHON_INC}")
+    set(HONGTU_CPYTHON_LINK python312)
+else()
+    set(HONGTU_CPYTHON_LINK "")
+endif()
+
+# 链接鸿蒙 NAPI 运行时 + OpenGL ES + EGL + XComponent + NativeVSync + 日志 + zlib(OASIS CBLOCK) + CPython 3.12
 target_link_libraries(hongtu PUBLIC
     libace_napi.z.so
     libace_ndk.z.so
@@ -56,6 +71,7 @@ target_link_libraries(hongtu PUBLIC
     libnative_buffer.so
     libnative_vsync.so
     libz.so
+    ${HONGTU_CPYTHON_LINK}
     ${CMAKE_DL_LIBS}
 )
 

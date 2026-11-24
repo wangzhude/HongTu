@@ -129,7 +129,7 @@ export interface DshLayoutBackendHost {
   runDrcCheck: () => Promise<DshToolExecutionOutcome>;
   listNativeTools: (category: string, offset: number, toolName: string) => string;
   callNativeTool: (toolName: string, argumentsJson: string, permission: DshPermissionMode) => Promise<DshToolExecutionOutcome>;
-  executeKlayoutPython: (script: string, applyMode: 'replace' | 'merge' | 'preview', inputMode?: 'new' | 'document' | 'selection', parametersJson?: string) => Promise<DshToolExecutionOutcome>;
+  executeKlayoutPython: (script: string, applyMode: 'replace' | 'merge' | 'preview' | 'inspect', inputMode?: 'new' | 'document' | 'selection', parametersJson?: string) => Promise<DshToolExecutionOutcome>;
 }
 
 export interface DshAgentRunCallbacks {
@@ -387,8 +387,8 @@ function buildDshTools(permission: DshPermissionMode, webSearchEnabled: boolean)
       type: 'function',
       function: {
         name: 'manage_cells',
-        description: '完整管理版图 Cell 单元与层级结构：create(新建 Cell，可选 enterAfterCreate)、delete(按 cellId 或 cellName 删除 Cell)、rename(重命名 Cell)、duplicate(深拷贝 Cell 及其内部几何为新名称 newName)、clear(清空指定 Cell 内图形)、enter(进入指定 Cell 编辑)、exit_parent(退回上一级父 Cell)、exit_top(退回顶层 Cell)、set_top(将指定 Cell 设为文档主顶层 Top Cell)、make_from_selection(将选中图形打包成新子 Cell 并原位替换为实例)、place_sref(放置单个子单元引用实例 x/y/rotation/mirror/magnification)、place_aref(放置 GDSII AREF 行列阵列实例 cols/rows/pitchX/pitchY，省略步进时自动按子单元包围盒计算无重叠间距)、flatten(展开实例层级)、maintenance_scan(扫描孤立/空 Cell 统计)、prune_orphan_cells(清理未被顶层引用的孤立空 Cell)。',
-        parameters: parseSchema('{"type":"object","properties":{"action":{"type":"string","enum":["create","delete","rename","duplicate","clear","enter","exit_parent","exit_top","set_top","make_from_selection","place_sref","place_aref","flatten","maintenance_scan","prune_orphan_cells"]},"cellId":{"type":"integer","minimum":0},"cellName":{"type":"string"},"newName":{"type":"string"},"enterAfterCreate":{"type":"boolean","default":true},"x":{"type":"number","default":0},"y":{"type":"number","default":0},"rotation":{"type":"number","default":0},"mirror":{"type":"boolean","default":false},"magnification":{"type":"number","default":1},"cols":{"type":"integer","minimum":1,"maximum":32767,"default":2},"rows":{"type":"integer","minimum":1,"maximum":32767,"default":2},"pitchX":{"type":"number"},"pitchY":{"type":"number"},"gapX":{"type":"number","default":200},"gapY":{"type":"number","default":200},"depth":{"type":"integer","minimum":1,"maximum":32,"default":32},"shapeIds":{"type":"array","items":{"type":"integer"}}},"required":["action"]}')
+        description: '完整管理版图 Cell 单元与层级结构：create(新建 Cell，可选 enterAfterCreate)、delete(按 cellId/cellName 删除单个 Cell，或传 cellIds/cellNames 一次原子批量删除多个 Cell)、rename(重命名 Cell)、duplicate(深拷贝 Cell 及其内部几何为新名称 newName)、clear(清空指定 Cell 内图形)、enter(进入指定 Cell 编辑)、exit_parent(退回上一级父 Cell)、exit_top(退回顶层 Cell)、set_top(将指定 Cell 设为文档主顶层 Top Cell)、make_from_selection(将选中图形打包成新子 Cell 并原位替换为实例)、place_sref(放置单个子单元引用实例 x/y/rotation/mirror/magnification)、place_aref(放置 GDSII AREF 行列阵列实例 cols/rows/pitchX/pitchY，省略步进时自动按子单元包围盒计算无重叠间距)、flatten(展开实例层级)、maintenance_scan(扫描孤立/空 Cell 统计)、prune_orphan_cells(清理未被顶层引用的孤立空 Cell)。',
+        parameters: parseSchema('{"type":"object","properties":{"action":{"type":"string","enum":["create","delete","rename","duplicate","clear","enter","exit_parent","exit_top","set_top","make_from_selection","place_sref","place_aref","flatten","maintenance_scan","prune_orphan_cells"]},"cellId":{"type":"integer","minimum":0},"cellName":{"type":"string"},"cellIds":{"type":"array","items":{"type":"integer","minimum":0}},"cellNames":{"type":"array","items":{"type":"string"}},"newName":{"type":"string"},"enterAfterCreate":{"type":"boolean","default":true},"x":{"type":"number","default":0},"y":{"type":"number","default":0},"rotation":{"type":"number","default":0},"mirror":{"type":"boolean","default":false},"magnification":{"type":"number","default":1},"cols":{"type":"integer","minimum":1,"maximum":32767,"default":2},"rows":{"type":"integer","minimum":1,"maximum":32767,"default":2},"pitchX":{"type":"number"},"pitchY":{"type":"number"},"gapX":{"type":"number","default":200},"gapY":{"type":"number","default":200},"depth":{"type":"integer","minimum":1,"maximum":32,"default":32},"shapeIds":{"type":"array","items":{"type":"integer"}}},"required":["action"]}')
       }
     },
     {
@@ -435,8 +435,8 @@ function buildDshTools(permission: DshPermissionMode, webSearchEnabled: boolean)
       type: 'function',
       function: {
         name: 'execute_klayout_python',
-        description: '直接在鸿图鸿蒙端侧内置的完整 Python 3 虚拟机（免外部桌面伴随服务，离线毫秒级运行）中执行版图生成、参数扫描或当前版图几何处理脚本。原生支持 import hongtu as db、import klayout.db as db、import pya、db.Layout、db.Box/DBox、db.Polygon/DPolygon、db.Path/DPath、db.Text、db.Trans、db.CellInstArray(SREF/AREF)、db.Region(Clipper2 布尔 + - & ^ 与 sized 偏置)、generic_cmos_inverter 及 add_port。inputMode=document 时自动提供 layout（当前版图副本）与 current_cell。',
-        parameters: parseSchema('{"type":"object","properties":{"script":{"type":"string","description":"完整 Python 3 脚本，结果保存在变量 layout (db.Layout)"},"inputMode":{"type":"string","enum":["new","document","selection"],"default":"new"},"applyMode":{"type":"string","enum":["replace","merge","preview"],"default":"replace"},"parameters":{"type":"object","description":"注入到脚本全局变量 params / PARAMETERS 的键值对"}},"required":["script"]}')
+        description: '直接在鸿图鸿蒙端侧内置的完整 CPython 3.12 引擎（含完整 Python 3.12 语法、标准库 collections/itertools/hashlib/json/re/math/statistics/heapq/dataclasses/zlib 与原生 C++ Clipper2/GDSII 内核）中离线运行脚本。支持 import hongtu as db、import klayout.db as db、import pya、db.Layout、db.Box/DBox、db.Polygon/DPolygon、db.Path/DPath、db.Text、db.Trans、db.CellInstArray(SREF/AREF)、db.Region(Clipper2 布尔 + - & ^ 与 sized 偏置)、generic_cmos_inverter 及 add_port。inputMode=document 时自动注入 layout 与 current_cell。自动执行模式下可用 applyMode="inspect" 获取脚本 stdout，跳过版图结果导出和应用。Layout 支持 layers()/layer_indexes()/layer_infos()/cells()/each_cell()/top_cells()/cell(k)/delete_cell(i)/prune_cell(i)，Cell 支持 shapes(layer_idx)/shapes()/each_inst()/each_child_cell()/each_parent_cell()/instances()/is_empty()/bbox()，_ShapeRef 支持 is_polygon()/is_box()/is_path()/is_text()/polygon/box/path/text/area()/bbox()，CellInstArray 支持 cell/size()/is_regular_array()/bbox()。',
+        parameters: parseSchema('{"type":"object","properties":{"script":{"type":"string","description":"完整 Python 3.12 脚本；生成/修改版图时结果保存在变量 layout (db.Layout)，纯分析脚本配合 applyMode=inspect 直接 print 输出"},"inputMode":{"type":"string","enum":["new","document","selection"],"default":"new"},"applyMode":{"type":"string","enum":["inspect","preview","replace","merge"],"default":"replace"},"parameters":{"type":"object","description":"注入到脚本全局变量 params / PARAMETERS 的键值对"}},"required":["script"]}')
       }
     },
     {
@@ -1205,15 +1205,18 @@ export class DshLayoutAgentService {
       }
       case 'execute_klayout_python': {
         if (permission === 'readonly') {
-          throw new Error('当前处于「只读巡检」权限模式，无法执行生成脚本。');
+          throw new Error('当前处于「只读巡检」权限模式，无法执行 Python 脚本。');
+        }
+        const modeRaw: string = typeof args['applyMode'] === 'string' ? (args['applyMode'] as string) : 'replace';
+        const applyMode: 'replace' | 'merge' | 'preview' | 'inspect' =
+          modeRaw === 'inspect' ? 'inspect' : (modeRaw === 'merge' ? 'merge' : (modeRaw === 'preview' ? 'preview' : 'replace'));
+        if (permission === 'review' && applyMode === 'inspect') {
+          throw new Error('Python inspect 仅支持「自动执行」模式。');
         }
         const script: string = typeof args['script'] === 'string' ? (args['script'] as string) : '';
         if (script.trim().length === 0) {
           throw new Error('script 不能为空');
         }
-        const modeRaw: string = typeof args['applyMode'] === 'string' ? (args['applyMode'] as string) : 'replace';
-        const applyMode: 'replace' | 'merge' | 'preview' =
-          modeRaw === 'merge' ? 'merge' : (modeRaw === 'preview' ? 'preview' : 'replace');
         const inModeRaw: string = typeof args['inputMode'] === 'string' ? (args['inputMode'] as string) : 'new';
         const inputMode: 'new' | 'document' | 'selection' =
           inModeRaw === 'document' ? 'document' : (inModeRaw === 'selection' ? 'selection' : 'new');

@@ -5033,7 +5033,8 @@ struct Index {
   private currentExportInput(): ExportLayoutInput {
     const cellNames: string[] = this.propertyCellOptions().map((cell: PropertyCellOption) => cell.name);
     return { shapes: editService.getShapes(), layers: this.layersForDisplay(), libName: this.docStore.docLibName,
-      topCellName: this.docStore.docTopCellName, sourcePath: this.docStore.currentFilePath, cellNames: cellNames,
+      topCellName: this.docStore.docTopCellName, sourcePath: this.docStore.currentFilePath,
+      documentTitle: this.docStore.currentDocumentTitle, cellNames: cellNames,
       topCellId: this.resolveTopCellIdForExport(cellNames), userUnits: this.docStore.docUserUnits,
       physicalUnits: this.docStore.docPhysicalUnits, cellProperties: this.docCellProperties,
       cellKeys: this.docCellKeys, ports: this.docPorts, crossSections: this.docCrossSections,
@@ -6642,7 +6643,7 @@ struct Index {
     this.documentTechnologyJson = doc.technologyJson ?? '';
     this.localProcessOwned = doc.localProcessState !== undefined;
     this.localPythonDraft = doc.localPythonDraft;
-    this.localPythonDraftDirty = doc.localPythonDraft !== undefined && doc.localPythonDraftDirty !== false;
+    this.localPythonDraftDirty = doc.localPythonDraft !== undefined && doc.localPythonDraftDirty === true;
     if (this.localPythonDraftDirty && !editService.isDirty()) editService.markDirty();
     advEditService.loadCellsFromImport(doc.cellNames, editService.getShapes(), doc.topCellId);
     this.measureStore.reset();
@@ -7773,18 +7774,21 @@ struct Index {
   private selectMultipleShapes(ids: number[]): void {
     this.viewportStore.pickedPlacement = null;
     this.panelStore.propertyPanelClosed = false;
-    this.syncShapesFromEditService();
+    const currentSelectedIds: number[] = editService.getSelectedIds();
+    this.viewportStore.selectedShapeCount = currentSelectedIds.length;
     if (ids.length === 0) {
       this.viewportStore.selectedShapeId = -1;
+      this.viewportStore.instanceScopeLabel = this.sharedCellScopeText();
       this.panelStore.statusText = '已清除选择';
       return;
     }
     this.viewportStore.selectedShapeId = ids[0];
-    const first: Shape | undefined = this.shapes.find((shape: Shape) => shape.id === ids[0]);
+    const first: Shape | undefined = editService.getShapeById(ids[0]);
     if (first !== undefined) {
       this.viewportStore.selectedLayerNumber = first.layerNumber;
-        this.viewportStore.selectedDatatype = first.datatype;
+      this.viewportStore.selectedDatatype = first.datatype;
     }
+    this.viewportStore.instanceScopeLabel = this.sharedCellScopeText();
     this.panelStore.statusText = `已框选 ${ids.length} 个图形`;
   }
 
@@ -7818,13 +7822,13 @@ struct Index {
     this.viewportStore.viewOffsetY = nextOffsetY;
     viewService.setViewZoomPercent(nextZoom);
     viewService.setViewOffset(nextOffsetX, nextOffsetY);
-    this.panelStore.statusText = `框选放大：${nextZoom.toFixed(nextZoom < 20 ? 1 : 0)}%`;
+    this.panelStore.statusText = `框选放大：${formatZoomPercent(nextZoom)}`;
   }
 
   private zoomCanvasToAt(screenX: number, screenY: number, targetZoom: number): void {
     const oldZoom: number = this.clampZoom(this.viewportStore.zoomPercent);
     const nextZoom: number = this.clampZoom(targetZoom);
-    if (Math.abs(nextZoom - oldZoom) < 0.001) {
+    if (Math.abs(nextZoom - oldZoom) <= Math.max(1e-9, oldZoom * 1e-6)) {
       return;
     }
     const anchorX: number = Number.isFinite(screenX) ? screenX : this.viewportStore.canvasViewportWidth / 2;
@@ -7838,7 +7842,7 @@ struct Index {
     this.viewportStore.viewOffsetY = nextOffsetY;
     viewService.setViewZoomPercent(nextZoom);
     viewService.setViewOffset(nextOffsetX, nextOffsetY);
-    this.panelStore.statusText = `缩放: ${nextZoom.toFixed(nextZoom < 20 ? 1 : 0)}%`;
+    this.panelStore.statusText = `缩放: ${formatZoomPercent(nextZoom)}`;
   }
 
   private panCanvas(deltaScreenX: number, deltaScreenY: number): void {
@@ -7890,7 +7894,7 @@ struct Index {
       return Math.max(MIN_ZOOM_PERCENT, Math.min(MAX_ZOOM_PERCENT, this.viewportStore.zoomPercent));
     }
     const clamped: number = Math.max(MIN_ZOOM_PERCENT, Math.min(MAX_ZOOM_PERCENT, value));
-    const precision: number = clamped < 0.01 ? 1000000 : 10000;
+    const precision: number = clamped < 0.01 ? 100000000 : 10000;
     return Math.round(clamped * precision) / precision;
   }
 
@@ -8362,57 +8366,90 @@ struct Index {
   }
 
   /**
-   * 打开类操作前未保存确认（两轮对话框，因 Alert 仅两按钮）：
-   * 1) 取消 | 选择如何处理
-   * 2) 丢弃并继续 | 保存并继续
-   * resolve true = 可继续；false = 取消或保存失败/用户取消选择器。
+   * 关闭/打开前未保存确认：
+   * - 与顶部「保存」按钮口径一致，默认均可直接保存整库 GDS（.gds）；
+   * - 若同时存在未保存的 Python 脚本草稿，显式提供「保存整库 GDS (.gds)」与「保存鸿图工程 (.hongtu)」双选项，
+   *   避免在关闭标签页时静默切换格式造成困惑。
    */
   private confirmUnsavedBeforeOpen(actionLabel: string): Promise<boolean> {
     const documentId: string = this.docStore.activeWorkspaceId, revision: number = this.docStore.editorRevision;
     const pythonContext: string = JSON.stringify(this.localPythonDraft ?? null);
     const isCurrent: () => boolean = (): boolean => documentId === this.docStore.activeWorkspaceId && revision === this.docStore.editorRevision &&
       pythonContext === JSON.stringify(this.localPythonDraft ?? null);
+    const isProjectDocument: boolean = this.currentProjectUri.length > 0 ||
+      this.docStore.currentDocumentTitle.toLowerCase().endsWith('.hongtu');
+    const hasScriptDraft: boolean = this.localPythonDraftDirty;
     return new Promise<boolean>((resolve: (ok: boolean) => void) => {
       this.canvasFocusReturnTicket++;
-      AlertDialog.show({ cornerRadius: UI.dialogRadius,
-        title: '未保存的修改',
-        message: `${this.localPythonDraftDirty ? '当前工程脚本或版图' : '当前版图'}有未保存修改。${actionLabel}前：`,
-        primaryButton: { fontColor: COLORS.ink, backgroundColor: COLORS.surfaceMuted,
-          value: '取消',
-          action: () => {
-            resolve(false);
-          }
-        },
-        secondaryButton: { fontColor: Color.White, backgroundColor: COLORS.primary,
-          value: '选择如何处理',
+      const buttons: AlertDialogButtonOptions[] = [];
+      if (isProjectDocument) {
+        buttons.push({
+          value: '保存鸿图工程 (.hongtu) 并继续',
+          fontColor: Color.White,
+          backgroundColor: COLORS.primary,
           action: () => {
             if (!isCurrent()) { resolve(false); return; }
-            this.canvasFocusReturnTicket++;
-            AlertDialog.show({ cornerRadius: UI.dialogRadius,
-              title: '如何处理未保存修改？',
-              message: this.localPythonDraftDirty ? '「保存并继续」将保存含当前脚本的鸿图工程；「丢弃并继续」将丢失当前修改。' :
-                '「保存并继续」将先弹出保存对话框；「丢弃并继续」将丢失当前修改。',
-              primaryButton: { fontColor: COLORS.danger, backgroundColor: COLORS.dangerSoft,
-                value: '丢弃并继续',
-                action: () => {
-                  if (!isCurrent()) { resolve(false); return; }
-                  resolve(true);
-                }
-              },
-              secondaryButton: { fontColor: Color.White, backgroundColor: COLORS.primary,
-                value: '保存并继续',
-                action: () => {
-                  if (!isCurrent()) { resolve(false); return; }
-                  const saving: Promise<void> = this.localPythonDraftDirty ? this.saveProject() : this.saveCurrentLayout();
-                  saving.then(() => {
-                    resolve(isCurrent() && !editService.isDirty() && !this.docStore.documentDirty && !this.localPythonDraftDirty);
-                  }).catch(() => {
-                    resolve(false);
-                  });
-                }
-              }
-            });
+            this.saveProject().then(() => {
+              resolve(isCurrent() && !editService.isDirty() && !this.docStore.documentDirty && !this.localPythonDraftDirty);
+            }).catch(() => resolve(false));
           }
+        });
+      } else {
+        buttons.push({
+          value: '保存整库 GDS (.gds) 并继续',
+          fontColor: Color.White,
+          backgroundColor: COLORS.primary,
+          action: () => {
+            if (!isCurrent()) { resolve(false); return; }
+            this.saveCurrentLayout(false, true).then((saved: boolean) => {
+              resolve(saved && isCurrent());
+            }).catch(() => resolve(false));
+          }
+        });
+        if (hasScriptDraft) {
+          buttons.push({
+            value: '保存鸿图工程 (.hongtu) 并继续',
+            fontColor: COLORS.primary,
+            backgroundColor: COLORS.primarySoft,
+            action: () => {
+              if (!isCurrent()) { resolve(false); return; }
+              this.saveProject().then(() => {
+                resolve(isCurrent() && !editService.isDirty() && !this.docStore.documentDirty && !this.localPythonDraftDirty);
+              }).catch(() => resolve(false));
+            }
+          });
+        }
+      }
+      buttons.push({
+        value: '丢弃修改并继续',
+        fontColor: COLORS.danger,
+        backgroundColor: COLORS.dangerSoft,
+        action: () => {
+          if (!isCurrent()) { resolve(false); return; }
+          resolve(true);
+        }
+      });
+      buttons.push({
+        value: '取消',
+        fontColor: COLORS.ink,
+        backgroundColor: COLORS.surfaceMuted,
+        action: () => {
+          resolve(false);
+        }
+      });
+      const detail: string = isProjectDocument
+        ? `当前鸿图工程有未保存修改。${actionLabel}前请选择处理方式：`
+        : (hasScriptDraft
+          ? `当前版图与 Python 脚本均有未保存修改。保存 GDS 将导出整库全部 Cell（不含脚本草稿）；如需一并保留脚本请选择保存鸿图工程（.hongtu）。`
+          : `当前版图有未保存修改。保存将导出整库全部 Cell 的 GDS（.gds）文件，${actionLabel}前请选择：`);
+      AlertDialog.show({
+        cornerRadius: UI.dialogRadius,
+        title: '未保存的修改',
+        message: detail,
+        buttonDirection: DialogButtonDirection.VERTICAL,
+        buttons: buttons,
+        cancel: () => {
+          resolve(false);
         }
       });
     });
@@ -11070,22 +11107,55 @@ struct Index {
           }
           summaryStr = `已新建单元 ${nm}${args['enterAfterCreate'] !== false ? ' 并进入编辑' : ''}`;
         } else if (action === 'delete') {
-          const cid: number = resolveTargetCellId();
-          if (editService.getCurrentCellStack().indexOf(cid) >= 0) {
-            const fallbackId: number = editService.getTopCellId() !== cid
+          const batchIds: number[] = [];
+          const seenBatch: Set<number> = new Set<number>();
+          const pushTargetId = (id: number): void => {
+            if (id >= 0 && id < this.placeableCells.length && !seenBatch.has(id)) {
+              seenBatch.add(id);
+              batchIds.push(id);
+            }
+          };
+          if (Array.isArray(args['cellIds'])) {
+            const rawIds: Object[] = args['cellIds'] as Object[];
+            for (let i = 0; i < rawIds.length; i++) {
+              if (typeof rawIds[i] === 'number') pushTargetId(Math.round(rawIds[i] as number));
+            }
+          }
+          if (Array.isArray(args['cellNames'])) {
+            const nameToId: Map<string, number> = new Map<string, number>();
+            for (let i = 0; i < this.placeableCells.length; i++) {
+              nameToId.set(this.placeableCells[i].name, this.placeableCells[i].id);
+            }
+            const rawNames: Object[] = args['cellNames'] as Object[];
+            for (let i = 0; i < rawNames.length; i++) {
+              const nm: string = String(rawNames[i] ?? '').trim();
+              const hitId: number | undefined = nameToId.get(nm);
+              if (hitId !== undefined) pushTargetId(hitId);
+            }
+          }
+          if (batchIds.length === 0) {
+            pushTargetId(resolveTargetCellId());
+          }
+          const stackNow: number[] = editService.getCurrentCellStack();
+          if (stackNow.some((id: number): boolean => seenBatch.has(id))) {
+            const fallbackId: number = !seenBatch.has(editService.getTopCellId())
               ? editService.getTopCellId()
-              : (this.placeableCells.find((c: CellInfo): boolean => c.id !== cid)?.id ?? -1);
+              : (this.placeableCells.find((c: CellInfo): boolean => !seenBatch.has(c.id))?.id ?? -1);
             if (fallbackId >= 0) this.enterCellDefinition(fallbackId);
           }
+          const topNow: number = editService.getTopCellId();
           const instIds: number[] = editService.getShapes()
-            .filter((s: Shape): boolean => s.type === ShapeType.INSTANCE && s.cellId === cid)
+            .filter((s: Shape): boolean => {
+              const owner: number = s.ownerCellId !== undefined ? s.ownerCellId : topNow;
+              return !seenBatch.has(owner) && s.type === ShapeType.INSTANCE && s.cellId !== undefined && seenBatch.has(s.cellId);
+            })
             .map((s: Shape): number => s.id);
           if (instIds.length > 0) {
             editService.deleteShapesWithSelectionHistory(instIds);
             this.syncShapesFromEditService();
           }
           const prevCells: number = this.placeableCells.length;
-          this.deleteCellById(cid);
+          this.deleteCellsByIds(batchIds);
           if (this.placeableCells.length >= prevCells) {
             return { success: false, summary: this.panelStore.statusText, payloadJson: JSON.stringify({ success: false, error: this.panelStore.statusText }) };
           }
@@ -11987,7 +12057,7 @@ struct Index {
       },
       executeKlayoutPython: async (
         script: string,
-        applyMode: 'replace' | 'merge' | 'preview',
+        applyMode: 'replace' | 'merge' | 'preview' | 'inspect',
         inputMode: 'new' | 'document' | 'selection' = 'new',
         parametersJson: string = '{}'
       ): Promise<DshToolExecutionOutcome> => {
@@ -11996,13 +12066,52 @@ struct Index {
         }
         const documentId: string = this.docStore.activeWorkspaceId;
         const revision: number = this.docStore.editorRevision;
-        // 仅当用户显式切换到“外部桌面伴随服务”模式时才探测远程 HTTP；默认端侧内置完整 Python 3 直接离线运行！
+        // 仅当用户显式切换到“外部桌面伴随服务”模式时才探测远程 HTTP；默认端侧内置完整 CPython 3.12 直接离线运行！
         if (pythonBridgeService.getExecutionMode() === 'remote') {
           await pythonBridgeService.checkConnection(false);
         }
         if (!this.pageAlive || ticket !== this.aiRequestGeneration || generation !== this.pageGeneration ||
           documentId !== this.docStore.activeWorkspaceId || revision !== this.docStore.editorRevision) {
           throw new Error('文档已变化或请求已取消');
+        }
+        if (applyMode === 'inspect') {
+          const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+          let input: PythonDocumentInput | undefined;
+          try {
+            if (inputMode !== 'new') {
+              input = await this.createPythonSnapshot(inputMode);
+            }
+            if (!this.pageAlive || ticket !== this.aiRequestGeneration || generation !== this.pageGeneration ||
+              documentId !== this.docStore.activeWorkspaceId || revision !== this.docStore.editorRevision) {
+              throw new Error('创建快照期间文档已变化，未执行只读分析脚本');
+            }
+            this.aiNativeOperation = pythonBridgeService.createOperation('generate');
+            this.aiStore.aiCanCancel = true;
+            const artifact: PythonLayoutArtifact = await pythonBridgeService.generate(script, context, {
+              inputMode,
+              document: input,
+              parameters: pythonWorkspaceService.parseParameters(parametersJson),
+              inspectOnly: true
+            }, this.aiNativeOperation);
+            const stdoutText: string = artifact.stdout ?? '';
+            return {
+              success: true,
+              addedShapes: 0,
+              summary: stdoutText.length > 0 ? stdoutText : artifact.summary,
+              payloadJson: JSON.stringify({
+                success: true,
+                applyMode: 'inspect',
+                summary: artifact.summary,
+                stdout: stdoutText
+              })
+            };
+          } finally {
+            this.aiNativeOperation = null;
+            this.aiStore.aiCanCancel = false;
+            if (input !== undefined) {
+              await pythonBridgeService.disposeDocumentInput(input, context);
+            }
+          }
         }
         const beforeCount: number = editService.getShapes().length;
         const pyRes: AiNativeResult = await this.runAiNativePython(
@@ -13250,8 +13359,8 @@ ${rawErr}` : rawErr;
       case 'macro.record_cancel': macroService.cancelRecording(); this.panelStore.macroRecording = false; break;
       case 'rulers.clear': this.measureStore.restoreRulers([]); this.scheduleWorkspaceDraft(); break;
       case 'file.open': this.observeAiNativeWorkflow(title,this.pickAndParseFile(),(): string => this.panelStore.statusText); return aiNativeResult(true,'已打开系统文件选择流程，完成或取消情况由文件流程返回',undefined,'awaiting_user');
-      case 'file.save': this.observeAiNativeWorkflow(title,this.saveCurrentLayout(),(): string => this.panelStore.statusText); return aiNativeResult(true,'已调用原生保存流程，需核对保存结果',undefined,'awaiting_user');
-      case 'file.save_as': this.observeAiNativeWorkflow(title,this.saveCurrentLayout(true),(): string => this.panelStore.statusText); return aiNativeResult(true,'已调用 GDS 另存流程',undefined,'awaiting_user');
+      case 'file.save': this.observeAiNativeWorkflow(title,this.saveCurrentLayout().then((): void => {}),(): string => this.panelStore.statusText); return aiNativeResult(true,'已调用原生保存流程，需核对保存结果',undefined,'awaiting_user');
+      case 'file.save_as': this.observeAiNativeWorkflow(title,this.saveCurrentLayout(true).then((): void => {}),(): string => this.panelStore.statusText); return aiNativeResult(true,'已调用 GDS 另存流程',undefined,'awaiting_user');
       case 'file.export_oasis': this.observeAiNativeWorkflow(title,this.exportOasis(),(): string => this.panelStore.statusText); return aiNativeResult(true,'已调用 OASIS 导出流程',undefined,'awaiting_user');
       case 'file.export_svg': this.observeAiNativeWorkflow(title,this.exportImage('svg'),(): string => this.panelStore.statusText); return aiNativeResult(true,'已调用 SVG 导出流程',undefined,'awaiting_user');
       case 'file.export_png': this.observeAiNativeWorkflow(title,this.exportImage('png'),(): string => this.panelStore.statusText); return aiNativeResult(true,'已调用 PNG 导出流程',undefined,'awaiting_user');
@@ -15109,7 +15218,7 @@ ${rawErr}` : rawErr;
     try {
       const validated: WorkspaceDocument = workspaceService.cloneValidatedDocument(candidate);
       this.finishNudgeTransaction();
-      previous = editService.captureSession();
+      previous = editService.captureRollbackSession();
       before = this.cellStructureState();
       this.captureAutomaticEngineeringOrigin();
       const after: EditStructureState = { cellNames: validated.cellNames, cellProperties: validated.cellProperties,
@@ -15128,7 +15237,7 @@ ${rawErr}` : rawErr;
     } catch (error) {
       let restoreError: string = '';
       if (previous !== undefined && before !== undefined) {
-        editService.restoreSession(previous);
+        editService.restoreRollbackSession(previous);
         try {
           this.restoreCellStructure(before);
           this.syncShapesFromEditService(); this.rebuildCellTree();
@@ -15195,50 +15304,121 @@ ${rawErr}` : rawErr;
     });
   }
 
-  /** Cell 定义、归属和引用索引在同一条历史内重排。 */
+  /** Cell 定义、归属和引用索引在同一条历史内重排（支持单个或批量原子删除）。 */
   private deleteCellById(cellId: number): void {
-    if (!this.assertEditMode() || cellId < 0 || cellId >= this.placeableCells.length) return;
-    if (this.placeableCells.length <= 1) { this.panelStore.statusText = '无法删除最后一个 Cell'; return; }
-    if (editService.getCurrentCellStack().indexOf(cellId) >= 0) { this.panelStore.statusText = '请先切换到其他 Cell 再删除'; return; }
-    const name: string = this.cellName(cellId);
+    this.deleteCellsByIds([cellId]);
+  }
+
+  private deleteCellsByIds(rawCellIds: number[]): boolean {
+    if (!this.assertEditMode()) return false;
+    const totalCells: number = this.placeableCells.length;
+    const targetSet: Set<number> = new Set<number>();
+    for (let i = 0; i < rawCellIds.length; i++) {
+      const id: number = Math.round(rawCellIds[i]);
+      if (id >= 0 && id < totalCells) {
+        targetSet.add(id);
+      }
+    }
+    if (targetSet.size === 0) return false;
+    if (totalCells - targetSet.size < 1) {
+      this.panelStore.statusText = '无法删除最后一个 Cell';
+      return false;
+    }
+    const currentStack: number[] = editService.getCurrentCellStack();
+    for (let i = 0; i < currentStack.length; i++) {
+      if (targetSet.has(currentStack[i])) {
+        this.panelStore.statusText = '请先切换到其他 Cell 再删除';
+        return false;
+      }
+    }
+    const names: string[] = [];
+    targetSet.forEach((id: number) => names.push(this.cellName(id)));
     const candidate: WorkspaceDocument = workspaceService.cloneValidatedDocument(this.workspaceDocument());
     const all: Shape[] = candidate.shapes;
-    if (all.some((shape: Shape): boolean => shape.type === ShapeType.INSTANCE && shape.cellId === cellId)) {
-      this.panelStore.statusText = `Cell ${name} 仍被引用，请先打平或删除其实例`; return;
-    }
-    const remaining: Shape[] = [];
+    // 检查是否有保留 Cell 仍引用待删 Cell（待删 Cell 内部之间的相互引用随其一起移除）
     for (let i = 0; i < all.length; i++) {
       const s: Shape = all[i];
       const owner: number = s.ownerCellId !== undefined ? s.ownerCellId : candidate.topCellId;
-      if (owner === cellId) {
+      if (targetSet.has(owner)) continue;
+      if (s.type === ShapeType.INSTANCE && s.cellId !== undefined && targetSet.has(s.cellId)) {
+        this.panelStore.statusText = `Cell ${this.cellName(s.cellId)} 仍被引用，请先打平或删除其实例`;
+        return false;
+      }
+    }
+    const remap: number[] = new Array<number>(totalCells);
+    let nextCellIdx: number = 0;
+    for (let id = 0; id < totalCells; id++) {
+      if (targetSet.has(id)) {
+        remap[id] = -1;
+      } else {
+        remap[id] = nextCellIdx++;
+      }
+    }
+    const remaining: Shape[] = [];
+    const remainingIdSet: Set<number> = new Set<number>();
+    for (let i = 0; i < all.length; i++) {
+      const s: Shape = all[i];
+      const owner: number = s.ownerCellId !== undefined ? s.ownerCellId : candidate.topCellId;
+      if (targetSet.has(owner)) {
         continue; // 该 Cell 拥有的图形一并删除
       }
-      if (s.ownerCellId !== undefined && s.ownerCellId > cellId) {
-        s.ownerCellId = s.ownerCellId - 1;
+      if (s.ownerCellId !== undefined) {
+        s.ownerCellId = remap[s.ownerCellId];
       }
-      if (s.type === ShapeType.INSTANCE && s.cellId !== undefined && s.cellId > cellId) {
-        s.cellId = s.cellId - 1;
+      if (s.type === ShapeType.INSTANCE && s.cellId !== undefined && s.cellId >= 0 && s.cellId < totalCells) {
+        s.cellId = remap[s.cellId];
       }
       remaining.push(s);
+      remainingIdSet.add(s.id);
     }
     candidate.shapes = remaining;
-    remapCellSemantics(candidate, candidate.cellNames.map((_name: string, id: number): number => id === cellId ? -1 : (id > cellId ? id - 1 : id)));
-    candidate.cellNames.splice(cellId, 1);
-    candidate.cellProperties.splice(cellId, 1);
-    candidate.topCellId -= candidate.topCellId > cellId ? 1 : 0;
+    remapCellSemantics(candidate, remap);
+    const nextCellNames: string[] = [];
+    const nextCellProperties: LayoutPropRecord[][] = [];
+    for (let id = 0; id < totalCells; id++) {
+      if (!targetSet.has(id)) {
+        nextCellNames.push(candidate.cellNames[id]);
+        nextCellProperties.push(candidate.cellProperties[id]);
+      }
+    }
+    candidate.cellNames = nextCellNames;
+    candidate.cellProperties = nextCellProperties;
+    const remappedTop: number = remap[candidate.topCellId];
+    candidate.topCellId = remappedTop >= 0 ? remappedTop : 0;
     candidate.topCellName = candidate.cellNames[candidate.topCellId];
-    candidate.cellStack = candidate.cellStack.map((id: number): number => id > cellId ? id - 1 : id);
-    candidate.navigationPath = (candidate.navigationPath ?? []).map((step: InstancePathStep): InstancePathStep => ({
-      parentCellId: step.parentCellId > cellId ? step.parentCellId - 1 : step.parentCellId,
-      cellId: step.cellId > cellId ? step.cellId - 1 : step.cellId, instanceId: step.instanceId,
-      row: step.row, col: step.col, transform: step.transform }));
-    candidate.selectedIds = candidate.selectedIds.filter((id: number): boolean => remaining.some((shape: Shape): boolean => shape.id === id));
-    candidate.pcells = candidate.pcells.filter((pcell: PCellVariant): boolean => pcell.cellId !== cellId)
+    candidate.cellStack = candidate.cellStack
+      .map((id: number): number => (id >= 0 && id < totalCells ? remap[id] : -1))
+      .filter((id: number): boolean => id >= 0);
+    if (candidate.cellStack.length === 0) {
+      candidate.cellStack = [candidate.topCellId];
+    }
+    candidate.navigationPath = (candidate.navigationPath ?? [])
+      .filter((step: InstancePathStep): boolean =>
+        step.parentCellId >= 0 && step.parentCellId < totalCells && remap[step.parentCellId] >= 0 &&
+        step.cellId >= 0 && step.cellId < totalCells && remap[step.cellId] >= 0)
+      .map((step: InstancePathStep): InstancePathStep => ({
+        parentCellId: remap[step.parentCellId],
+        cellId: remap[step.cellId],
+        instanceId: step.instanceId,
+        row: step.row,
+        col: step.col,
+        transform: step.transform
+      }));
+    candidate.selectedIds = candidate.selectedIds.filter((id: number): boolean => remainingIdSet.has(id));
+    candidate.pcells = candidate.pcells
+      .filter((pcell: PCellVariant): boolean => pcell.cellId >= 0 && pcell.cellId < totalCells && remap[pcell.cellId] >= 0)
       .map((pcell: PCellVariant): PCellVariant => {
         const copy: PCellVariant = cloneStructured(pcell) as PCellVariant;
-        copy.cellId = pcell.cellId > cellId ? pcell.cellId - 1 : pcell.cellId; return copy;
+        copy.cellId = remap[pcell.cellId];
+        return copy;
       });
-    if (this.commitCellStructure(candidate)) this.panelStore.statusText = `已删除 Cell ${name}（可撤销）`;
+    if (this.commitCellStructure(candidate)) {
+      this.panelStore.statusText = names.length === 1
+        ? `已删除 Cell ${names[0]}（可撤销）`
+        : `已批量删除 ${names.length} 个 Cell（可撤销）`;
+      return true;
+    }
+    return false;
   }
 
   // ==================== 打平 / 阵列 / 尺寸 / 布尔（KLayout 编辑对齐）====================
@@ -16873,10 +17053,10 @@ ${rawErr}` : rawErr;
     });
   }
 
-  /** Export the current editable layout to a real GDSII Stream file. */
-  private async saveCurrentLayout(saveAs: boolean = false): Promise<void> {
+  /** Export the current editable layout (entire library with all cells) to a real GDSII Stream file. */
+  private async saveCurrentLayout(saveAs: boolean = false, acceptWithoutScriptSave: boolean = false): Promise<boolean> {
     this.canvasFocusReturnTicket++;
-    if (this.saveInProgress) { this.panelStore.statusText = '当前保存尚未结束'; return; }
+    if (this.saveInProgress) { this.panelStore.statusText = '当前保存尚未结束'; return false; }
     this.saveInProgress = true;
     const workspaceId: string = this.docStore.activeWorkspaceId;
     const revision: number = this.docStore.editorRevision;
@@ -16887,7 +17067,7 @@ ${rawErr}` : rawErr;
       const input: ExportLayoutInput = cloneStructured(this.currentExportInput()) as ExportLayoutInput;
       input.preferNativeWriter = false;
       input.preferOriginalSourceCopy = false;
-      if (!await this.confirmExportQuantization(input, workspaceId, revision)) { this.panelStore.statusText = '已取消保存，编辑状态保留'; return; }
+      if (!await this.confirmExportQuantization(input, workspaceId, revision)) { this.panelStore.statusText = '已取消保存，编辑状态保留'; return false; }
       this.setNativeSnapshotCurrent(false);
       const result: LayoutExportResult = !saveAs && this.currentSaveUri.length > 0
         ? await layoutExportService.saveGdsToUri(context, input, this.currentSaveUri)
@@ -16897,13 +17077,16 @@ ${rawErr}` : rawErr;
       this.synchronizeCurrentDocument();
       if (result.skippedShapeCount > 0) {
         this.panelStore.statusText = `保存未完成：${result.skippedShapeCount} 个图形未写出，文档仍有未保存修改`;
-        return;
+        return false;
       }
       const recentWarning: string = await this.rememberSavedFile(context, result);
       if (workspaceId !== this.docStore.activeWorkspaceId || revision !== this.docStore.editorRevision) {
-        this.panelStore.statusText = `已保存快照 ${result.fileName}；当前文档和随后修改仍保留各自的保存状态${recentWarning}`;
-        showAppToast(this.getUIContext(), '快照已保存；当前编辑状态未改变', AppToastDuration.NORMAL);
-        return;
+        this.panelStore.statusText = `已保存整库快照 ${result.fileName}；当前文档和随后修改仍保留各自的保存状态${recentWarning}`;
+        showAppToast(this.getUIContext(), '整库快照已保存；当前编辑状态未改变', AppToastDuration.NORMAL);
+        return false;
+      }
+      if (acceptWithoutScriptSave) {
+        this.localPythonDraftDirty = false;
       }
       if (!this.localPythonDraftDirty) editService.markClean();
       this.docStore.documentDirty = this.localPythonDraftDirty;
@@ -16915,17 +17098,19 @@ ${rawErr}` : rawErr;
       this.refreshWorkspaceTabs();
       this.saveWorkspaceDraft(true);
       const warning: string = result.warnings.length > 0 ? `；${result.warnings[0]}` : '';
-      const pythonWarning: string = this.localPythonDraftDirty ? '；Python 脚本仍未保存，请保存鸿图工程' : '';
+      const pythonWarning: string = this.localPythonDraftDirty ? '；Python 脚本仍未保存，如需保留脚本请保存鸿图工程' : '';
       this.panelStore.statusText =
-        `已导出 ${result.fileName}: ${result.shapeCount} 图形 / ${result.bytes} 字节${warning}${recentWarning}${pythonWarning}`;
+        `已保存整库 GDS ${result.fileName}: ${result.shapeCount} 图形 / ${result.bytes} 字节${warning}${recentWarning}${pythonWarning}`;
       showAppSnackBar(
         this.getUIContext(),
-        this.localPythonDraftDirty ? '版图已保存；脚本请保存鸿图工程' : '保存成功',
+        this.localPythonDraftDirty ? '整库 GDS 已保存；脚本请另存鸿图工程' : '整库 GDS 保存成功',
         { icon: $r('sys.symbol.checkmark_circle'), duration: AppToastDuration.SHORT }
       );
+      return true;
     } catch (error) {
       this.synchronizeCurrentDocument();
       this.panelStore.statusText = `保存失败，编辑状态已保留: ${error}`;
+      return false;
     } finally { this.saveInProgress = false; this.refreshFileRecovery(); }
   }
 

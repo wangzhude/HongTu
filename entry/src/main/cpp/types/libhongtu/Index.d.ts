@@ -595,6 +595,7 @@ export interface NativeEmbeddedPythonRequest {
   outputSvgPath?: string;
   cpythonHomeDir?: string;
   timeoutMs?: number;
+  inspectOnly?: boolean;
 }
 
 export interface NativeEmbeddedPythonLayerDef {

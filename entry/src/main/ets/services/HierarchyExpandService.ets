@@ -165,24 +165,62 @@ interface ArrayIndexRange {
   max: number;
 }
 
+interface ArrayCellCoord {
+  col: number;
+  row: number;
+}
+
+interface RootBoundsTable {
+  local: Shape[];
+  coords: Float64Array;
+  valid: Uint8Array;
+}
+
 function polygonContains(points: Point[], x: number, y: number, tolerance: number): boolean {
-  if (points.length < 3) return false;
+  const n: number = points.length;
+  if (n < 3) return false;
+  const tolSq: number = tolerance * tolerance;
+  const p0: Point = points[0];
+  const d0x: number = x - p0.x;
+  const d0y: number = y - p0.y;
+  if (d0x * d0x + d0y * d0y <= tolSq) return true;
   let inside: boolean = false;
-  for (let i: number = 0, j: number = points.length - 1; i < points.length; j = i++) {
+  for (let i: number = 0, j: number = n - 1; i < n; j = i++) {
     const a: Point = points[j];
     const b: Point = points[i];
     const dx: number = b.x - a.x;
     const dy: number = b.y - a.y;
-    const length: number = Math.hypot(dx, dy);
-    if (length > 0 && Number.isFinite(length)) {
-      const ux: number = dx / length;
-      const uy: number = dy / length;
-      const along: number = Math.max(0, Math.min(length, (x - a.x) * ux + (y - a.y) * uy));
-      if (Math.hypot(x - a.x - along * ux, y - a.y - along * uy) <= tolerance) return true;
-    } else if (Math.hypot(x - a.x, y - a.y) <= tolerance) return true;
+    const lenSq: number = dx * dx + dy * dy;
+    if (lenSq > 0 && Number.isFinite(lenSq)) {
+      const t: number = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / lenSq));
+      const ex: number = x - a.x - t * dx;
+      const ey: number = y - a.y - t * dy;
+      if (ex * ex + ey * ey <= tolSq) return true;
+    } else {
+      const ex: number = x - a.x;
+      const ey: number = y - a.y;
+      if (ex * ex + ey * ey <= tolSq) return true;
+    }
     if ((a.y > y) !== (b.y > y) && x < a.x + (y - a.y) / (b.y - a.y) * dx) inside = !inside;
   }
   return inside;
+}
+
+function transformedPolygonBounds(points: Point[], m: Mat2D): ShapeBounds {
+  let minX: number = Infinity;
+  let minY: number = Infinity;
+  let maxX: number = -Infinity;
+  let maxY: number = -Infinity;
+  for (let i: number = 0; i < points.length; i++) {
+    const p: Point = points[i];
+    const tx: number = m.a * p.x + m.b * p.y + m.tx;
+    const ty: number = m.c * p.x + m.d * p.y + m.ty;
+    if (tx < minX) minX = tx;
+    if (ty < minY) minY = ty;
+    if (tx > maxX) maxX = tx;
+    if (ty > maxY) maxY = ty;
+  }
+  return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
 }
 
 function mergeBounds(a: ShapeBounds | undefined, b: ShapeBounds): ShapeBounds {
@@ -418,6 +456,9 @@ export function summarizeCellDisplayShapes(allShapes: Shape[], rootCellId: numbe
 export class HierarchyBoundsResolver {
   private index: HierarchyIndex;
   private cache: Map<string, HierarchyBoundsResult> = new Map<string, HierarchyBoundsResult>();
+  private leafBoundsCache: Map<Shape, ShapeBounds> = new Map<Shape, ShapeBounds>();
+  private rootBoundsCache: Map<string, RootBoundsTable> = new Map<string, RootBoundsTable>();
+  private layerVisibleCache: Map<number, boolean> = new Map<number, boolean>();
   private visitedShapes: number = 0;
   private visitedPoints: number = 0;
   private visible: (layer: number, datatype: number) => boolean;
@@ -442,6 +483,8 @@ export class HierarchyBoundsResolver {
   }
 
   boundsForShape(shape: Shape, hierarchyDepth: number): HierarchyBoundsResult {
+    this.visitedShapes = 0;
+    this.visitedPoints = 0;
     const depth: number = Math.max(1, Math.min(32, Math.round(hierarchyDepth)));
     return this.shapeBounds(shape, identityMat(), depth - 1, []);
   }
@@ -461,6 +504,7 @@ export class HierarchyBoundsResolver {
   /** Bounded painted-contour candidates. A truncated list is explicit; a budget failure returns no partial selection. */
   hitCandidatesCell(cellId: number, hierarchyDepth: number, x: number, y: number, tolerance: number,
     selectable: (shape: Shape) => boolean, options: HierarchyHitOptions = {}): HierarchyCandidatesResult {
+    this.visitedShapes = 0; this.visitedPoints = 0;
     this.hitNodes = 0; this.hitPoints = 0; this.candidateOverflow = false;
     this.hitNodeLimit = options.maxNodes ?? 100000; this.hitPointLimit = options.maxPoints ?? 400000;
     this.candidateLimit = options.maxCandidates ?? 64;
@@ -471,9 +515,41 @@ export class HierarchyBoundsResolver {
         !Number.isInteger(this.hitNodeLimit) || this.hitNodeLimit < 1 ||
         !Number.isInteger(this.hitPointLimit) || this.hitPointLimit < 1) throw new Error('候选查询参数无效');
       const depth: number = Math.max(1, Math.min(32, Math.round(hierarchyDepth))) - 1;
-      const local: Shape[] = this.index.local(cellId);
+      const table: RootBoundsTable = this.ensureRootBoundsTable(cellId, depth);
+      const local: Shape[] = table.local;
+      const coords: Float64Array = table.coords;
+      const valid: Uint8Array = table.valid;
+      const rootPad: number = tolerance + 16;
       for (let i: number = local.length - 1; i >= 0 && !this.candidateOverflow; i--) {
-        const root: Shape = local[i]; if (!selectable(root)) continue;
+        const base: number = i * 4;
+        let skipByRootBounds: boolean = false;
+        const vFlag: number = valid[i];
+        if (vFlag === 1) {
+          if (x < coords[base] - rootPad || x > coords[base + 2] + rootPad ||
+            y < coords[base + 1] - rootPad || y > coords[base + 3] + rootPad) {
+            skipByRootBounds = true;
+          }
+        } else if (vFlag === 2) {
+          // 空/全隐藏图形（无几何边界），仅检查可能的实例锚点
+          skipByRootBounds = true;
+        }
+        const root: Shape = local[i];
+        if (skipByRootBounds) {
+          if (options.includeInstanceMarkers === false || root.type !== ShapeType.INSTANCE || depth <= 0 ||
+            root.points.length === 0 || Math.abs(x - root.points[0].x) > 10 + tolerance ||
+            Math.abs(y - root.points[0].y) > 10 + tolerance) {
+            continue;
+          }
+          if (!selectable(root)) continue;
+          const matrix: Mat2D = instanceTransformMat(root);
+          const markerTransform: InstancePathTransform = { a: matrix.a, b: matrix.b, c: matrix.c,
+            d: matrix.d, tx: matrix.tx, ty: matrix.ty };
+          const markerStep: InstancePathStep = { parentCellId: cellId, cellId: root.cellId ?? -1,
+            instanceId: root.id, row: 0, col: 0, transform: markerTransform };
+          this.appendHitCandidate(root, root, [markerStep], true, options, candidates);
+          continue;
+        }
+        if (!selectable(root)) continue;
         const before: number = candidates.length;
         this.collectHitCandidates(root, root, identityMat(), identityMat(), depth, [cellId], x, y, tolerance, [], options, candidates);
         if (before === candidates.length && !this.candidateOverflow && options.includeInstanceMarkers !== false &&
@@ -488,8 +564,14 @@ export class HierarchyBoundsResolver {
         }
       }
       return { ok: true, candidates: candidates, complete: !this.candidateOverflow,
-        message: this.candidateOverflow ? `命中超过 ${this.candidateLimit} 项，请按图层或类型过滤` : '' };
-    } catch (error) { return { ok: false, candidates: [], complete: false, message: String(error) }; }
+        message: this.candidateOverflow ? `命中超过 ${this.candidateLimit} 项，请放大或按图层/类型过滤` : '' };
+    } catch (error) {
+      if (candidates.length > 0) {
+        return { ok: true, candidates: candidates, complete: false,
+          message: `命中候选已截断（${candidates.length} 项），请放大或按图层/类型过滤` };
+      }
+      return { ok: false, candidates: [], complete: false, message: String(error) };
+    }
   }
 
   private appendHitCandidate(root: Shape, leaf: Shape, path: InstancePathStep[], marker: boolean,
@@ -527,9 +609,26 @@ export class HierarchyBoundsResolver {
     if (!bounds.ok) throw new Error(bounds.message);
     if (bounds.bounds === undefined) return;
     const qx: number = x - m.tx; const qy: number = y - m.ty; const pad: number = tolerance + 16;
+    const cols: number = Math.max(1, shape.arrayCols ?? 1); const rows: number = Math.max(1, shape.arrayRows ?? 1);
+    const children: Shape[] = this.index.local(cell);
+    if (cols === 1 && rows === 1) {
+      if (!this.pointNearBounds(bounds.bounds, qx, qy, pad)) return;
+      const member: Mat2D = instanceTransformMat(shape);
+      const world: Mat2D = multiplyMat(full, member);
+      const nextTransform: InstancePathTransform = { a: world.a, b: world.b, c: world.c,
+        d: world.d, tx: world.tx, ty: world.ty };
+      const nextStep: InstancePathStep = { parentCellId: ancestors[ancestors.length - 1],
+        cellId: cell, instanceId: shape.id, row: 0, col: 0, transform: nextTransform };
+      const nextPath: InstancePathStep[] = path.concat([nextStep]);
+      const nextAncestors: number[] = ancestors.concat([cell]);
+      for (let i: number = children.length - 1; i >= 0 && !this.candidateOverflow; i--) {
+        this.collectHitCandidates(children[i], root, childLinear, world, depth - 1, nextAncestors,
+          qx, qy, tolerance, nextPath, options, result);
+      }
+      return;
+    }
     const col: Point = applyMat(linear, shape.arrayColStepX ?? 0, shape.arrayColStepY ?? 0);
     const row: Point = applyMat(linear, shape.arrayRowStepX ?? 0, shape.arrayRowStepY ?? 0);
-    const cols: number = Math.max(1, shape.arrayCols ?? 1); const rows: number = Math.max(1, shape.arrayRows ?? 1);
     const shifts: ShapeBounds = { minX: qx - bounds.bounds.maxX - pad, maxX: qx - bounds.bounds.minX + pad,
       minY: qy - bounds.bounds.maxY - pad, maxY: qy - bounds.bounds.minY + pad };
     let cr: ArrayIndexRange = { min: 0, max: cols - 1 }; let rr: ArrayIndexRange = { min: 0, max: rows - 1 };
@@ -540,24 +639,74 @@ export class HierarchyBoundsResolver {
         c: -col.y / det, d: col.x / det, tx: 0, ty: 0 });
       cr = this.clippedRange(range.minX, range.maxX, cols); rr = this.clippedRange(range.minY, range.maxY, rows);
     } else { cr = this.projectedArrayRange(shifts, col, row, rows, cols); rr = this.projectedArrayRange(shifts, row, col, cols, rows); }
-    const children: Shape[] = this.index.local(cell);
-    for (let r: number = rr.max; r >= rr.min && !this.candidateOverflow; r--) {
-      for (let c: number = cr.max; c >= cr.min && !this.candidateOverflow; c--) {
-        if (++this.hitNodes > this.hitNodeLimit) throw new Error('阵列候选查询超过预算，请按层或类型过滤');
-        const px: number = qx - c * col.x - r * row.x; const py: number = qy - c * col.y - r * row.y;
-        if (!this.pointNearBounds(bounds.bounds, px, py, pad)) continue;
-        const member: Mat2D = instanceTransformMat(shape);
-        member.tx += c * (shape.arrayColStepX ?? 0) + r * (shape.arrayRowStepX ?? 0);
-        member.ty += c * (shape.arrayColStepY ?? 0) + r * (shape.arrayRowStepY ?? 0);
-        const world: Mat2D = multiplyMat(full, member);
-        const nextTransform: InstancePathTransform = { a: world.a, b: world.b, c: world.c,
-          d: world.d, tx: world.tx, ty: world.ty };
-        const nextStep: InstancePathStep = { parentCellId: ancestors[ancestors.length - 1],
-          cellId: cell, instanceId: shape.id, row: r, col: c, transform: nextTransform };
-        const nextPath: InstancePathStep[] = path.concat([nextStep]);
-        for (let i: number = children.length - 1; i >= 0 && !this.candidateOverflow; i--) {
-          this.collectHitCandidates(children[i], root, childLinear, world, depth - 1, ancestors.concat([cell]),
-            px, py, tolerance, nextPath, options, result);
+    if (rr.min > rr.max || cr.min > cr.max) return;
+    const nextAncestors: number[] = ancestors.concat([cell]);
+    const totalRangeCells: number = (cr.max - cr.min + 1) * (rr.max - rr.min + 1);
+    const denseArrayCap: number = totalRangeCells > 128 ? 128 : totalRangeCells;
+    const center: ArrayCellCoord = this.resolveNearestArrayCenter(qx, qy, bounds.bounds, col, row, cols, rows, cr, rr, det, scale);
+    const maxDist: number = Math.max(center.col - cr.min, cr.max - center.col, center.row - rr.min, rr.max - center.row);
+    let probed: number = 0;
+    const probeMember = (c: number, r: number): boolean => {
+      if (this.candidateOverflow) return false;
+      if (++probed > denseArrayCap) {
+        this.candidateOverflow = true;
+        return false;
+      }
+      if (++this.hitNodes > this.hitNodeLimit) {
+        if (result.length > 0) {
+          this.candidateOverflow = true;
+          return false;
+        }
+        throw new Error('阵列候选查询超过预算，请按层或类型过滤');
+      }
+      const px: number = qx - c * col.x - r * row.x; const py: number = qy - c * col.y - r * row.y;
+      if (!this.pointNearBounds(bounds.bounds!, px, py, pad)) return true;
+      const member: Mat2D = instanceTransformMat(shape);
+      member.tx += c * (shape.arrayColStepX ?? 0) + r * (shape.arrayRowStepX ?? 0);
+      member.ty += c * (shape.arrayColStepY ?? 0) + r * (shape.arrayRowStepY ?? 0);
+      const world: Mat2D = multiplyMat(full, member);
+      const nextTransform: InstancePathTransform = { a: world.a, b: world.b, c: world.c,
+        d: world.d, tx: world.tx, ty: world.ty };
+      const nextStep: InstancePathStep = { parentCellId: ancestors[ancestors.length - 1],
+        cellId: cell, instanceId: shape.id, row: r, col: c, transform: nextTransform };
+      const nextPath: InstancePathStep[] = path.concat([nextStep]);
+      for (let i: number = children.length - 1; i >= 0 && !this.candidateOverflow; i--) {
+        this.collectHitCandidates(children[i], root, childLinear, world, depth - 1, nextAncestors,
+          px, py, tolerance, nextPath, options, result);
+      }
+      return !this.candidateOverflow;
+    };
+    for (let dist: number = 0; dist <= maxDist && !this.candidateOverflow; dist++) {
+      if (dist === 0) {
+        if (!probeMember(center.col, center.row)) break;
+        continue;
+      }
+      const cStart: number = Math.max(cr.min, center.col - dist);
+      const cEnd: number = Math.min(cr.max, center.col + dist);
+      const rTop: number = center.row + dist;
+      if (rTop <= rr.max) {
+        for (let c: number = cStart; c <= cEnd && !this.candidateOverflow; c++) {
+          if (!probeMember(c, rTop)) return;
+        }
+      }
+      const rBot: number = center.row - dist;
+      if (rBot >= rr.min) {
+        for (let c: number = cStart; c <= cEnd && !this.candidateOverflow; c++) {
+          if (!probeMember(c, rBot)) return;
+        }
+      }
+      const rStart: number = Math.max(rr.min, center.row - dist + 1);
+      const rEnd: number = Math.min(rr.max, center.row + dist - 1);
+      const cRight: number = center.col + dist;
+      if (cRight <= cr.max) {
+        for (let r: number = rStart; r <= rEnd && !this.candidateOverflow; r++) {
+          if (!probeMember(cRight, r)) return;
+        }
+      }
+      const cLeft: number = center.col - dist;
+      if (cLeft >= cr.min) {
+        for (let r: number = rStart; r <= rEnd && !this.candidateOverflow; r++) {
+          if (!probeMember(cLeft, r)) return;
         }
       }
     }
@@ -568,6 +717,8 @@ export class HierarchyBoundsResolver {
   hitTestCell(cellId: number, hierarchyDepth: number, x: number, y: number, tolerance: number,
     selectable: (shape: Shape) => boolean, includeInstanceMarkers: boolean = true,
     maxNodes: number = 100000, maxPoints: number = 400000): HierarchyHitResult {
+    this.visitedShapes = 0;
+    this.visitedPoints = 0;
     this.hitNodes = 0;
     this.hitPoints = 0;
     this.hitNodeLimit = maxNodes;
@@ -576,10 +727,33 @@ export class HierarchyBoundsResolver {
       !Number.isFinite(hierarchyDepth) || !Number.isFinite(maxNodes) || !Number.isFinite(maxPoints) ||
       maxNodes < 1 || maxPoints < 1) return this.hitFailure('命中测试参数无效');
     const depth: number = Math.max(1, Math.min(32, Math.round(hierarchyDepth))) - 1;
-    const local: Shape[] = this.index.local(cellId);
+    const table: RootBoundsTable = this.ensureRootBoundsTable(cellId, depth);
+    const local: Shape[] = table.local;
+    const coords: Float64Array = table.coords;
+    const valid: Uint8Array = table.valid;
+    const rootPad: number = tolerance + 16;
     for (let i: number = local.length - 1; i >= 0; i--) {
       if (++this.hitNodes > this.hitNodeLimit) return this.hitFailure('实例命中超过查询预算，请放大或降低显示层级');
+      const base: number = i * 4;
+      const vFlag: number = valid[i];
+      let skipByRootBounds: boolean = false;
+      if (vFlag === 1) {
+        if (x < coords[base] - rootPad || x > coords[base + 2] + rootPad ||
+          y < coords[base + 1] - rootPad || y > coords[base + 3] + rootPad) {
+          skipByRootBounds = true;
+        }
+      } else if (vFlag === 2) {
+        skipByRootBounds = true;
+      }
       const shape: Shape = local[i];
+      if (skipByRootBounds) {
+        if (includeInstanceMarkers && depth > 0 && shape.type === ShapeType.INSTANCE && shape.points.length > 0 &&
+          Math.abs(x - shape.points[0].x) <= 10 + tolerance && Math.abs(y - shape.points[0].y) <= 10 + tolerance &&
+          selectable(shape)) {
+          return { ok: true, shapeId: shape.id, layerNumber: shape.layerNumber, datatype: shape.datatype, message: '' };
+        }
+        continue;
+      }
       if (!selectable(shape)) continue;
       const result: HierarchyHitResult = this.hitShape(shape, identityMat(), depth, [cellId], x, y, tolerance);
       if (!result.ok) return result;
@@ -611,7 +785,7 @@ export class HierarchyBoundsResolver {
 
   private hitShape(shape: Shape, linear: Mat2D, depth: number, ancestors: number[],
     x: number, y: number, tolerance: number): HierarchyHitResult {
-    if (shape.type === ShapeType.NODE || (shape.type !== ShapeType.INSTANCE && !this.visible(shape.layerNumber, shape.datatype))) return this.noHit();
+    if (shape.type === ShapeType.NODE || (shape.type !== ShapeType.INSTANCE && !this.isVisibleLayer(shape.layerNumber, shape.datatype))) return this.noHit();
     if (shape.type === ShapeType.INSTANCE) return this.hitInstance(shape, linear, depth, ancestors, x, y, tolerance);
     if (shape.points.length === 0 || (shape.type === ShapeType.RECT && shape.points.length < 2)) return this.noHit();
     const isIdentity: boolean = linear.a === 1 && linear.b === 0 && linear.c === 0 && linear.d === 1 &&
@@ -635,7 +809,7 @@ export class HierarchyBoundsResolver {
       if (pathBounds === undefined) return this.noHit();
       bounds = pathBounds;
     } else {
-      const rawBounds: ShapeBounds = getShapeBounds(shape);
+      const rawBounds: ShapeBounds = this.cachedRawShapeBounds(shape);
       bounds = isIdentity ? rawBounds : transformedBounds(rawBounds, linear);
     }
     if (!this.checked(bounds, 1).ok) return this.hitFailure('实例轮廓坐标越界，未更改选择');
@@ -651,14 +825,43 @@ export class HierarchyBoundsResolver {
     } else if (shape.type === ShapeType.RECT && isIdentity) {
       hit = true; // pointNearBounds 已精确覆盖轴对齐矩形本体与容差带
     } else {
-      let points: Point[] = shape.points;
-      if (shape.type === ShapeType.RECT) {
-        const b: ShapeBounds = getShapeBounds(shape);
-        points = [{ x: b.minX, y: b.minY }, { x: b.maxX, y: b.minY },
-          { x: b.maxX, y: b.maxY }, { x: b.minX, y: b.maxY }];
+      // O(1) 容差直判：若任意首点（变换后）已落在指针容差圆内，无需全量点集拷贝与逐边扫描
+      const p0: Point = shape.points[0];
+      const p0x: number = isIdentity ? p0.x : (linear.a * p0.x + linear.b * p0.y + linear.tx);
+      const p0y: number = isIdentity ? p0.y : (linear.c * p0.x + linear.d * p0.y + linear.ty);
+      const d0x: number = x - p0x;
+      const d0y: number = y - p0y;
+      if (d0x * d0x + d0y * d0y <= tolerance * tolerance) {
+        hit = true;
+      } else {
+        let points: Point[] = shape.points;
+        if (shape.type === ShapeType.RECT) {
+          const b: ShapeBounds = this.cachedRawShapeBounds(shape);
+          points = [{ x: b.minX, y: b.minY }, { x: b.maxX, y: b.minY },
+            { x: b.maxX, y: b.maxY }, { x: b.minX, y: b.maxY }];
+        }
+        if (isIdentity) {
+          hit = polygonContains(points, x, y, tolerance);
+        } else {
+          // 相似变换（旋转/镜像/等比缩放）：逆变换单个查询点，零点集拷贝分配
+          const det: number = linear.a * linear.d - linear.b * linear.c;
+          const col0Sq: number = linear.a * linear.a + linear.c * linear.c;
+          const col1Sq: number = linear.b * linear.b + linear.d * linear.d;
+          const dot01: number = linear.a * linear.b + linear.c * linear.d;
+          const scaleRef: number = Math.max(1, col0Sq);
+          if (Number.isFinite(det) && Math.abs(det) > 1e-18 &&
+            Math.abs(col0Sq - col1Sq) <= 1e-6 * scaleRef && Math.abs(dot01) <= 1e-6 * scaleRef) {
+            const dx: number = x - linear.tx;
+            const dy: number = y - linear.ty;
+            const invX: number = (linear.d * dx - linear.b * dy) / det;
+            const invY: number = (-linear.c * dx + linear.a * dy) / det;
+            const invTol: number = tolerance / Math.sqrt(Math.abs(det));
+            hit = polygonContains(points, invX, invY, invTol);
+          } else {
+            hit = polygonContains(clonePointsTransformed(points, linear), x, y, tolerance);
+          }
+        }
       }
-      const testPoints: Point[] = isIdentity ? points : clonePointsTransformed(points, linear);
-      hit = polygonContains(testPoints, x, y, tolerance);
     }
     return hit ? { ok: true, shapeId: shape.id, layerNumber: shape.layerNumber, datatype: shape.datatype, message: '' } : this.noHit();
   }
@@ -690,13 +893,19 @@ export class HierarchyBoundsResolver {
     if (child.bounds === undefined) return this.noHit();
     const qx: number = x - m.tx;
     const qy: number = y - m.ty;
+    const pad: number = tolerance + 16;
+    const rawCols: number = Math.max(1, shape.arrayCols ?? 1);
+    const rawRows: number = Math.max(1, shape.arrayRows ?? 1);
+    if (rawCols === 1 && rawRows === 1) {
+      if (!this.pointNearBounds(child.bounds, qx, qy, pad)) return this.noHit();
+      return this.hitCell(cellId, childLinear, depth - 1, ancestors, qx, qy, tolerance);
+    }
     const col: Point = applyMat(linear, shape.arrayColStepX ?? 0, shape.arrayColStepY ?? 0);
     const row: Point = applyMat(linear, shape.arrayRowStepX ?? 0, shape.arrayRowStepY ?? 0);
-    const cols: number = col.x === 0 && col.y === 0 ? 1 : Math.max(1, shape.arrayCols ?? 1);
-    const rows: number = row.x === 0 && row.y === 0 ? 1 : Math.max(1, shape.arrayRows ?? 1);
+    const cols: number = col.x === 0 && col.y === 0 ? 1 : rawCols;
+    const rows: number = row.x === 0 && row.y === 0 ? 1 : rawRows;
     // The possible lattice translations form q - childBounds. Expand only for
     // pointer tolerance / legacy text anchors, never turn this box into a hit.
-    const pad: number = tolerance + 16;
     const shifts: ShapeBounds = { minX: qx - child.bounds.maxX - pad, maxX: qx - child.bounds.minX + pad,
       minY: qy - child.bounds.maxY - pad, maxY: qy - child.bounds.minY + pad };
     let colRange: ArrayIndexRange = { min: 0, max: cols - 1 };
@@ -713,17 +922,84 @@ export class HierarchyBoundsResolver {
       colRange = this.projectedArrayRange(shifts, col, row, rows, cols);
       rowRange = this.projectedArrayRange(shifts, row, col, cols, rows);
     }
-    for (let r: number = rowRange.max; r >= rowRange.min; r--) {
-      for (let c: number = colRange.max; c >= colRange.min; c--) {
-        if (++this.hitNodes > this.hitNodeLimit) return this.hitFailure('阵列命中超过候选预算，请放大或降低显示层级');
-        const px: number = qx - c * col.x - r * row.x;
-        const py: number = qy - c * col.y - r * row.y;
-        if (!this.pointNearBounds(child.bounds, px, py, pad)) continue;
-        const result: HierarchyHitResult = this.hitCell(cellId, childLinear, depth - 1, ancestors, px, py, tolerance);
-        if (!result.ok || result.shapeId >= 0) return result;
+    if (rowRange.min > rowRange.max || colRange.min > colRange.max) return this.noHit();
+    const totalCells: number = (colRange.max - colRange.min + 1) * (rowRange.max - rowRange.min + 1);
+    const maxProbes: number = totalCells > 256 ? 256 : totalCells;
+    const center: ArrayCellCoord = this.resolveNearestArrayCenter(qx, qy, child.bounds, col, row, cols, rows, colRange, rowRange, determinant, scale);
+    const maxDist: number = Math.max(center.col - colRange.min, colRange.max - center.col, center.row - rowRange.min, rowRange.max - center.row);
+    let probed: number = 0;
+    const testSlot = (c: number, r: number): HierarchyHitResult | null => {
+      if (++probed > maxProbes) return this.noHit();
+      if (++this.hitNodes > this.hitNodeLimit) return this.hitFailure('阵列命中超过候选预算，请放大或降低显示层级');
+      const px: number = qx - c * col.x - r * row.x;
+      const py: number = qy - c * col.y - r * row.y;
+      if (!this.pointNearBounds(child.bounds!, px, py, pad)) return null;
+      const result: HierarchyHitResult = this.hitCell(cellId, childLinear, depth - 1, ancestors, px, py, tolerance);
+      if (!result.ok || result.shapeId >= 0) return result;
+      return null;
+    };
+    for (let dist: number = 0; dist <= maxDist; dist++) {
+      if (dist === 0) {
+        const hit0: HierarchyHitResult | null = testSlot(center.col, center.row);
+        if (hit0 !== null) return hit0;
+        continue;
+      }
+      const cStart: number = Math.max(colRange.min, center.col - dist);
+      const cEnd: number = Math.min(colRange.max, center.col + dist);
+      const rTop: number = center.row + dist;
+      if (rTop <= rowRange.max) {
+        for (let c: number = cStart; c <= cEnd; c++) {
+          const hitR: HierarchyHitResult | null = testSlot(c, rTop);
+          if (hitR !== null) return hitR;
+        }
+      }
+      const rBot: number = center.row - dist;
+      if (rBot >= rowRange.min) {
+        for (let c: number = cStart; c <= cEnd; c++) {
+          const hitR: HierarchyHitResult | null = testSlot(c, rBot);
+          if (hitR !== null) return hitR;
+        }
+      }
+      const rStart: number = Math.max(rowRange.min, center.row - dist + 1);
+      const rEnd: number = Math.min(rowRange.max, center.row + dist - 1);
+      const cRight: number = center.col + dist;
+      if (cRight <= colRange.max) {
+        for (let r: number = rStart; r <= rEnd; r++) {
+          const hitC: HierarchyHitResult | null = testSlot(cRight, r);
+          if (hitC !== null) return hitC;
+        }
+      }
+      const cLeft: number = center.col - dist;
+      if (cLeft >= colRange.min) {
+        for (let r: number = rStart; r <= rEnd; r++) {
+          const hitC: HierarchyHitResult | null = testSlot(cLeft, r);
+          if (hitC !== null) return hitC;
+        }
       }
     }
     return this.noHit();
+  }
+
+  private resolveNearestArrayCenter(qx: number, qy: number, childBounds: ShapeBounds,
+    col: Point, row: Point, cols: number, rows: number, cr: ArrayIndexRange, rr: ArrayIndexRange,
+    det: number, scale: number): ArrayCellCoord {
+    const dx0: number = qx - 0.5 * (childBounds.minX + childBounds.maxX);
+    const dy0: number = qy - 0.5 * (childBounds.minY + childBounds.maxY);
+    let cCenter: number = cr.min;
+    let rCenter: number = rr.min;
+    if (cols > 1 && rows > 1 && Number.isFinite(det) && Math.abs(det) > scale * 1e-12) {
+      cCenter = Math.round((row.y * dx0 - row.x * dy0) / det);
+      rCenter = Math.round((-col.y * dx0 + col.x * dy0) / det);
+    } else {
+      const colLenSq: number = col.x * col.x + col.y * col.y;
+      const rowLenSq: number = row.x * row.x + row.y * row.y;
+      cCenter = colLenSq > 0 ? Math.round((dx0 * col.x + dy0 * col.y) / colLenSq) : cr.min;
+      rCenter = rowLenSq > 0 ? Math.round((dx0 * row.x + dy0 * row.y) / rowLenSq) : rr.min;
+    }
+    return {
+      col: Math.max(cr.min, Math.min(cr.max, cCenter)),
+      row: Math.max(rr.min, Math.min(rr.max, rCenter)),
+    };
   }
 
   private clippedRange(min: number, max: number, count: number): ArrayIndexRange {
@@ -759,9 +1035,64 @@ export class HierarchyBoundsResolver {
     } catch (error) { return this.failure(`文字轮廓无法计算：${error}`); }
   }
 
+  private isVisibleLayer(layer: number, datatype: number): boolean {
+    const key: number = (layer * 65536) + (datatype & 0xffff);
+    const cached: boolean | undefined = this.layerVisibleCache.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const v: boolean = this.visible(layer, datatype);
+    this.layerVisibleCache.set(key, v);
+    return v;
+  }
+
+  private cachedRawShapeBounds(shape: Shape): ShapeBounds {
+    const cached: ShapeBounds | undefined = this.leafBoundsCache.get(shape);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const b: ShapeBounds = getShapeBounds(shape);
+    this.leafBoundsCache.set(shape, b);
+    return b;
+  }
+
+  private ensureRootBoundsTable(cellId: number, depth: number): RootBoundsTable {
+    const key: string = `${cellId}:${depth}`;
+    const existing: RootBoundsTable | undefined = this.rootBoundsCache.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const local: Shape[] = this.index.local(cellId);
+    const n: number = local.length;
+    const coords: Float64Array = new Float64Array(n * 4);
+    const valid: Uint8Array = new Uint8Array(n);
+    const idMat: Mat2D = identityMat();
+    const ancestors: number[] = [cellId];
+    for (let i: number = 0; i < n; i++) {
+      this.visitedShapes = 0;
+      this.visitedPoints = 0;
+      const res: HierarchyBoundsResult = this.shapeBounds(local[i], idMat, depth, ancestors);
+      if (!res.ok) {
+        valid[i] = 0; // 异常（如循环引用）保留由精确路径报错
+      } else if (res.bounds === undefined) {
+        valid[i] = 2;
+      } else {
+        const base: number = i * 4;
+        coords[base] = res.bounds.minX;
+        coords[base + 1] = res.bounds.minY;
+        coords[base + 2] = res.bounds.maxX;
+        coords[base + 3] = res.bounds.maxY;
+        valid[i] = 1;
+      }
+    }
+    const table: RootBoundsTable = { local: local, coords: coords, valid: valid };
+    this.rootBoundsCache.set(key, table);
+    return table;
+  }
+
   private cellBounds(cellId: number, linear: Mat2D, depth: number, ancestors: number[]): HierarchyBoundsResult {
     if (ancestors.indexOf(cellId) >= 0) return this.failure('实例包含循环引用，未更改选择或图形');
-    const key: string = `${cellId}:${depth}:${linear.a}:${linear.b}:${linear.c}:${linear.d}:${ancestors.join(',')}`;
+    const key: string = `${cellId}:${depth}:${linear.a}:${linear.b}:${linear.c}:${linear.d}`;
     const cached: HierarchyBoundsResult | undefined = this.cache.get(key);
     if (cached !== undefined) return cached;
     let bounds: ShapeBounds | undefined = undefined;
@@ -772,8 +1103,7 @@ export class HierarchyBoundsResolver {
       if (this.visitedShapes > this.maxShapes) return this.failure('实例范围计算超过图形预算，请降低显示层级后重试');
       const result: HierarchyBoundsResult = this.shapeBounds(shape, linear, depth, path);
       if (!result.ok) return result;
-      count += result.shapeCount;
-      if (count > this.maxShapes) return this.failure('实例展开超过图形预算，请降低显示层级后重试');
+      count = Math.min(Number.MAX_SAFE_INTEGER, count + result.shapeCount);
       if (result.bounds !== undefined) bounds = mergeBounds(bounds, result.bounds);
     }
     const result: HierarchyBoundsResult = { ok: true, bounds: bounds, shapeCount: count, message: '' };
@@ -782,7 +1112,7 @@ export class HierarchyBoundsResolver {
   }
 
   private shapeBounds(shape: Shape, linear: Mat2D, depth: number, ancestors: number[]): HierarchyBoundsResult {
-    if (shape.type === ShapeType.NODE || (shape.type !== ShapeType.INSTANCE && !this.visible(shape.layerNumber, shape.datatype))) {
+    if (shape.type === ShapeType.NODE || (shape.type !== ShapeType.INSTANCE && !this.isVisibleLayer(shape.layerNumber, shape.datatype))) {
       return { ok: true, shapeCount: 0, message: '' };
     }
     if (shape.type === ShapeType.INSTANCE) {
@@ -791,15 +1121,14 @@ export class HierarchyBoundsResolver {
       // Native SREF snapshots use zero for both absent COLROW values.
       const cols: number = shape.arrayCols === 0 ? 1 : (shape.arrayCols ?? 1);
       const rows: number = shape.arrayRows === 0 ? 1 : (shape.arrayRows ?? 1);
-      if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0 || cols * rows > this.maxShapes) {
-        return this.failure('实例阵列超过范围计算预算，请降低阵列数量');
+      if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0 || !Number.isFinite(cols * rows)) {
+        return this.failure('实例阵列参数无效，无法计算可见范围');
       }
       const m: Mat2D = multiplyMat(linear, instanceTransformMat(shape));
       const childLinear: Mat2D = { a: m.a, b: m.b, c: m.c, d: m.d, tx: 0, ty: 0 };
       const child: HierarchyBoundsResult = this.cellBounds(shape.cellId, childLinear, depth - 1, ancestors);
       if (!child.ok) return child;
-      const count: number = child.shapeCount * cols * rows;
-      if (count > this.maxShapes) return this.failure('实例展开超过图形预算，请降低显示层级后重试');
+      const count: number = Math.min(Number.MAX_SAFE_INTEGER, child.shapeCount * cols * rows);
       if (child.bounds === undefined) return { ok: true, shapeCount: count, message: '' };
       const col: Point = applyMat(linear, (cols - 1) * (shape.arrayColStepX ?? 0), (cols - 1) * (shape.arrayColStepY ?? 0));
       const row: Point = applyMat(linear, (rows - 1) * (shape.arrayRowStepX ?? 0), (rows - 1) * (shape.arrayRowStepY ?? 0));
@@ -812,24 +1141,31 @@ export class HierarchyBoundsResolver {
       return this.checked(bounds, count);
     }
     if (shape.points.length === 0) return { ok: true, shapeCount: 0, message: '' };
-    this.visitedPoints += shape.points.length;
-    if (this.visitedPoints > this.maxPoints) return this.failure('实例范围计算超过顶点预算，请降低显示层级后重试');
-    if (shape.type === ShapeType.TEXT) return this.textBounds(shape, linear);
+    if (shape.type === ShapeType.TEXT) {
+      this.visitedPoints += shape.points.length;
+      if (this.visitedPoints > this.maxPoints) return this.failure('实例范围计算超过顶点预算，请降低显示层级后重试');
+      return this.textBounds(shape, linear);
+    }
     if (shape.type === ShapeType.PATH) {
+      this.visitedPoints += shape.points.length;
+      if (this.visitedPoints > this.maxPoints) return this.failure('实例范围计算超过顶点预算，请降低显示层级后重试');
       const bounds: ShapeBounds | undefined = getPathGeometryBounds(shape,
         { a: linear.a, b: linear.b, c: linear.c, d: linear.d, tx: linear.tx, ty: linear.ty });
       return bounds === undefined ? { ok: true, shapeCount: 0, message: '' } : this.checked(bounds, 1);
     }
-    let points: Point[] = shape.points;
-    if (shape.type === ShapeType.RECT) {
-      const b: ShapeBounds = getShapeBounds(shape);
-      points = [{ x: b.minX, y: b.minY }, { x: b.maxX, y: b.minY },
-        { x: b.maxX, y: b.maxY }, { x: b.minX, y: b.maxY }];
+    // 恒等 / 90° 倍数旋转 / 镜像等正交线性变换：直接复用解析器内 O(1) 边界缓存，零对象分配
+    const isOrthogonal: boolean = (linear.b === 0 && linear.c === 0) || (linear.a === 0 && linear.d === 0);
+    if (isOrthogonal || shape.type === ShapeType.RECT) {
+      this.visitedPoints += 4;
+      if (this.visitedPoints > this.maxPoints) return this.failure('实例范围计算超过顶点预算，请降低显示层级后重试');
+      const raw: ShapeBounds = this.cachedRawShapeBounds(shape);
+      const isIdentity: boolean = linear.a === 1 && linear.b === 0 && linear.c === 0 && linear.d === 1 &&
+        linear.tx === 0 && linear.ty === 0;
+      return this.checked(isIdentity ? raw : transformedBounds(raw, linear), 1);
     }
-    const leaf: Shape = { id: shape.id, type: shape.type === ShapeType.RECT ? ShapeType.POLYGON : shape.type,
-      layerNumber: shape.layerNumber, datatype: shape.datatype, selected: false,
-      points: clonePointsTransformed(points, linear) };
-    return this.checked(getShapeBounds(leaf), 1);
+    this.visitedPoints += shape.points.length;
+    if (this.visitedPoints > this.maxPoints) return this.failure('实例范围计算超过顶点预算，请降低显示层级后重试');
+    return this.checked(transformedPolygonBounds(shape.points, linear), 1);
   }
 
   private checked(bounds: ShapeBounds, count: number): HierarchyBoundsResult {

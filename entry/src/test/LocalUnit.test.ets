@@ -4,9 +4,9 @@ import { MeasureStore } from '../main/ets/common/UiStores';
 import { snapService } from '../main/ets/services/SnapService';
 import { Shape, ShapeType, Point, getShapeBounds, packShapesCoordinates, nativeShapesToShapes, hasKeyholeBridgeEdges, extractKeyholeCleanLoops } from '../main/ets/models/GdsiiData';
 import { cleanDbuNm } from '../main/ets/services/PrecisionService';
-import { GdsByteWriter } from '../main/ets/services/LayoutExportService';
+import { GdsByteWriter, layoutExportService } from '../main/ets/services/LayoutExportService';
 import { formatZoomPercent, worldToScreenPx, screenToWorldPx } from '../main/ets/common/constants';
-import { worldViewportFromCamera } from '../main/ets/services/HierarchyExpandService';
+import { worldViewportFromCamera, HierarchyBoundsResolver } from '../main/ets/services/HierarchyExpandService';
 import { LayerGroup, UiLayer } from '../main/ets/common/types';
 import { AiService, parseAiModelCatalog, inferAiModelContextWindow, AiProvider } from '../main/ets/services/AiService';
 import type { AiProcessStep } from '../main/ets/services/AiService';
@@ -1221,6 +1221,165 @@ export default function localUnitTest(): void {
       expect(pyDep !== undefined).assertTrue();
       expect(pyDep!.status).assertEqual('embedded');
       expect(pyDep!.version).assertEqual('PocketPy 2.2.0');
+
+      // 4) Dense photonic-crystal AREF O(1) bounds & bird's-eye hit-test (no freeze / no false budget failure)
+      const leafHole: Shape = {
+        id: 1,
+        type: ShapeType.POLYGON,
+        layerNumber: 2,
+        datatype: 0,
+        points: [{ x: 0, y: 0 }, { x: 400, y: 0 }, { x: 400, y: 400 }, { x: 0, y: 400 }],
+        selected: false,
+        ownerCellId: 1
+      };
+      const subArray: Shape = {
+        id: 2,
+        type: ShapeType.INSTANCE,
+        layerNumber: 0,
+        datatype: 0,
+        points: [{ x: 0, y: 0 }],
+        selected: false,
+        cellId: 1,
+        ownerCellId: 2,
+        arrayCols: 500,
+        arrayRows: 500,
+        arrayColStepX: 1000,
+        arrayColStepY: 0,
+        arrayRowStepX: 0,
+        arrayRowStepY: 1000
+      };
+      const topPlacement: Shape = {
+        id: 10,
+        type: ShapeType.INSTANCE,
+        layerNumber: 0,
+        datatype: 0,
+        points: [{ x: 0, y: 0 }],
+        selected: false,
+        cellId: 2,
+        ownerCellId: 0,
+        arrayCols: 10,
+        arrayRows: 10,
+        arrayColStepX: 600000,
+        arrayColStepY: 0,
+        arrayRowStepX: 0,
+        arrayRowStepY: 600000
+      };
+      const resolver: HierarchyBoundsResolver = new HierarchyBoundsResolver(
+        [leafHole, subArray, topPlacement],
+        0,
+        (): boolean => true
+      );
+      const bigBounds = resolver.boundsForShape(topPlacement, 32);
+      expect(bigBounds.ok).assertTrue();
+      expect(bigBounds.bounds !== undefined).assertTrue();
+      expect(bigBounds.bounds!.maxX).assertEqual(9 * 600000 + 499 * 1000 + 400);
+      const denseCandidates = resolver.hitCandidatesCell(
+        0, 32, 2500000, 2500000, 1000000, (): boolean => true,
+        { maxCandidates: 64, maxNodes: 200000, maxPoints: 1000000 }
+      );
+      expect(denseCandidates.ok).assertTrue();
+      expect(denseCandidates.candidates.length > 0).assertTrue();
+      expect(denseCandidates.candidates[0].rootShapeId).assertEqual(10);
+      const denseHit = resolver.hitTestCell(0, 32, 2500000, 2500000, 1000000, (): boolean => true, true, 200000, 1000000);
+      expect(denseHit.ok).assertTrue();
+      expect(denseHit.shapeId).assertEqual(10);
+
+      // 5) LayoutExportService defaultFileName prefers document title / cleaned source path over topCellName
+      const fnFromTitle: string = layoutExportService.defaultFileName({
+        shapes: [],
+        layers: [],
+        sourcePath: '',
+        libName: 'BJUT_INP_VIEW',
+        topCellId: 0,
+        topCellName: 'zhengban_1',
+        documentTitle: 'bjut-InP_1219-2_view.gds'
+      });
+      expect(fnFromTitle).assertEqual('bjut-InP_1219-2_view-edited.gds');
+      const fnNoDoubleEdited: string = layoutExportService.defaultFileName({
+        shapes: [],
+        layers: [],
+        sourcePath: '',
+        libName: 'BJUT_INP_VIEW',
+        topCellId: 0,
+        topCellName: 'zhengban_1',
+        documentTitle: 'bjut-InP_1219-2_view-edited.gds'
+      });
+      expect(fnNoDoubleEdited).assertEqual('bjut-InP_1219-2_view-edited.gds');
+      const fnFromImportPath: string = layoutExportService.defaultFileName({
+        shapes: [],
+        layers: [],
+        libName: 'BJUT_INP_VIEW',
+        topCellId: 0,
+        topCellName: 'zhengban_1',
+        documentTitle: '未命名版图',
+        sourcePath: '/data/storage/el2/base/cache/hongtu-import-1795501583118-wafer_main.gds'
+      });
+      expect(fnFromImportPath).assertEqual('wafer_main-edited.gds');
+
+      // 6) EditService compact cell_refs history: 60 sequential cell-deletion index remaps across 1500 shapes without OOM + exact undo/redo
+      const svc: EditService = new EditService();
+      const baseShapes: Shape[] = [];
+      for (let i = 0; i < 1500; i++) {
+        const pts: Point[] = [{ x: i * 10, y: 0 }, { x: i * 10 + 5, y: 5 }];
+        markImmutablePointArray(pts);
+        baseShapes.push({
+          id: i + 1,
+          type: i % 10 === 0 ? ShapeType.INSTANCE : ShapeType.RECT,
+          layerNumber: 1,
+          datatype: 0,
+          points: pts,
+          selected: false,
+          ownerCellId: 65 + (i % 5),
+          cellId: i % 10 === 0 ? 66 : undefined
+        });
+      }
+      const initialNames: string[] = [];
+      const initialProps: LayoutPropRecord[][] = [];
+      for (let c = 0; c < 70; c++) {
+        initialNames.push(`CELL_${c}`);
+        initialProps.push([]);
+      }
+      svc.setShapes(baseShapes);
+      svc.setTopCellId(65);
+      let curNames: string[] = initialNames.slice();
+      let curProps: LayoutPropRecord[][] = initialProps.slice();
+      let curTop: number = 65;
+      for (let step = 0; step < 60; step++) {
+        const prevState: EditStructureState = {
+          cellNames: curNames.slice(),
+          cellProperties: curProps.slice(),
+          topCellId: curTop,
+          cellStack: [curTop]
+        };
+        const nextShapes: Shape[] = svc.getShapes().map((s: Shape): Shape => ({
+          id: s.id,
+          type: s.type,
+          layerNumber: s.layerNumber,
+          datatype: s.datatype,
+          points: s.points,
+          selected: s.selected,
+          ownerCellId: s.ownerCellId !== undefined && s.ownerCellId > 0 ? s.ownerCellId - 1 : s.ownerCellId,
+          cellId: s.cellId !== undefined && s.cellId > 0 ? s.cellId - 1 : s.cellId
+        }));
+        curNames = curNames.slice(1);
+        curProps = curProps.slice(1);
+        curTop = curTop - 1;
+        const nextState: EditStructureState = {
+          cellNames: curNames.slice(),
+          cellProperties: curProps.slice(),
+          topCellId: curTop,
+          cellStack: [curTop]
+        };
+        expect(svc.applyDocumentStructure(nextShapes, prevState, nextState)).assertTrue();
+      }
+      expect(svc.getShapes()[0].ownerCellId).assertEqual(5);
+      expect(svc.getShapes()[0].cellId).assertEqual(6);
+      expect(svc.undo()).assertTrue();
+      expect(svc.getShapes()[0].ownerCellId).assertEqual(6);
+      expect(svc.getShapes()[0].cellId).assertEqual(7);
+      expect(svc.redo()).assertTrue();
+      expect(svc.getShapes()[0].ownerCellId).assertEqual(5);
+      expect(svc.getShapes()[0].cellId).assertEqual(6);
     });
   });
 }

@@ -53,6 +53,7 @@ struct EmbeddedPythonRequest {
     std::string outputSvgPath;
     std::string cpythonHomeDir;
     int64_t timeoutMs = 15000;
+    bool inspectOnly = false;
 };
 
 struct EmbeddedPythonResult {

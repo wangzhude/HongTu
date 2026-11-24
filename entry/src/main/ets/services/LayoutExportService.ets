@@ -59,6 +59,8 @@ export interface ExportLayoutInput extends LayoutSemanticState {
   libName: string;
   topCellName: string;
   sourcePath: string;
+  /** 当前文档显示名称（如 bjut-InP_1219-2_view.gds），用于生成整库默认保存文件名，避免误用顶层 Cell 名导致歧义 */
+  documentTitle?: string;
   /**
    * Cell 名表：index = cellId（与 ownerCellId / INSTANCE.cellId 对齐）。
    * 提供时按 ownerCell 结构化写出；缺失时回退到「全部进 Top + childCells」兼容路径。
@@ -1605,12 +1607,29 @@ class LayoutExportService {
     return undefined;
   }
 
-  private defaultFileName(input: ExportLayoutInput): string {
-    const sourceStem: string = this.fileStem(input.sourcePath);
-    const preferred: string = input.topCellName.length > 0 ? input.topCellName :
-      (input.libName.length > 0 ? input.libName : sourceStem);
+  defaultFileName(input: ExportLayoutInput): string {
+    const titleStem: string = this.cleanDocumentStem(input.documentTitle ?? '');
+    const sourceStem: string = this.cleanDocumentStem(input.sourcePath);
+    const preferred: string = titleStem.length > 0 ? titleStem :
+      (sourceStem.length > 0 ? sourceStem :
+        (input.libName.length > 0 ? input.libName : input.topCellName));
     const stem: string = this.sanitizeFileStem(preferred.length > 0 ? preferred : 'hongtu-layout');
+    if (stem.toLowerCase().endsWith('-edited')) {
+      return `${stem}.gds`;
+    }
     return `${stem}-edited.gds`;
+  }
+
+  private cleanDocumentStem(pathOrTitle: string): string {
+    let stem: string = this.fileStem(pathOrTitle).trim();
+    if (stem.length === 0) return '';
+    // 剥离沙箱导入临时前缀（hongtu-import-<timestamp>-<filename>）
+    stem = stem.replace(/^hongtu-import-\d+-/i, '').trim();
+    const lower: string = stem.toLowerCase();
+    if (stem === '未命名版图' || lower === 'untitled' || lower === 'untitled_lib') {
+      return '';
+    }
+    return stem;
   }
 
   /** Picker 返回的目标 URI 通常带最终文件名；若只给 opaque ID，则保留建议名。 */

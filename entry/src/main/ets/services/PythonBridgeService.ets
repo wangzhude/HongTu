@@ -152,7 +152,7 @@ export interface PythonPortMetadata {
   crossSections: LayoutCrossSection[]; layoutContextRecords: LayoutContextRecord[];
   cellContextRecords: LayoutContextRecord[][]; diagnostics: string[];
 }
-export interface PythonRunOptions { inputMode: PythonInputMode; document?: PythonDocumentInput; parameters?: PythonParameter[]; validationProfile?: 'generic_inverter'; }
+export interface PythonRunOptions { inputMode: PythonInputMode; document?: PythonDocumentInput; parameters?: PythonParameter[]; validationProfile?: 'generic_inverter'; inspectOnly?: boolean; }
 export interface PythonVerificationOptions {
   kind: 'drc' | 'lvs'; technologyId: string; deckId: string; document: PythonDocumentInput;
   referenceSpice?: string; cellName?: string;
@@ -1044,6 +1044,54 @@ export class PythonBridgeService {
     return cloneStructured(value) as PythonPortMetadata;
   }
 
+  private cpythonStdlibReadyDir: string = '';
+
+  private ensureCPythonStdlib(context: common.UIAbilityContext): string {
+    const homeDir: string = `${context.filesDir}/cpython312`;
+    const zipPath: string = `${homeDir}/python312.zip`;
+    if (this.cpythonStdlibReadyDir === homeDir) {
+      try {
+        if (fs.accessSync(zipPath)) return homeDir;
+      } catch (_) {}
+    }
+    try {
+      try {
+        if (!fs.accessSync(homeDir)) fs.mkdirSync(homeDir, true);
+      } catch (_) {
+        try { fs.mkdirSync(homeDir, true); } catch (_2) {}
+      }
+      const rawBytes: Uint8Array = context.resourceManager.getRawFileContentSync('python312.zip');
+      let needWrite: boolean = true;
+      try {
+        if (fs.accessSync(zipPath)) {
+          const st: fs.Stat = fs.statSync(zipPath);
+          if (st.size === rawBytes.byteLength) {
+            needWrite = false;
+          }
+        }
+      } catch (_) {}
+      if (needWrite && rawBytes.byteLength > 0) {
+        const tmpPath: string = `${zipPath}.tmp`;
+        const fd: fs.File = fs.openSync(tmpPath, fs.OpenMode.CREATE | fs.OpenMode.TRUNC | fs.OpenMode.WRITE_ONLY);
+        try {
+          fs.writeSync(fd.fd, rawBytes.buffer as ArrayBuffer, { offset: rawBytes.byteOffset, length: rawBytes.byteLength });
+        } finally {
+          fs.closeSync(fd);
+        }
+        try {
+          fs.renameSync(tmpPath, zipPath);
+        } catch (_) {
+          fs.copyFileSync(tmpPath, zipPath);
+          try { fs.unlinkSync(tmpPath); } catch (_2) {}
+        }
+      }
+      this.cpythonStdlibReadyDir = homeDir;
+    } catch (_) {
+      // Fallback gracefully if rawfile unavailable in unit tests
+    }
+    return homeDir;
+  }
+
   private async generateEmbeddedArtifact(script: string, context: common.UIAbilityContext, ticket: number,
     options: PythonRunOptions, owned?: PythonOwnedOperation): Promise<PythonLayoutArtifact> {
     this.assertCurrent(ticket);
@@ -1068,9 +1116,11 @@ export class PythonBridgeService {
       }
       currentCellName = options.document.currentCellName ?? '';
     }
+    const inspectOnly: boolean = options.inspectOnly === true;
+    const cpythonHomeDir: string = this.ensureCPythonStdlib(context);
     const prefix: string = `${context.filesDir}/python-${Date.now()}-${++this.serial}`;
-    const stagingGds: string = `${prefix}-embedded.gds`;
-    const previewPathCandidate: string = `${prefix}.svg`;
+    const stagingGds: string = inspectOnly ? '' : `${prefix}-embedded.gds`;
+    const previewPathCandidate: string = inspectOnly ? '' : `${prefix}.svg`;
     if (owned !== undefined) owned.dispatched = true;
     const nativeRes: NativeEmbeddedPythonResult = await nativeHongTuService.runEmbeddedPythonAsync({
       script,
@@ -1081,14 +1131,39 @@ export class PythonBridgeService {
       parametersJson: JSON.stringify(parameters),
       outputGdsPath: stagingGds,
       outputSvgPath: previewPathCandidate,
-      cpythonHomeDir: `${context.filesDir}/cpython312`,
-      timeoutMs: 20000
+      cpythonHomeDir,
+      timeoutMs: 30000,
+      inspectOnly
     });
     this.assertCurrent(ticket);
     if (!nativeRes.success) {
-      try { if (fs.accessSync(stagingGds)) fs.unlinkSync(stagingGds); } catch (_) {}
-      try { if (fs.accessSync(previewPathCandidate)) fs.unlinkSync(previewPathCandidate); } catch (_) {}
-      throw new Error(nativeRes.errorMessage || '端侧内置 Python 执行失败');
+      if (stagingGds.length > 0) { try { if (fs.accessSync(stagingGds)) fs.unlinkSync(stagingGds); } catch (_) {} }
+      if (previewPathCandidate.length > 0) { try { if (fs.accessSync(previewPathCandidate)) fs.unlinkSync(previewPathCandidate); } catch (_) {} }
+      const preStdout: string = (nativeRes.stdoutText ?? '').trim();
+      const baseErr: string = nativeRes.errorMessage || '端侧内置 Python 执行失败';
+      const detailErr: string = preStdout.length > 0
+        ? `${baseErr}\n\n[异常前标准输出]\n${preStdout.substring(0, 4000)}`
+        : baseErr;
+      throw new Error(detailErr);
+    }
+    if (inspectOnly) {
+      if (owned !== undefined) {
+        owned.result = { jobId: owned.handle.jobId, state: 'succeeded', terminal: true, workerStopped: true };
+      }
+      const outText: string = (nativeRes.stdoutText ?? '').substring(0, 32000);
+      const engineLabel: string = nativeRes.engineTier === 'cpython-native' ? 'CPython 3.12' : '端侧 Python';
+      return {
+        path: '',
+        name: 'inspect-only',
+        previewPath: '',
+        layerDefinitions: [],
+        portMetadata: undefined,
+        sourceRevision: options.document?.revision,
+        sourceDocumentId: options.document?.documentId,
+        inputMode: options.inputMode,
+        stdout: outText,
+        summary: `[${engineLabel} 只读分析完成] 输出 ${outText.length} 字符`
+      };
     }
     const cleanFileName: string = (nativeRes.fileName || 'python-layout.gds').replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 100) || 'python-layout.gds';
     const diskSuffix: string = cleanFileName.toLowerCase().endsWith('.gds') ? cleanFileName : `${cleanFileName}.gds`;
@@ -1145,6 +1220,7 @@ export class PythonBridgeService {
     if (owned !== undefined) {
       owned.result = { jobId: owned.handle.jobId, state: 'succeeded', terminal: true, workerStopped: true };
     }
+    const engineTag: string = nativeRes.engineTier === 'cpython-native' ? 'CPython 3.12' : '端侧内置 Python';
     return {
       path: finalPath,
       name: cleanFileName,
@@ -1155,7 +1231,7 @@ export class PythonBridgeService {
       sourceDocumentId: options.document?.documentId,
       inputMode: options.inputMode,
       stdout: (nativeRes.stdoutText ?? '').substring(0, 16000),
-      summary: `[端侧内置 Python] ${nativeRes.cellCount} 个 Cell · ${nativeRes.shapeCount} 个定义图元 · 展开 ${nativeRes.expandedShapeCount} 个 · ${nativeRes.layerCount} 个图层` +
+      summary: `[${engineTag}] ${nativeRes.cellCount} 个 Cell · ${nativeRes.shapeCount} 个定义图元 · 展开 ${nativeRes.expandedShapeCount} 个 · ${nativeRes.layerCount} 个图层` +
         (portMeta !== undefined ? ` · ${portMeta.ports.length} 个端口` : '')
     };
   }

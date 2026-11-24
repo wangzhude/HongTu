@@ -39,7 +39,7 @@ export enum RenderMode {
 
 @Component
 export struct GlCanvas {
-  @Prop @Watch('onDataChange') shapes: Shape[] = [];
+  @Prop @Watch('onShapesPropChange') shapes: Shape[] = [];
   @Prop @Watch('onLayersPropChange') layers: UiLayer[] = [];
   private lastLayerStyleSignature: string = '';
   @Prop @Watch('onCameraChange') zoomScale: number = 100;
@@ -195,6 +195,14 @@ export struct GlCanvas {
     this.onDataChange();
   }
 
+  onShapesPropChange(): void {
+    // 多源场景模式由 renderSceneProvider + sceneRevision 驱动，忽略 shapes 空数组属性刷新避免整图重传 GPU
+    if (this.renderSceneProvider !== null) {
+      return;
+    }
+    this.onDataChange();
+  }
+
   /** @Watch 回调：图形/图层/Cell/深度/场景版本变化时标记几何失效并同帧合并上传（非饥饿调度） */
   onDataChange(): void {
     this.geometryCacheValid = false;
@@ -279,7 +287,7 @@ export struct GlCanvas {
       return false;
     }
     // 亚像素精度守卫：确保已上传 VBO 的局部原点在当前缩放率下最大 FP32 量化误差 <= 0.015 vp
-    const z: number = Math.max(0.0001, this.zoomScale / 100);
+    const z: number = Math.max(1e-8, this.zoomScale / 100);
     const maxDistNm: number = Math.max(
       Math.abs(visVp.minX - this.cachedOriginX),
       Math.abs(visVp.maxX - this.cachedOriginX),
