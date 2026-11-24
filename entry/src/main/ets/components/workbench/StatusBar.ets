@@ -5,11 +5,12 @@ import { UI } from '../../common/UiTokens';
 import { PanelHeading } from './PanelHeading';
 import { CursorStore } from '../../common/UiStores';
 import { PrecisionSettings, GEOMETRY_SNAP_KINDS, validatePrecision, quantizationText, cleanMetricNumber } from '../../services/PrecisionService';
+import { MENU_ITEM_STYLE, menuCheckIcon, menuIcon, menuStyle, workbenchLuminousMenuOptions } from '../../common/WorkbenchMenuStyle';
 import { DrawnStatusIcon } from '../DrawnStatusIcon';
 import { hongTuThemeState } from '../../store/ThemeStore';
 
 /**
- * 鸿图主界面状态栏（纯矢量圆点指示器 + 轻通透光感背板 + 数据区与画布区按模块分流）
+ * 鸿图主界面底部结构化状态栏（对齐参考布局：DRC 状态 | 已选对象 | 单位 | 栅格 µm <---> 准星 X/Y µm | 缩放 ▾）
  *
  * This file is part of HongTu, licensed under GPLv3.
  */
@@ -17,6 +18,9 @@ import { hongTuThemeState } from '../../store/ThemeStore';
 export struct WorkbenchStatusBar {
   @Prop statusText: string = '就绪';
   @Prop shapeCount: number = 0;
+  @Prop selectedShapeCount: number = 0;
+  @Prop drcIssueCount: number = 0;
+  @Prop drcHasRun: boolean = false;
   @Prop visibleLayerCount: number = 0;
   @Prop zoomPercent: number = 100;
   @Prop gridSize: number = 10;
@@ -27,6 +31,9 @@ export struct WorkbenchStatusBar {
   @Prop geometrySnapKinds: string[] = ['顶点', '交点', '中点', '包围盒中心', '边'];
   precisionChangeAction: (settings: PrecisionSettings) => boolean | void = () => {};
   precisionContextProvider: () => string = () => '';
+  runDrcAction: () => void = () => {};
+  setZoomPercentAction: (percent: number) => void = (_p: number) => {};
+  fitAllAction: () => void = () => {};
   @State showPrecision: boolean = false;
   @State dbuDraft: string = '1';
   @State drawDraft: string = '10';
@@ -49,6 +56,50 @@ export struct WorkbenchStatusBar {
       return '数据管理就绪';
     }
     return trimmed;
+  }
+
+  private zoomMenuSizing(): MenuItemOptions[] {
+    return [
+      { content: '25%', symbolStartIcon: menuIcon('zoomOut') },
+      { content: '50%', symbolStartIcon: menuIcon('zoomOut') },
+      { content: '100%', symbolStartIcon: menuIcon('view') },
+      { content: '200%', symbolStartIcon: menuIcon('zoomIn') },
+      { content: '400%', symbolStartIcon: menuIcon('zoomIn') },
+      { content: '适配全部版图', labelInfo: 'F', symbolStartIcon: menuIcon('view') }
+    ];
+  }
+
+  @Builder
+  private buildStatusZoomMenu() {
+    Menu() {
+      MenuItemGroup({ header: '缩放比例' }) {
+        ForEach([25, 50, 100, 200, 400], (pct: number) => {
+          MenuItem({
+            content: `${pct}%`,
+            symbolStartIcon: menuIcon(pct < 100 ? 'zoomOut' : (pct > 100 ? 'zoomIn' : 'view')),
+            symbolEndIcon: menuCheckIcon(Math.abs(this.zoomPercent - pct) < 0.5)
+          })
+            .attributeModifier(MENU_ITEM_STYLE)
+            .selected(Math.abs(this.zoomPercent - pct) < 0.5)
+            .onClick(() => this.setZoomPercentAction(pct))
+        }, (pct: number): string => `sbz_${pct}_${Math.round(this.zoomPercent)}`)
+      }
+      MenuItemGroup() {
+        MenuItem({ content: '适配全部版图', labelInfo: 'F', symbolStartIcon: menuIcon('view') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => this.fitAllAction())
+      }
+    }
+    .attributeModifier(menuStyle(this.zoomMenuSizing(), this.getUIContext()))
+  }
+
+  @Builder
+  private statusSeparator() {
+    Row()
+      .width(1)
+      .height(12)
+      .backgroundColor(COLORS.border)
+      .margin({ left: 10, right: 10 })
   }
 
   @Builder
@@ -75,9 +126,9 @@ export struct WorkbenchStatusBar {
           .margin({ left: 16 })
       }
     }
-    .height(UI.controlHeight)
+    .height(32)
     .width('100%')
-    .padding({ left: 16, right: 16 })
+    .padding({ left: 14, right: 14 })
     .alignItems(VerticalAlign.Center)
     .backgroundColor(hongTuThemeState.isLuminousBackgroundEnabled()
       ? hongTuThemeState.luminous.translucentCardColor
@@ -136,40 +187,8 @@ export struct WorkbenchStatusBar {
           .margin({ right: 12 })
       }
 
-      if (!this.isCompact) {
-        Row() {
-          StatusMetric({ label: '图形', value: this.shapeCount.toString() })
-          StatusMetric({ label: '图层', value: this.visibleLayerCount.toString() })
-          StatusMetric({ label: '缩放', value: formatZoomPercent(this.zoomPercent) })
-          StatusMetric({ label: 'X(µm)', value: umText(this.cursorStore.x) })
-          StatusMetric({ label: 'Y(µm)', value: umText(this.cursorStore.y), last: this.cursorStore.layerNumber < 0 })
-          if (this.cursorStore.layerNumber >= 0) {
-            StatusMetric({ label: '光标层', value: `L${this.cursorStore.layerNumber}/D${this.cursorStore.datatype}`, last: true })
-          }
-        }
-        .alignItems(VerticalAlign.Center)
-      }
-
       Row() {
         this.precisionButton()
-
-        Row() {
-          Row()
-            .width(6)
-            .height(6)
-            .borderRadius(3)
-            .backgroundColor(this.nativeText.indexOf('ERROR') >= 0 ? COLORS.danger : COLORS.success)
-          Text(this.nativeText.replace('Native: ', 'Native '))
-            .fontSize(10)
-            .fontColor(COLORS.muted)
-            .fontFamily(FONT_MONO)
-            .margin({ left: 5 })
-        }
-        .alignItems(VerticalAlign.Center)
-        .margin({ left: 10 })
-        .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-        .backgroundColor(COLORS.surfaceMuted)
-        .borderRadius(UI.segmentItemRadius)
       }
       .alignItems(VerticalAlign.Center)
     }
@@ -186,51 +205,150 @@ export struct WorkbenchStatusBar {
   @Builder
   private desktopBar() {
     Row() {
-      Text(this.statusText)
-        .fontSize(11)
-        .fontColor(COLORS.ink)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-      if (this.documentDirty) {
-        Row({ space: 4 }) {
-          DrawnStatusIcon({ kind: 'dirty', iconSize: 10, strokeColor: COLORS.warning, showSoftPlate: false })
-          Text('未保存').fontSize(10).fontColor(COLORS.warning)
+      // 1. DRC 状态指示器（对齐参考图左下角绿勾「DRC: 通过 (0 个违例)」）
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 5 }) {
+          if (this.drcIssueCount > 0) {
+            WorkbenchIcon({ name: 'warning', iconSize: 14, color: COLORS.danger })
+            Text(`DRC: 未通过 (${this.drcIssueCount} 个违例)`)
+              .fontSize(11.5)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.danger)
+          } else {
+            Stack({ alignContent: Alignment.Center }) {
+              Circle({ width: 14, height: 14 }).fill(COLORS.success)
+              WorkbenchIcon({ name: 'check', iconSize: 9.5, color: '#FFFFFF' })
+            }
+            .width(14)
+            .height(14)
+            Text('DRC: ')
+              .fontSize(11.5)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(COLORS.ink)
+            Text('通过')
+              .fontSize(11.5)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(COLORS.success)
+            Text(` (${this.drcIssueCount} 个违例)`)
+              .fontSize(11.5)
+              .fontColor(COLORS.muted)
+          }
+        }.alignItems(VerticalAlign.Center)
+      }
+      .height(24)
+      .padding({ left: 6, right: 6 })
+      .backgroundColor(Color.Transparent)
+      .borderRadius(5)
+      .focusable(false)
+      .hoverEffect(HoverEffect.Highlight)
+      .bindTips('点击运行 DRC 设计规则检查')
+      .onClick(() => this.runDrcAction())
+
+      this.statusSeparator()
+
+      // 2. 已选择对象计数 + 未保存标记
+      Row({ space: 6 }) {
+        Text(`已选择: ${this.selectedShapeCount} 个对象`)
+          .fontSize(11.5)
+          .fontColor(COLORS.ink)
+          .bindTips(this.statusText)
+        if (this.documentDirty) {
+          Row({ space: 3 }) {
+            DrawnStatusIcon({ kind: 'dirty', iconSize: 8, strokeColor: COLORS.warning, showSoftPlate: false })
+            Text('未保存').fontSize(10.5).fontColor(COLORS.warning)
+          }.alignItems(VerticalAlign.Center)
         }
-        .alignItems(VerticalAlign.Center)
-        .margin({ left: 10 })
-      }
-      if (this.cursorStore.readout.length > 0) {
-        Text(this.readoutLine())
-          .fontSize(10)
-          .fontColor(COLORS.success)
+      }.alignItems(VerticalAlign.Center)
+
+      this.statusSeparator()
+
+      // 3. 单位指示
+      Text('单位: µm')
+        .fontSize(11.5)
+        .fontColor(COLORS.ink)
+
+      this.statusSeparator()
+
+      // 4. 栅格尺寸（点击弹出精度与几何吸附面板）
+      Button({ type: ButtonType.Normal }) {
+        Text(`栅格: ${umText(this.effectiveDisplayGrid())} µm`)
+          .fontSize(11.5)
           .fontFamily(FONT_MONO)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: 320 })
-          .margin({ left: 14, right: 16 })
+          .fontColor(COLORS.ink)
       }
-      Text(`X: ${umText(this.cursorStore.x)} µm`)
-        .fontSize(10)
-        .fontFamily(FONT_MONO)
-        .fontColor(COLORS.muted)
-        .margin({ left: 20 })
-      Text(`Y: ${umText(this.cursorStore.y)} µm`)
-        .fontSize(10)
-        .fontFamily(FONT_MONO)
-        .fontColor(COLORS.muted)
-        .margin({ left: 20 })
-      Text(formatZoomPercent(this.zoomPercent))
-        .fontSize(10)
-        .fontFamily(FONT_MONO)
-        .fontColor(COLORS.muted)
-        .margin({ left: 20 })
-      Row().width(1).height(13).backgroundColor(COLORS.border).margin({ left: 18, right: 18 })
-      this.precisionButton()
+      .height(24)
+      .padding({ left: 6, right: 6 })
+      .backgroundColor(Color.Transparent)
+      .borderRadius(5)
+      .focusable(false)
+      .hoverEffect(HoverEffect.Highlight)
+      .accessibilityText('精度与栅格设置')
+      .bindTips(`DBU ${cleanMetricNumber(this.dbuNm)} nm · 步长 ${cleanMetricNumber(this.effectiveDrawStep())} nm（点击配置精度与吸附）`)
+      .onClick(() => this.openPrecision())
+      .bindPopup(this.showPrecision, {
+        builder: this.precisionPopup,
+        placement: Placement.Top,
+        onStateChange: (event: PopupStateChangeParam) => { this.showPrecision = event.isVisible; }
+      })
+
+      // 5. 中部弹性区（显示实时测量读数）
+      Row() {
+        if (this.cursorStore.readout.length > 0) {
+          Text(this.readoutLine())
+            .fontSize(11)
+            .fontColor(COLORS.success)
+            .fontFamily(FONT_MONO)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ left: 16, right: 12 })
+        }
+      }
+      .layoutWeight(1)
+      .justifyContent(FlexAlign.End)
+
+      // 6. 右侧实时准星坐标 X / Y (µm)
+      Row({ space: 14 }) {
+        Row({ space: 5 }) {
+          WorkbenchIcon({ name: 'magnet', iconSize: 13, color: COLORS.muted })
+          Text(`X: ${umText(this.cursorStore.x)} µm`)
+            .fontSize(11.5)
+            .fontFamily(FONT_MONO)
+            .fontColor(COLORS.ink)
+            .constraintSize({ minWidth: 96 })
+        }.alignItems(VerticalAlign.Center)
+
+        Text(`Y: ${umText(this.cursorStore.y)} µm`)
+          .fontSize(11.5)
+          .fontFamily(FONT_MONO)
+          .fontColor(COLORS.ink)
+          .constraintSize({ minWidth: 88 })
+      }
+      .alignItems(VerticalAlign.Center)
+
+      this.statusSeparator()
+
+      // 7. 缩放下拉选择器
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 4 }) {
+          Text(`缩放: ${formatZoomPercent(this.zoomPercent)}`)
+            .fontSize(11.5)
+            .fontFamily(FONT_MONO)
+            .fontColor(COLORS.ink)
+          WorkbenchIcon({ name: 'chevronDown', iconSize: 10, color: COLORS.muted })
+        }.alignItems(VerticalAlign.Center)
+      }
+      .height(24)
+      .padding({ left: 6, right: 6 })
+      .backgroundColor(Color.Transparent)
+      .borderRadius(5)
+      .focusable(false)
+      .hoverEffect(HoverEffect.Highlight)
+      .bindTips(`${this.nativeText} · 点击快速切换缩放比例`)
+      .bindMenu(this.buildStatusZoomMenu, workbenchLuminousMenuOptions())
     }
-    .height(UI.controlHeight)
+    .height(30)
     .width('100%')
-    .padding({ left: 16, right: 16 })
+    .padding({ left: 12, right: 12 })
     .alignItems(VerticalAlign.Center)
     .backgroundColor(hongTuThemeState.isLuminousBackgroundEnabled()
       ? hongTuThemeState.luminous.translucentCardColor
@@ -293,8 +411,8 @@ export struct WorkbenchStatusBar {
 
   @Builder
   private precisionButton() {
-    Button(this.isCompact ? '精度' : `DBU ${cleanMetricNumber(this.dbuNm)} · 步长 ${cleanMetricNumber(this.effectiveDrawStep())} · 网格 ${cleanMetricNumber(this.effectiveDisplayGrid())} nm`, { type: ButtonType.Normal })
-      .height(UI.compactControlHeight).fontSize(UI.fontBody).fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
+    Button(this.isCompact ? '精度' : `栅格 ${umText(this.effectiveDisplayGrid())} µm`, { type: ButtonType.Normal })
+      .height(UI.compactControlHeight).fontSize(UI.fontCaption).fontColor(COLORS.ink).backgroundColor(COLORS.surfaceMuted)
       .border({ width: 1, color: COLORS.border }).borderRadius(UI.controlRadius)
       .padding({ left: 8, right: 8 }).accessibilityText('精度与吸附设置')
       .bindTips('文件 DBU、绘制步长、显示网格和几何吸附')
@@ -364,27 +482,5 @@ export struct WorkbenchStatusBar {
     const text: string = this.cursorStore.readout;
     const nl: number = text.indexOf('\n');
     return nl < 0 ? text : text.substring(0, nl);
-  }
-}
-
-@Component
-struct StatusMetric {
-  @Prop label: string = '';
-  @Prop value: string = '';
-  @Prop last: boolean = false;
-
-  build() {
-    Row() {
-      Text(this.label)
-        .fontSize(10)
-        .fontColor(COLORS.muted)
-      Text(this.value)
-        .fontSize(10)
-        .fontColor(COLORS.ink)
-        .fontFamily(FONT_MONO)
-        .margin({ left: 4 })
-    }
-    .alignItems(VerticalAlign.Center)
-    .margin({ left: 0, right: 14 })
   }
 }

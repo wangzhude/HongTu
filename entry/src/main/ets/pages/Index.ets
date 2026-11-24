@@ -38,7 +38,7 @@ import {
   ShortcutPanel,
 } from '../components/workbench/WorkbenchOverlays';
 import { WorkbenchInspector, DrcRulesPopover } from '../components/workbench/WorkbenchInspector';
-import { ShapePropertiesPopover } from '../components/workbench/ShapePropertiesPopover';
+import { ShapePropertiesPopover, InspectorLayerPatch } from '../components/workbench/ShapePropertiesPopover';
 import { DrcResultsDock } from '../components/workbench/DrcResultsDock';
 import { HdsTabs, HdsTabsController, DividerMode } from '@kit.UIDesignKit';
 import { hongTuThemeState, Radius, ThemeMode, ThemeState, ZIndexTokens } from '../store/ThemeStore';
@@ -1302,12 +1302,12 @@ struct Index {
     MotionSettings.start();
     ThemeManager.syncPersistence();
     PersistentStorage.persistProp('hongtuSidebarWidth', UI.sidebarWidth);
-    PersistentStorage.persistProp('hongtuInspectorWidth', 280);
+    PersistentStorage.persistProp('hongtuInspectorWidth', 296);
     PersistentStorage.persistProp('hongtuInspectorPinned', false);
     this.panelStore.preferredSidebarWidth = boundedPanelWidth(AppStorage.get<number>('hongtuSidebarWidth') ?? UI.sidebarWidth, 220, 400, UI.sidebarWidth);
-    this.panelStore.preferredInspectorWidth = boundedPanelWidth(AppStorage.get<number>('hongtuInspectorWidth') ?? 280, 280, 480, 280);
+    this.panelStore.preferredInspectorWidth = boundedPanelWidth(AppStorage.get<number>('hongtuInspectorWidth') ?? 296, 280, 480, 296);
     this.panelStore.propertyPanelPinned = AppStorage.get<boolean>('hongtuInspectorPinned') === true;
-    this.panelStore.inspectorVisible = false;
+    this.panelStore.inspectorVisible = true;
     aiService.ensureReady().then(() => {
       if (!this.pageAlive || generation !== this.pageGeneration) return;
       this.refreshAiConversation();
@@ -1448,10 +1448,10 @@ struct Index {
       // lg：双栏内联显示；md：侧边栏内联 + 检查器浮层；sm：双栏浮层
       if (config.device === DeviceType.PC) {
         this.panelStore.sidebarVisible = true;
-        this.panelStore.inspectorVisible = false;
+        this.panelStore.inspectorVisible = true;
       } else if (config.device === DeviceType.TABLET) {
         this.panelStore.sidebarVisible = true;
-        this.panelStore.inspectorVisible = false;
+        this.panelStore.inspectorVisible = this.isDesktopWorkspace();
       } else {
         this.panelStore.sidebarVisible = false;
         this.panelStore.inspectorVisible = false;
@@ -1639,12 +1639,9 @@ struct Index {
       const extraTabs: number = (this.viewportStore.currentModule !== WorkModule.Data && this.docStore.workspaceTabs.length > 1) ? 38 : 0;
       return safeTop + 54 + extraTabs;
     }
-    let topVp: number = safeTop + 46;
+    let topVp: number = safeTop + UI.titleBarHeight;
     if (this.viewportStore.currentModule !== WorkModule.Data) {
-      topVp += 44;
-      if (this.viewportStore.instanceScopeLabel.length > 0) {
-        topVp += 36;
-      }
+      topVp += 66;
     }
     return topVp + 8;
   }
@@ -1711,10 +1708,10 @@ struct Index {
     return this.isCompact() || placement.sidebarOverlay ? SideBarContainerType.Overlay : SideBarContainerType.Embed;
   }
 
-  /** 内层 SideBarContainer 类型：lg 内联（Embed），md/sm 浮层（Overlay） */
+  /** 内层 SideBarContainer 类型：桌面宽屏下右侧属性检查器常驻内联（Embed），与画布悬浮属性窗互不抢占 */
   private inspectorContainerType(): SideBarContainerType {
     const placement = workbenchPanelPlacement(this.panelStore.windowWidthVp, this.isDesktopWorkspace() ? UI.railWidth : 0,
-      this.sidebarWidth(), this.inspectorWidth(), this.panelStore.sidebarVisible, this.isDesktopWorkspace() ? this.panelStore.propertyPanelPinned : true, this.panelStore.windowHeightVp);
+      this.sidebarWidth(), this.inspectorWidth(), this.panelStore.sidebarVisible, true, this.panelStore.windowHeightVp);
     return this.isCompact() || placement.inspectorOverlay ? SideBarContainerType.Overlay : SideBarContainerType.Embed;
   }
 
@@ -1735,18 +1732,16 @@ struct Index {
   }
 
   private toggleInspectorPanel(): void {
-    if (this.viewportStore.currentModule === WorkModule.Layout && this.viewportStore.selectedShapeId >= 0) {
-      if (this.floatingShapePropertiesVisible()) {
-        this.panelStore.propertyPanelClosed = true;
-      } else {
-        this.panelStore.propertyPanelClosed = false;
-        this.ensureFloatingPropertyToolReady();
-      }
-      return;
-    }
     this.panelStore.inspectorVisible = !this.panelStore.inspectorVisible;
     if (this.panelStore.inspectorVisible && this.sidebarContainerType() === SideBarContainerType.Overlay) {
       this.panelStore.sidebarVisible = false;
+    }
+  }
+
+  private toggleFloatingPropertyPopover(): void {
+    this.panelStore.propertyPanelClosed = !this.panelStore.propertyPanelClosed;
+    if (!this.panelStore.propertyPanelClosed && this.viewportStore.selectedShapeId >= 0) {
+      this.ensureFloatingPropertyToolReady();
     }
   }
 
@@ -2582,6 +2577,8 @@ struct Index {
             },
             shortcutAction: () => { this.openExclusiveUtilitySheet('shortcut'); },
             openAppearanceAction: () => { this.showAppearanceSheet = true; },
+            rdbReviewAction: () => { this.openRdbReview(); },
+            viewWorkspaceAction: () => { this.openViewWorkspace(); },
             selectModuleAction: (module: WorkModule, label: string) => {
               this.selectModule(module, label);
             }
@@ -2642,6 +2639,7 @@ struct Index {
           currentTopCellId: this.docStore.currentEditingCellId,
           rootTopCellId: editService.getTopCellId(),
           currentEditingCellName: this.docStore.currentEditingCellName,
+          hierarchyDepth: this.docStore.hierarchyDepth,
           presetNames: unwrapObserved(this.docStore.layerPresetNames),
           savePresetAction: () => {
             this.presetSaveContext = this.parameterDialogContext();
@@ -2680,6 +2678,9 @@ struct Index {
           },
           newCellAction: () => {
             this.openNewCellDialog();
+          },
+          importMergeAction: () => {
+            this.openCanvasDialog(this.importMergeController);
           },
           placeCellInstanceAction: (cellId: number) => {
             this.openInstanceDialogForCell(cellId);
@@ -2733,17 +2734,23 @@ struct Index {
           WorkbenchInspector({
             visible: true,
             editable: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT,
-              desktopCanvasFirst: this.isDesktopWorkspace(),
+            desktopCanvasFirst: this.isDesktopWorkspace(),
             panelWidth: this.inspectorWidth(),
             currentModule: this.viewportStore.currentModule,
+            documentId: this.docStore.activeWorkspaceId,
+            revision: this.docStore.editorRevision,
             layers: this.layersForDisplay(),
             issues: unwrapObserved(this.verifyStore.drcIssues),
             selectedLayerNumber: this.viewportStore.selectedLayerNumber,
-          selectedDatatype: this.viewportStore.selectedDatatype,
+            selectedDatatype: this.viewportStore.selectedDatatype,
             selectedShapeId: this.viewportStore.selectedShapeId,
             zoomPercent: this.viewportStore.zoomPercent,
             highlightedViolationId: this.verifyStore.highlightedViolationId,
             selectedShape: this.viewportStore.selectedShapeId >= 0 ? editService.getShapeById(this.viewportStore.selectedShapeId) ?? null : null,
+            selectedShapes: editService.getSelectedShapes(),
+            cells: this.propertyCellOptions(),
+            currentCellName: this.docStore.currentEditingCellName,
+            floatingPopoverEnabled: !this.panelStore.propertyPanelClosed,
             lastDrcElapsed: this.verifyStore.lastDrcElapsed,
             docLibName: this.docStore.docLibName,
             docCellCount: this.docStore.docCellCount,
@@ -2771,6 +2778,36 @@ struct Index {
             },
             onShapePropertySubmit: (shapeId: number, property: string, value: string) => {
               this.updateShapeProperty(shapeId, property, value);
+            },
+            onPropertiesSubmit: (ids: number[], property: string, value: string, documentId: string, revision: number): string =>
+              this.submitSelectedProperties(ids, property, value, documentId, revision),
+            toggleFloatingPopoverAction: () => this.toggleFloatingPropertyPopover(),
+            collapseInspectorAction: () => { this.panelStore.inspectorVisible = false; },
+            copyAction: () => { this.copySelection(); },
+            duplicateAction: () => { this.duplicateSelection(); },
+            deleteAction: () => { this.removeSelectedShape(); },
+            openArrayAction: () => { this.openArrayCopyDialog(); },
+            applyInlineArrayAction: (rows: number, cols: number, pitchXNm: number, pitchYNm: number): boolean =>
+              this.applyInlineArrayFromInspector(rows, cols, pitchXNm, pitchYNm),
+            booleanAction: (op: 'merge' | 'subtract' | 'intersect' | 'xor') => { this.applyBooleanOp(op); },
+            changeSelectionLayerAction: (ln: number, dt: number) => { this.changeLayerOfSelected(ln, dt); },
+            selectActiveLayerAction: (ln: number, dt: number) => {
+              this.viewportStore.selectedLayerNumber = ln;
+              this.viewportStore.selectedDatatype = dt;
+              this.panelStore.statusText = `已切换当前绘图层至 L${ln}/D${dt}`;
+            },
+            updateLayerStyleAction: (ln: number, dt: number, patch: InspectorLayerPatch) => {
+              this.updateLayerInspectorPatch(ln, dt, patch);
+            },
+            moveSelectedByAction: (dxNm: number, dyNm: number) => {
+              this.moveSelectedShapesByNm(dxNm, dyNm);
+            },
+            enterInstanceAction: () => { this.enterSelectedInstanceCell(); },
+            flattenInstanceAction: () => { this.flattenSelectedInstance(); },
+            returnCanvasFocusAction: () => { this.restoreCanvasFocusAfterPanelClose(); },
+            saveShortcutAction: (saveAs: boolean) => {
+              if (saveAs) this.saveCurrentLayout(true);
+              else this.handleShortcut(ShortcutAction.SAVE);
             }
           })
           }.width('100%').height('100%')
@@ -2895,100 +2932,10 @@ struct Index {
           })
           }
           if (this.isDesktopWorkspace()) {
-            Row() {
-              CanvasViewToolbar({
-                viewMode: this.viewportStore.currentViewMode === ViewMode.VIEWER ? '查看' : '编辑',
-                compactMode: this.viewportStore.canvasViewportWidth < 1220,
-                zoomPercent: this.viewportStore.zoomPercent,
-                canUndo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanUndo,
-                canRedo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanRedo,
-                editable: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT,
-                hasSelection: this.viewportStore.selectedShapeCount > 0 || this.viewportStore.selectedShapeId >= 0,
-                selectionCount: this.viewportStore.selectedShapeCount,
-                moveToolActive: this.viewportStore.currentTool === ActiveTool.Move,
-                activeLayerNumber: this.viewportStore.selectedLayerNumber,
-                activeDatatype: this.viewportStore.selectedDatatype,
-                activeLayerColor: this.activeSelectedLayerColor(),
-                activeLayerLabel: this.activeSelectedLayerShortLabel(),
-                scopeText: this.viewportStore.instanceScopeLabel,
-                gridSnapEnabled: this.viewportStore.snapEnabled,
-                geometrySnapEnabled: this.viewportStore.geometrySnapEnabled,
-                routingModeLabel: routingConstraintService.modeLabel(this.viewportStore.routingMode),
-                routingLocked: this.viewportStore.routingMode !== RoutingMode.FREE,
-                multiSelectAdditive: this.viewportStore.multiSelectAdditive,
-                undoAction: () => this.undoEdit(),
-                redoAction: () => this.redoEdit(),
-                duplicateAction: () => this.duplicateSelection(),
-                deleteAction: () => this.removeSelectedShape(),
-                moveToolAction: () => this.switchToMoveTool(),
-                rotate90Action: () => this.transformSelection('rotate', 90),
-                mirrorHAction: () => this.transformSelection('mirror', 0),
-                mirrorVAction: () => this.transformSelection('mirror', 1),
-                alignAction: (m: string) => {
-                  const t = this.alignTypeFromString(m);
-                  if (t !== null) this.alignSelection(t, this.alignLabel(t));
-                },
-                booleanAction: (op: 'merge' | 'subtract' | 'dialog') => {
-                  if (op === 'dialog') {
-                    this.openCanvasDialog(this.booleanPreviewController);
-                  } else {
-                    this.applyBooleanOp(op);
-                  }
-                },
-                traceAction: () => this.traceNets(),
-                openLayerStyleAction: () => { this.openExclusiveUtilitySheet('layer_style'); },
-                zoomAction: (delta: number) => this.setZoom(delta * 20),
-                fitAction: () => this.fitAllShapes(),
-                modeAction: (mode: string) => this.setViewMode(mode === '查看' ? ViewMode.VIEWER : ViewMode.EDIT),
-                toggleGridSnapAction: () => this.toggleGridSnapQuick(),
-                toggleGeometrySnapAction: () => this.toggleGeometrySnapQuick(),
-                cycleRoutingModeAction: () => this.cycleRoutingModeQuick(),
-                toggleMultiSelectAdditiveAction: () => this.toggleMultiSelectAdditiveQuick()
-              })
-              if (this.viewportStore.canvasViewportWidth >= 1100) {
-                Row({ space: 4 }) {
-                  Text(`选择：${this.viewportStore.selectedShapeCount} 个图形`).fontSize(12).fontColor(COLORS.ink)
-                  WorkbenchIcon({ name: 'chevronDown', iconSize: 11, color: COLORS.muted })
-                }
-                .height(34)
-                .padding({ left: 10, right: 10 })
-                .borderRadius(UI.controlRadius)
-                .alignItems(VerticalAlign.Center)
-                .bindMenu(this.buildSelectionFilterMenu, buildLuminousMenuOptions(undefined, this.themeState.luminous, this.themeState.resolveLuminousRenderMode(), UI.panelRadius))
-
-                Row().width(1).height(18).backgroundColor(COLORS.border).margin({ left: 6, right: 6 })
-
-                Row({ space: 4 }) {
-                  Text(this.docStore.hierarchyDepth === 32 ? '全部层级' : `层级 ${this.docStore.hierarchyDepth}`).fontSize(11).fontColor(COLORS.muted)
-                  WorkbenchIcon({ name: 'chevronDown', iconSize: 11, color: COLORS.muted })
-                }
-                .height(34)
-                .padding({ left: 8, right: 12 })
-                .borderRadius(UI.controlRadius)
-                .alignItems(VerticalAlign.Center)
-                .bindMenu(this.buildHierarchyMenu, buildLuminousMenuOptions(undefined, this.themeState.luminous, this.themeState.resolveLuminousRenderMode(), UI.panelRadius))
-
-                Text('单位：µm').fontSize(12).fontColor(COLORS.ink).margin({ right: 14 })
-              } else {
-                Row({ space: 4 }) {
-                  Text('选项').fontSize(12).fontColor(COLORS.ink)
-                  WorkbenchIcon({ name: 'chevronDown', iconSize: 11, color: COLORS.muted })
-                }
-                .height(36)
-                .padding({ left: 10, right: 10 })
-                .margin({ right: 8 })
-                .borderRadius(UI.controlRadius)
-                .alignItems(VerticalAlign.Center)
-                .bindMenu(this.buildCompactCanvasOptions, buildLuminousMenuOptions(undefined, this.themeState.luminous, this.themeState.resolveLuminousRenderMode(), UI.panelRadius))
-              }
-            }.height(44).width('100%')
-              .backgroundColor(this.themeState.isLuminousBackgroundEnabled()
-                ? this.themeState.luminous.translucentCardColor
-                : COLORS.surface)
-              .border({ width: { bottom: 0.8 }, color: COLORS.border })
+            this.buildDesktopCanvasBreadcrumbBar()
           }
-          if (this.viewportStore.instanceScopeLabel.length > 0 &&
-            (this.isDesktopWorkspace() || !this.isCompact() || this.viewportStore.pickedPlacement !== null || editService.getCurrentCellId() !== editService.getTopCellId())) {
+          if (!this.isDesktopWorkspace() && this.viewportStore.instanceScopeLabel.length > 0 &&
+            (!this.isCompact() || this.viewportStore.pickedPlacement !== null || editService.getCurrentCellId() !== editService.getTopCellId())) {
           Row({ space: 8 }) {
             Text('共享定义').fontSize(UI.fontCaption).fontColor(COLORS.primary)
               .padding({ left: 6, right: 6, top: 4, bottom: 4 }).backgroundColor(COLORS.primarySoft).borderRadius(UI.chipRadius)
@@ -3240,6 +3187,7 @@ struct Index {
                 selectAllAction: () => { this.selectAllShapes(); },
                 clearSelectionAction: () => { this.handleShortcut(ShortcutAction.DESELECT); },
                 switchMoveToolAction: () => { this.switchToMoveTool(); },
+                zoomAction: (delta: number) => { this.setZoom(delta * 20); },
                 fitAllAction: () => { this.fitAllShapes(); },
                 resetViewAction: () => { this.resetView(); },
                 viewBackAction: () => { this.viewBack(); },
@@ -3292,14 +3240,18 @@ struct Index {
             if (this.floatingShapePropertiesVisible()) {
               ShapePropertiesPopover({
                 docked: false,
+                allowEmptySelection: false,
                 pinned: this.panelStore.propertyPanelPinned,
                 togglePinnedAction: () => this.setInspectorPinned(!this.panelStore.propertyPanelPinned),
-                panelHeight: Math.min(596, Math.max(160, this.viewportStore.canvasViewportHeight - 28)),
+                panelHeight: Math.min(540, Math.max(180, this.viewportStore.canvasViewportHeight - 28)),
                 documentId: this.docStore.activeWorkspaceId,
                 revision: this.docStore.editorRevision,
                 selectedShape: this.viewportStore.selectedShapeId >= 0 ? editService.getShapeById(this.viewportStore.selectedShapeId) ?? null : null,
                 selectedShapes: editService.getSelectedShapes(),
                 cells: this.propertyCellOptions(),
+                currentCellName: this.docStore.currentEditingCellName,
+                activeLayerNumber: this.viewportStore.selectedLayerNumber,
+                activeDatatype: this.viewportStore.selectedDatatype,
                 onPropertiesSubmit: (ids: number[], property: string, value: string, documentId: string, revision: number): string =>
                   this.submitSelectedProperties(ids, property, value, documentId, revision),
                 layers: this.layersForDisplay(),
@@ -3307,7 +3259,24 @@ struct Index {
                 onShapePropertySubmit: (id: number, property: string, value: string) => this.updateShapeProperty(id, property, value),
                 closeAction: () => { this.panelStore.propertyPanelClosed = true; },
                 copyAction: () => { this.copySelection(); },
+                duplicateAction: () => { this.duplicateSelection(); },
                 deleteAction: () => { this.removeSelectedShape(); },
+                openArrayAction: () => { this.openArrayCopyDialog(); },
+                applyInlineArrayAction: (rows: number, cols: number, pitchXNm: number, pitchYNm: number): boolean =>
+                  this.applyInlineArrayFromInspector(rows, cols, pitchXNm, pitchYNm),
+                booleanAction: (op: 'merge' | 'subtract' | 'intersect' | 'xor') => { this.applyBooleanOp(op); },
+                changeSelectionLayerAction: (ln: number, dt: number) => { this.changeLayerOfSelected(ln, dt); },
+                selectActiveLayerAction: (ln: number, dt: number) => {
+                  this.viewportStore.selectedLayerNumber = ln;
+                  this.viewportStore.selectedDatatype = dt;
+                  this.panelStore.statusText = `已切换当前绘图层至 L${ln}/D${dt}`;
+                },
+                updateLayerStyleAction: (ln: number, dt: number, patch: InspectorLayerPatch) => {
+                  this.updateLayerInspectorPatch(ln, dt, patch);
+                },
+                moveSelectedByAction: (dxNm: number, dyNm: number) => {
+                  this.moveSelectedShapesByNm(dxNm, dyNm);
+                },
                 enterInstanceAction: () => { this.enterSelectedInstanceCell(); },
                 flattenInstanceAction: () => { this.flattenSelectedInstance(); },
                 returnCanvasFocusAction: () => { this.restoreCanvasFocusAfterPanelClose(); },
@@ -3412,6 +3381,9 @@ struct Index {
         statusText: this.panelStore.statusText,
         documentDirty: this.docStore.documentDirty,
         shapeCount: this.shapes.length,
+        selectedShapeCount: this.viewportStore.selectedShapeCount,
+        drcIssueCount: this.verifyStore.drcIssues.length,
+        drcHasRun: this.verifyStore.drcHasRun,
         visibleLayerCount: this.visibleLayerNumbers().length,
         zoomPercent: this.viewportStore.zoomPercent,
         gridSize: this.viewportStore.gridSize,
@@ -3422,6 +3394,9 @@ struct Index {
         geometrySnapKinds: unwrapObserved(this.viewportStore.geometrySnapKinds),
         precisionContextProvider: (): string => this.parameterDialogContext(),
         precisionChangeAction: (settings: PrecisionSettings): boolean => this.applyPrecisionSettings(settings),
+        runDrcAction: () => { this.runDrcBackground(); },
+        setZoomPercentAction: (pct: number) => { this.setZoomToPercent(pct); },
+        fitAllAction: () => { this.fitAllShapes(); },
         viewMode: this.viewportStore.currentViewMode === ViewMode.VIEWER ? '查看' : '编辑',
         nativeText: this.panelStore.nativeText,
         cursorStore: this.cursorStore
@@ -4071,6 +4046,7 @@ struct Index {
             this.openExclusiveUtilitySheet('project');
           },
           saveAsAction: () => { this.saveCurrentLayout(true); },
+          importMergeAction: () => { this.openCanvasDialog(this.importMergeController); },
           shareLayoutAction: () => { this.shareCurrentLayoutSnapshot('png'); },
           projectAction: () => {
             this.docStore.workspaceHistory = workspaceService.listHistory(this.docStore.activeWorkspaceId);
@@ -4119,7 +4095,7 @@ struct Index {
           cellName: this.docStore.currentEditingCellName,
           documentDirty: this.docStore.documentDirty,
           sidebarVisible: this.panelStore.sidebarVisible,
-          inspectorVisible: this.floatingShapePropertiesVisible() || this.panelStore.inspectorVisible,
+          inspectorVisible: this.panelStore.inspectorVisible,
           openFileAction: async () => {
             await this.pickAndParseFile();
           },
@@ -4159,6 +4135,109 @@ struct Index {
           },
           toggleInspectorAction: () => this.toggleInspectorPanel()
         })
+
+        // 第二行全宽分组式 Ribbon 功能区工具栏（对齐参考布局：横跨导航轨、左侧栏、画布与右侧检查器）
+        if (this.isDesktopWorkspace() && this.viewportStore.currentModule !== WorkModule.Data) {
+          CanvasViewToolbar({
+            viewMode: this.viewportStore.currentViewMode === ViewMode.VIEWER ? '查看' : '编辑',
+            currentTool: this.viewportStore.currentTool,
+            boxSelectRule: this.draftControlStore.boxSelectRule,
+            compactMode: this.panelStore.windowWidthVp < 1260,
+            zoomPercent: this.viewportStore.zoomPercent,
+            canUndo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanUndo,
+            canRedo: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT && this.docStore.editCanRedo,
+            editable: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT,
+            hasSelection: this.viewportStore.selectedShapeCount > 0 || this.viewportStore.selectedShapeId >= 0,
+            selectionCount: this.viewportStore.selectedShapeCount,
+            moveToolActive: this.viewportStore.currentTool === ActiveTool.Move,
+            activeLayerNumber: this.viewportStore.selectedLayerNumber,
+            activeDatatype: this.viewportStore.selectedDatatype,
+            activeLayerColor: this.activeSelectedLayerColor(),
+            activeLayerLabel: this.activeSelectedLayerShortLabel(),
+            scopeText: this.viewportStore.instanceScopeLabel,
+            gridVisible: this.viewportStore.gridVisible,
+            gridSnapEnabled: this.viewportStore.snapEnabled,
+            geometrySnapEnabled: this.viewportStore.geometrySnapEnabled,
+            routingModeLabel: routingConstraintService.modeLabel(this.viewportStore.routingMode),
+            routingLocked: this.viewportStore.routingMode !== RoutingMode.FREE,
+            multiSelectAdditive: this.viewportStore.multiSelectAdditive,
+            drcIssueCount: this.verifyStore.drcIssues.length,
+            newFileAction: () => {
+              this.docStore.workspaceHistory = workspaceService.listHistory(this.docStore.activeWorkspaceId);
+              this.openExclusiveUtilitySheet('project');
+            },
+            openFileAction: () => { this.pickAndParseFile(); },
+            saveAction: () => { this.saveCurrentLayout(); },
+            saveAsAction: () => { this.saveCurrentLayout(true); },
+            importMergeAction: () => { this.openCanvasDialog(this.importMergeController); },
+            shareLayoutAction: () => { this.shareCurrentLayoutSnapshot('png'); },
+            undoAction: () => this.undoEdit(),
+            redoAction: () => this.redoEdit(),
+            copyAction: () => this.copySelection(),
+            pasteAction: () => this.pasteFromClipboard(),
+            duplicateAction: () => this.duplicateSelection(),
+            deleteAction: () => this.removeSelectedShape(),
+            selectAllAction: () => this.selectAllShapes(),
+            clearSelectionAction: () => this.handleShortcut(ShortcutAction.DESELECT),
+            selectStandardToolAction: () => {
+              this.viewportStore.interactiveCurveKind = '';
+              this.exitStampSession();
+              this.draftControlStore.boxSelectRule = 0;
+              this.viewportStore.multiSelectAdditive = false;
+              this.viewportStore.currentTool = ActiveTool.Select;
+              this.panelStore.statusText = '当前工具: 选择';
+            },
+            boxSelectToolAction: () => {
+              this.viewportStore.interactiveCurveKind = '';
+              this.exitStampSession();
+              this.viewportStore.currentTool = ActiveTool.Select;
+              this.draftControlStore.boxSelectRule = this.draftControlStore.boxSelectRule === 1 ? 2 : (this.draftControlStore.boxSelectRule === 2 ? 0 : 1);
+              const ruleName: string = this.draftControlStore.boxSelectRule === 1 ? '相交框选' : (this.draftControlStore.boxSelectRule === 2 ? '全包含框选' : '智能框选');
+              this.panelStore.statusText = `框选模式: ${ruleName}`;
+            },
+            polygonToolAction: () => {
+              this.viewportStore.interactiveCurveKind = '';
+              this.exitStampSession();
+              this.viewportStore.currentTool = ActiveTool.Polygon;
+              this.panelStore.statusText = '当前工具: 多边形';
+            },
+            moveToolAction: () => this.switchToMoveTool(),
+            rotate90Action: () => this.transformSelection('rotate', 90),
+            mirrorHAction: () => this.transformSelection('mirror', 0),
+            mirrorVAction: () => this.transformSelection('mirror', 1),
+            scaleAction: () => this.openSizeOffsetDialog(),
+            alignAction: (m: string) => {
+              const t = this.alignTypeFromString(m);
+              if (t !== null) this.alignSelection(t, this.alignLabel(t));
+            },
+            distributeAction: (axis: 'horizontal' | 'vertical') => {
+              this.distributeSelection(axis === 'vertical' ? DistributeType.VERTICAL : DistributeType.HORIZONTAL);
+            },
+            booleanAction: (op: 'merge' | 'subtract' | 'intersect' | 'xor' | 'dialog') => {
+              if (op === 'dialog') {
+                this.openCanvasDialog(this.booleanPreviewController);
+              } else {
+                this.applyBooleanOp(op);
+              }
+            },
+            traceAction: () => this.traceNets(),
+            runDrcAction: () => this.runDrcBackground(),
+            openLayerStyleAction: () => { this.openExclusiveUtilitySheet('layer_style'); },
+            zoomAction: (delta: number) => this.setZoom(delta * 20),
+            setZoomPercentAction: (pct: number) => this.setZoomToPercent(pct),
+            fitAction: () => this.fitAllShapes(),
+            resetViewAction: () => this.resetView(),
+            modeAction: (mode: string) => this.setViewMode(mode === '查看' ? ViewMode.VIEWER : ViewMode.EDIT),
+            toggleGridVisibleAction: () => {
+              this.viewportStore.gridVisible = !this.viewportStore.gridVisible;
+              this.panelStore.statusText = `网格${this.viewportStore.gridVisible ? '已显示' : '已隐藏'}`;
+            },
+            toggleGridSnapAction: () => this.toggleGridSnapQuick(),
+            toggleGeometrySnapAction: () => this.toggleGeometrySnapQuick(),
+            cycleRoutingModeAction: () => this.cycleRoutingModeQuick(),
+            toggleMultiSelectAdditiveAction: () => this.toggleMultiSelectAdditiveQuick()
+          })
+        }
 
         // 桌面端标签页已直接内联进 WorkbenchTitleBar，仅在触控窄屏且打开 ≥2 个文档时展示次级标签栏
         if (!this.isDesktopWorkspace() && this.viewportStore.currentModule !== WorkModule.Data && this.docStore.workspaceTabs.length > 1) {
@@ -7795,6 +7874,282 @@ struct Index {
   private setZoom(delta: number): void {
     const targetZoom: number = this.clampZoom(this.viewportStore.zoomPercent * Math.pow(1.2, delta / 20));
     this.zoomCanvasToAt(this.viewportStore.canvasViewportWidth / 2, this.viewportStore.canvasViewportHeight / 2, targetZoom);
+  }
+
+  private setZoomToPercent(targetPercent: number): void {
+    if (!Number.isFinite(targetPercent) || targetPercent <= 0) return;
+    this.zoomCanvasToAt(
+      this.viewportStore.canvasViewportWidth / 2,
+      this.viewportStore.canvasViewportHeight / 2,
+      this.clampZoom(targetPercent)
+    );
+  }
+
+  private currentCellInstanceCount(): number {
+    const currentId: number = editService.getCurrentCellId();
+    const topId: number = editService.getTopCellId();
+    let count: number = 0;
+    for (let i = 0; i < this.shapes.length; i++) {
+      const s: Shape = this.shapes[i];
+      const owner: number = s.ownerCellId !== undefined ? s.ownerCellId : topId;
+      if (owner === currentId && s.type === ShapeType.INSTANCE) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private currentCellObjectCount(): number {
+    const currentId: number = editService.getCurrentCellId();
+    const topId: number = editService.getTopCellId();
+    let count: number = 0;
+    for (let i = 0; i < this.shapes.length; i++) {
+      const s: Shape = this.shapes[i];
+      if (s.type === ShapeType.NODE) continue;
+      const owner: number = s.ownerCellId !== undefined ? s.ownerCellId : topId;
+      if (owner === currentId) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private canvasBreadcrumbStackIds(): number[] {
+    const stack: number[] = editService.getCurrentCellStack();
+    return stack.length > 0 ? stack : [editService.getCurrentCellId()];
+  }
+
+  private cellNameForBreadcrumb(cellId: number): string {
+    const names: string[] = this.renderCellNamesForCanvas();
+    if (cellId >= 0 && cellId < names.length && names[cellId].length > 0) {
+      return names[cellId];
+    }
+    return this.docStore.currentEditingCellName || 'TOP';
+  }
+
+  @Builder
+  private buildDesktopActiveLayerQuickMenu() {
+    Menu() {
+      ForEach(this.layersForDisplay().slice(0, 28), (layer: UiLayer) => {
+        MenuItem({
+          content: `L${layer.layerNumber}/D${layer.datatype} ${layer.chineseName || layer.englishName}` +
+            (layer.locked === true ? ' (已锁)' : '') + (!layer.visible ? ' (隐藏)' : ''),
+          symbolStartIcon: menuIcon('layout'),
+          symbolEndIcon: menuCheckIcon(
+            layer.layerNumber === this.viewportStore.selectedLayerNumber &&
+            layer.datatype === this.viewportStore.selectedDatatype
+          )
+        })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => {
+            this.viewportStore.selectedLayerNumber = layer.layerNumber;
+            this.viewportStore.selectedDatatype = layer.datatype;
+            this.panelStore.statusText = `已切换当前绘图层至 L${layer.layerNumber}/D${layer.datatype}`;
+          })
+      }, (layer: UiLayer): string => `crumb_lyr_${layer.layerNumber}_${layer.datatype}`)
+    }
+    .attributeModifier(menuStyle(
+      this.layersForDisplay().slice(0, 28).map((layer: UiLayer): MenuItemOptions => ({
+        content: `L${layer.layerNumber}/D${layer.datatype} ${layer.chineseName || layer.englishName}`,
+        symbolStartIcon: menuIcon('layout')
+      })),
+      this.getUIContext()
+    ))
+  }
+
+  @Builder
+  private buildDesktopCanvasBreadcrumbBar() {
+    Row({ space: 6 }) {
+      Button({ type: ButtonType.Normal }) {
+        WorkbenchIcon({ name: 'home', iconSize: 13.5, color: COLORS.muted })
+      }
+      .width(24)
+      .height(24)
+      .padding(0)
+      .backgroundColor(Color.Transparent)
+      .borderRadius(6)
+      .focusable(false)
+      .hoverEffect(HoverEffect.Highlight)
+      .accessibilityText('返回顶层单元')
+      .bindTips('返回顶层单元 (Top Cell)')
+      .onClick(() => {
+        if (this.canvasBreadcrumbStackIds().length > 1) {
+          this.navigateCellStack(0);
+        }
+      })
+
+      ForEach(this.canvasBreadcrumbStackIds(), (cellId: number, idx: number) => {
+        WorkbenchIcon({ name: 'chevronRight', iconSize: 10, color: COLORS.muted })
+        Button(this.cellNameForBreadcrumb(cellId), { type: ButtonType.Normal })
+          .height(24)
+          .padding({ left: 6, right: 6 })
+          .fontSize(12)
+          .fontWeight(idx === this.canvasBreadcrumbStackIds().length - 1 ? FontWeight.Bold : FontWeight.Medium)
+          .fontColor(idx === this.canvasBreadcrumbStackIds().length - 1 ? COLORS.ink : COLORS.muted)
+          .backgroundColor(Color.Transparent)
+          .borderRadius(6)
+          .focusable(false)
+          .hoverEffect(HoverEffect.Highlight)
+          .onClick(() => {
+            if (idx < this.canvasBreadcrumbStackIds().length - 1) {
+              this.navigateCellStack(idx);
+            }
+          })
+      }, (cellId: number, idx: number): string => `crumb_${idx}_${cellId}_${this.docStore.editorRevision}`)
+
+      WorkbenchIcon({ name: 'chevronRight', iconSize: 10, color: COLORS.muted })
+
+      Row({ space: 4 }) {
+        Text(`${this.currentCellInstanceCount()} 条引用 · ${this.viewportStore.selectedShapeCount > 0 ? 1 : 0} 个选中`)
+          .fontSize(11.5)
+          .fontColor(COLORS.muted)
+          .maxLines(1)
+        Text(`(${this.viewportStore.selectedShapeCount > 0 ? this.viewportStore.selectedShapeCount : this.currentCellObjectCount()} 个对象)`)
+          .fontSize(11.5)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(COLORS.primary)
+          .maxLines(1)
+      }.alignItems(VerticalAlign.Center)
+
+      Blank()
+
+      if (this.viewportStore.pickedPlacement !== null) {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 3 }) {
+            Text('实例操作').fontSize(11).fontColor(COLORS.primary)
+            WorkbenchIcon({ name: 'chevronDown', iconSize: 9.5, color: COLORS.primary })
+          }.alignItems(VerticalAlign.Center)
+        }
+        .height(24)
+        .padding({ left: 8, right: 8 })
+        .backgroundColor(COLORS.primarySoft)
+        .borderRadius(6)
+        .focusable(false)
+        .bindMenu(this.buildInstanceScopeMenu, buildLuminousMenuOptions(undefined, this.themeState.luminous, this.themeState.resolveLuminousRenderMode(), UI.panelRadius))
+      } else if (this.viewportStore.instanceScopeLabel.length > 0 && editService.getCurrentCellId() !== editService.getTopCellId()) {
+        Button('共享定义', { type: ButtonType.Normal })
+          .height(22)
+          .padding({ left: 7, right: 7 })
+          .fontSize(10.5)
+          .fontColor(COLORS.primary)
+          .backgroundColor(COLORS.primarySoft)
+          .borderRadius(6)
+          .focusable(false)
+          .bindTips(this.viewportStore.instanceScopeLabel)
+          .onClick(() => this.getUIContext().showAlertDialog({
+            title: '编辑范围与引用影响',
+            message: this.viewportStore.instanceScopeLabel,
+            cornerRadius: UI.dialogRadius,
+            primaryButton: { value: '知道了', action: () => {} }
+          }))
+      }
+
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 5 }) {
+          Row()
+            .width(9)
+            .height(9)
+            .borderRadius(2)
+            .backgroundColor(this.activeSelectedLayerColor())
+          Text(`L${this.viewportStore.selectedLayerNumber}/${this.viewportStore.selectedDatatype}`)
+            .fontSize(11)
+            .fontFamily(FONT_MONO)
+            .fontColor(COLORS.ink)
+          WorkbenchIcon({ name: 'chevronDown', iconSize: 9, color: COLORS.muted })
+        }.alignItems(VerticalAlign.Center)
+      }
+      .height(24)
+      .padding({ left: 7, right: 7 })
+      .backgroundColor(COLORS.surfaceMuted)
+      .border({ width: 0.8, color: COLORS.border, radius: 6 })
+      .borderRadius(6)
+      .focusable(false)
+      .bindTips('快速切换当前活动绘图层')
+      .bindMenu(this.buildDesktopActiveLayerQuickMenu, buildLuminousMenuOptions(undefined, this.themeState.luminous, this.themeState.resolveLuminousRenderMode(), UI.panelRadius))
+
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 3 }) {
+          Text('过滤').fontSize(11).fontColor(COLORS.muted)
+          WorkbenchIcon({ name: 'chevronDown', iconSize: 9, color: COLORS.muted })
+        }.alignItems(VerticalAlign.Center)
+      }
+      .height(24)
+      .padding({ left: 6, right: 6 })
+      .backgroundColor(Color.Transparent)
+      .borderRadius(6)
+      .focusable(false)
+      .bindMenu(this.buildSelectionFilterMenu, buildLuminousMenuOptions(undefined, this.themeState.luminous, this.themeState.resolveLuminousRenderMode(), UI.panelRadius))
+
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 3 }) {
+          Text(this.docStore.hierarchyDepth === 32 ? '全部层级' : `层级 ${this.docStore.hierarchyDepth}`)
+            .fontSize(11)
+            .fontColor(COLORS.muted)
+          WorkbenchIcon({ name: 'chevronDown', iconSize: 9, color: COLORS.muted })
+        }.alignItems(VerticalAlign.Center)
+      }
+      .height(24)
+      .padding({ left: 6, right: 6 })
+      .backgroundColor(Color.Transparent)
+      .borderRadius(6)
+      .focusable(false)
+      .bindMenu(this.buildHierarchyMenu, buildLuminousMenuOptions(undefined, this.themeState.luminous, this.themeState.resolveLuminousRenderMode(), UI.panelRadius))
+    }
+    .width('100%')
+    .height(34)
+    .padding({ left: 10, right: 10 })
+    .backgroundColor(this.themeState.isLuminousBackgroundEnabled()
+      ? this.themeState.luminous.translucentCardColor
+      : COLORS.surface)
+    .border({ width: { bottom: 0.8 }, color: COLORS.border })
+    .alignItems(VerticalAlign.Center)
+  }
+
+  private updateLayerInspectorPatch(layerNumber: number, datatype: number, patch: InspectorLayerPatch): void {
+    const next: UiLayer[] = [];
+    let updated: boolean = false;
+    for (let i = 0; i < this.docStore.layers.length; i++) {
+      const layer: UiLayer = this.docStore.layers[i];
+      if (layer.layerNumber === layerNumber && layer.datatype === datatype) {
+        const cloned: UiLayer = cloneLayerWithVisible(layer, layer.visible);
+        if (patch.group !== undefined) cloned.group = patch.group;
+        if (patch.fillStyle !== undefined) cloned.fillStyle = patch.fillStyle;
+        if (patch.transparency !== undefined) cloned.transparency = patch.transparency;
+        next.push(cloned);
+        updated = true;
+      } else {
+        next.push(layer);
+      }
+    }
+    if (!updated) return;
+    this.docStore.layers = next;
+    this.syncLayerVisibilityMirror();
+    this.docStore.editorRevision++;
+    this.scheduleWorkspaceDraft();
+  }
+
+  private moveSelectedShapesByNm(dxNm: number, dyNm: number): void {
+    if (!this.assertEditMode()) return;
+    if (!Number.isFinite(dxNm) || !Number.isFinite(dyNm) || (dxNm === 0 && dyNm === 0)) return;
+    const ids: number[] = editService.getSelectedIds();
+    if (ids.length === 0) return;
+    if (ids.length > 1) {
+      editService.beginBatch();
+    }
+    for (let i = 0; i < ids.length; i++) {
+      editService.moveShape(ids[i], dxNm, dyNm);
+    }
+    if (ids.length > 1) {
+      editService.endBatch();
+    }
+    this.syncShapesFromEditService();
+    this.panelStore.statusText = `已平移选中选区 (${(dxNm / 1000).toFixed(3)}, ${(dyNm / 1000).toFixed(3)} µm)`;
+  }
+
+  private applyInlineArrayFromInspector(rows: number, cols: number, pitchXNm: number, pitchYNm: number): boolean {
+    if (!this.assertEditMode()) return false;
+    this.arrayDialogContext = this.parameterDialogContext();
+    return this.applyArrayCopy(rows, cols, pitchXNm, pitchYNm);
   }
 
   private zoomCanvasAt(screenX: number, screenY: number, scaleFactor: number): void {

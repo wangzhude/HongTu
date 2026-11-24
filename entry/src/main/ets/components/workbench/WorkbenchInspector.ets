@@ -14,6 +14,8 @@ import {
 } from '../../services/DrcService';
 import type { DrcGroupSummary, DrcRuleGroup, DrcRuleTextResult, DrcNoticeRow } from '../../services/DrcService';
 import { Shape, ShapeType, getShapeBounds, getShapeArea } from '../../models/GdsiiData';
+import { PropertyCellOption } from '../../services/ShapePropertyService';
+import { ShapePropertiesPopover, InspectorLayerPatch } from './ShapePropertiesPopover';
 import { RulesetSegment } from '../segments/RulesetSegment';
 import { hongTuThemeState } from '../../store/ThemeStore';
 import { DrawnStatusIcon } from '../DrawnStatusIcon';
@@ -54,7 +56,13 @@ export struct WorkbenchInspector {
   /** 是否可见（父组件在 md/sm 抽屉态下控制；lg 内联态恒为 true） */
   @Prop visible: boolean = true;
   /** 检查器宽度（vp）：lg=panelWidth，md/sm 浮层抽屉=280，由父组件根据断点传入 */
-  @Prop panelWidth: number = 280;
+  @Prop panelWidth: number = 296;
+  @Prop documentId: string = '';
+  @Prop revision: number = 0;
+  @Prop selectedShapes: Shape[] = [];
+  @Prop cells: PropertyCellOption[] = [];
+  @Prop currentCellName: string = 'TOP';
+  @Prop floatingPopoverEnabled: boolean = true;
   selectLayerAction: (layer: UiLayer) => void = () => {};
   toggleLayerAction: (layerNumber: number, datatype: number) => void = () => {};
   runDrcAction: () => void = () => {};
@@ -63,32 +71,60 @@ export struct WorkbenchInspector {
   openFileAction: () => void = () => {};
   quickScanAction: () => void = () => {};
   onShapePropertySubmit: (shapeId: number, property: string, value: string) => void = () => {};
+  onPropertiesSubmit: ((ids: number[], property: string, value: string, documentId: string, revision: number) => string) | null = null;
+  toggleFloatingPopoverAction: (() => void) | null = null;
+  collapseInspectorAction: () => void = () => {};
+  copyAction: () => void = () => {};
+  duplicateAction: (() => void) | null = null;
+  deleteAction: () => void = () => {};
+  openArrayAction: (() => void) | null = null;
+  applyInlineArrayAction: ((rows: number, cols: number, pitchXNm: number, pitchYNm: number) => boolean) | null = null;
+  booleanAction: ((op: 'merge' | 'subtract' | 'intersect' | 'xor') => void) | null = null;
+  changeSelectionLayerAction: ((layerNumber: number, datatype: number) => void) | null = null;
+  selectActiveLayerAction: ((layerNumber: number, datatype: number) => void) | null = null;
+  updateLayerStyleAction: ((layerNumber: number, datatype: number, patch: InspectorLayerPatch) => void) | null = null;
+  moveSelectedByAction: ((dxNm: number, dyNm: number) => void) | null = null;
+  enterInstanceAction: (() => void) | null = null;
+  flattenInstanceAction: (() => void) | null = null;
+  returnCanvasFocusAction: () => void = () => {};
+  saveShortcutAction: ((saveAs: boolean) => void) | null = null;
 
   build() {
     Column() {
-      if (this.currentModule === WorkModule.Layout && this.desktopCanvasFirst) {
-        PropertiesPanel({
-          selectedShapeId: this.selectedShapeId,
-          editable: this.editable,
-          selectedLayerNumber: this.selectedLayerNumber,
-          selectedDatatype: this.selectedDatatype,
-          zoomPercent: this.zoomPercent,
+      if (this.currentModule === WorkModule.Layout) {
+        ShapePropertiesPopover({
+          docked: true,
+          allowEmptySelection: true,
+          pinned: true,
+          floatingEnabled: this.floatingPopoverEnabled,
+          toggleFloatingAction: this.toggleFloatingPopoverAction,
+          closeAction: this.collapseInspectorAction,
+          documentId: this.documentId,
+          revision: this.revision,
           selectedShape: this.selectedShape,
-          desktopCanvasFirst: true,
-          onShapePropertySubmit: this.onShapePropertySubmit
-        })
-      } else if (this.currentModule === WorkModule.Layout) {
-        LayerInspector({
+          selectedShapes: this.selectedShapes,
           layers: this.layers,
+          cells: this.cells,
+          currentCellName: this.currentCellName,
+          activeLayerNumber: this.selectedLayerNumber,
+          activeDatatype: this.selectedDatatype,
           editable: this.editable,
-          selectedLayerNumber: this.selectedLayerNumber,
-          selectedDatatype: this.selectedDatatype,
-          selectedShapeId: this.selectedShapeId,
-          zoomPercent: this.zoomPercent,
-          selectedShape: this.selectedShape,
-          selectLayerAction: this.selectLayerAction,
-          toggleLayerAction: this.toggleLayerAction,
-          onShapePropertySubmit: this.onShapePropertySubmit
+          onShapePropertySubmit: this.onShapePropertySubmit,
+          onPropertiesSubmit: this.onPropertiesSubmit,
+          copyAction: this.copyAction,
+          duplicateAction: this.duplicateAction,
+          deleteAction: this.deleteAction,
+          openArrayAction: this.openArrayAction,
+          applyInlineArrayAction: this.applyInlineArrayAction,
+          booleanAction: this.booleanAction,
+          changeSelectionLayerAction: this.changeSelectionLayerAction,
+          selectActiveLayerAction: this.selectActiveLayerAction,
+          updateLayerStyleAction: this.updateLayerStyleAction,
+          moveSelectedByAction: this.moveSelectedByAction,
+          enterInstanceAction: this.enterInstanceAction,
+          flattenInstanceAction: this.flattenInstanceAction,
+          returnCanvasFocusAction: this.returnCanvasFocusAction,
+          saveShortcutAction: this.saveShortcutAction
         })
       } else if (this.currentModule === WorkModule.Verify) {
         DrcInspector({

@@ -4,7 +4,8 @@
  * 严格遵循华为官方《状态管理 V1 和 V2 混用指导（API version 19 及之后）》与《基于 StateStore 的全局状态管理》：
  * 1. 将 Index.ets 原有 172 个 @State 字段中的 167 个按职责边界拆分为五大高内聚 @ObservedV2 领域 Store；
  * 2. Phase 5 扩展 ViewportSelectionStore：默认开启几何磁吸与智能延伸对齐参考线、自适应触屏磁吸半径（16vp 基准，触屏自动放大至 24vp+）、
- *    默认启用 90° 正交曼哈顿走线约束及触屏局部放大镜开关。
+ *    默认启用 90° 正交曼哈顿走线约束及触屏局部放大镜开关；
+ * 3. 桌面工作台默认停靠右侧可折叠五卡片「属性检查器」（propertyPanelPinned = true, preferredInspectorWidth = 296）。
  *
  * This file is part of HongTu, licensed under GPLv3.
  */
@@ -260,7 +261,7 @@ export class PanelLayoutStore {
   @Trace sidebarVisible: boolean = true;
   @Trace inspectorVisible: boolean = true;
   @Trace preferredSidebarWidth: number = UI.sidebarWidth;
-  @Trace preferredInspectorWidth: number = 280;
+  @Trace preferredInspectorWidth: number = 296;
   @Trace cellNameDialogTitle: string = '新建 Cell';
   @Trace cellNameDialogInitial: string = '';
   @Trace curveInitialName: string = '';

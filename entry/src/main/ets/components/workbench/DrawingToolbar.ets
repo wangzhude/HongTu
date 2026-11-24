@@ -14,14 +14,10 @@ import { hongTuThemeState, Radius } from '../../store/ThemeStore';
 import { Point } from '../../models/GdsiiData';
 
 /**
- * 鸿图绘制工具栏（v7 PS / AE / KLayout 全工具右下角展开子工具与精确参数弹出框版）
+ * 鸿图画布左侧悬浮绘制工具条与触屏水平工具栏
  *
- * 1. 每个工具按钮右下角均绘制 PS/AE 风格展开角标（◢），支持：
- *    - 点击未激活工具直接切换；
- *    - 再次点击已激活工具、点击右下角角标、鼠标右键或触屏长按，弹出该工具专属的绘制模式与精确参数面板；
- * 2. 涵盖选择（框选规则/加选）、漫游（抓手/拉框放大/全图适配/层级深度）、测量（测距/拉框测面积/标尺/十字线/单位）、
- *    矩形（对角两点/中心外扩/定尺寸/正方形锁/精确中心或角点坐标直创）、多边形（正交/45°/自由/正N边形）、
- *    路径（走线约束/线宽预设/端头帽型）、文本（弹窗输入/引脚连盖章）、实例（子Cell与阵列AREF/PCell/选区成Cell）、曲线。
+ * 1. 对齐参考布局左侧悬浮工具条序列：选择、移动、测量、矩形、多边形、路径、文本、实例、曲线，以及底部放大、缩小、全图适配；
+ * 2. 完整保留 PS/AE/KLayout 风格右下角子模式三角热区与精确数值创建弹出框。
  *
  * This file is part of HongTu, licensed under GPLv3.
  */
@@ -34,8 +30,20 @@ interface DrawingToolDef {
   key: string;
 }
 
-const DRAWING_TOOLS: DrawingToolDef[] = [
+const DESKTOP_DRAWING_TOOLS: DrawingToolDef[] = [
   { id: 'select', tool: ActiveTool.Select, icon: 'select', label: '选择', key: 'S' },
+  { id: 'move', tool: ActiveTool.Move, icon: 'move', label: '移动', key: 'M' },
+  { id: 'measure', tool: ActiveTool.Measure, icon: 'measure', label: '测量', key: 'K' },
+  { id: 'rect', tool: ActiveTool.Rect, icon: 'rect', label: '矩形', key: 'B' },
+  { id: 'polygon', tool: ActiveTool.Polygon, icon: 'polygon', label: '多边形', key: 'P' },
+  { id: 'path', tool: ActiveTool.Path, icon: 'path', label: '路径', key: 'L' },
+  { id: 'text', tool: ActiveTool.Text, icon: 'text', label: '文本', key: 'T' },
+  { id: 'instance', tool: ActiveTool.Instance, icon: 'instance', label: '实例', key: 'I' },
+];
+
+const TOUCH_DRAWING_TOOLS: DrawingToolDef[] = [
+  { id: 'select', tool: ActiveTool.Select, icon: 'select', label: '选择', key: 'S' },
+  { id: 'move', tool: ActiveTool.Move, icon: 'move', label: '移动', key: 'M' },
   { id: 'pan', tool: ActiveTool.Pan, icon: 'pan', label: '漫游', key: 'H' },
   { id: 'measure', tool: ActiveTool.Measure, icon: 'measure', label: '测量', key: 'K' },
   { id: 'rect', tool: ActiveTool.Rect, icon: 'rect', label: '矩形', key: 'B' },
@@ -66,7 +74,7 @@ export struct DrawingToolbar {
   @Prop editable: boolean = true;
   @Prop isCompact: boolean = false;
   @Prop vertical: boolean = false;
-  @Prop availableHeight: number = 344;
+  @Prop availableHeight: number = 460;
   @Prop multiSelectAdditive: boolean = false;
   @Prop hierarchyDepth: number = 2;
 
@@ -79,6 +87,7 @@ export struct DrawingToolbar {
   selectAllAction: () => void = () => {};
   clearSelectionAction: () => void = () => {};
   switchMoveToolAction: () => void = () => {};
+  zoomAction: (delta: number) => void = (_d: number) => {};
   fitAllAction: () => void = () => {};
   resetViewAction: () => void = () => {};
   viewBackAction: () => void = () => {};
@@ -93,6 +102,10 @@ export struct DrawingToolbar {
   @State private openPopoverId: string = '';
   @State private exactRectError: string = '';
 
+  private toolItems(): DrawingToolDef[] {
+    return this.vertical ? DESKTOP_DRAWING_TOOLS : TOUCH_DRAWING_TOOLS;
+  }
+
   private toolEnabled(tool: ActiveTool): boolean {
     return this.editable || tool === ActiveTool.Select || tool === ActiveTool.Pan ||
       tool === ActiveTool.Measure || tool === ActiveTool.BoxZoom;
@@ -104,6 +117,9 @@ export struct DrawingToolbar {
 
   private isItemActive(item: DrawingToolDef): boolean {
     if (this.isCurveActive()) return false;
+    if (item.id === 'move' && this.vertical) {
+      return this.currentTool === ActiveTool.Move || this.currentTool === ActiveTool.Pan;
+    }
     if (item.id === 'pan') {
       return this.currentTool === ActiveTool.Pan || this.currentTool === ActiveTool.BoxZoom;
     }
@@ -114,6 +130,9 @@ export struct DrawingToolbar {
     if (id === 'select') {
       if (this.multiSelectAdditive) return '加选';
       return this.draftStore.boxSelectRule === 0 ? '' : (this.draftStore.boxSelectRule === 1 ? '相交' : '全包');
+    }
+    if (id === 'move') {
+      return this.currentTool === ActiveTool.Pan ? '漫游' : '';
     }
     if (id === 'pan') {
       return this.currentTool === ActiveTool.BoxZoom ? '框放' : '';
@@ -135,7 +154,7 @@ export struct DrawingToolbar {
       return '';
     }
     if (id === 'path') {
-      return `${this.draftStore.pathWidthStr}`;
+      return this.vertical ? '' : `${this.draftStore.pathWidthStr}`;
     }
     if (id === 'text') {
       if (this.draftStore.textQuickPreset === 'AUTO_PIN') return 'PIN+';
@@ -145,6 +164,10 @@ export struct DrawingToolbar {
   }
 
   private handlePrimaryClick(item: DrawingToolDef): void {
+    if (item.id === 'move' && !this.editable) {
+      this.selectToolAction(ActiveTool.Pan, '漫游');
+      return;
+    }
     if (!this.toolEnabled(item.tool)) return;
     if (item.tool === ActiveTool.Instance) {
       if (this.openPopoverId === 'instance') {
@@ -152,6 +175,15 @@ export struct DrawingToolbar {
       } else {
         this.selectToolAction(ActiveTool.Instance, item.label);
       }
+      return;
+    }
+    if (item.id === 'move') {
+      if (this.currentTool === ActiveTool.Move) {
+        this.openPopoverId = this.openPopoverId === 'move' ? '' : 'move';
+        return;
+      }
+      this.openPopoverId = '';
+      this.switchMoveToolAction();
       return;
     }
     if (this.isItemActive(item)) {
@@ -164,7 +196,14 @@ export struct DrawingToolbar {
   }
 
   private handleDiscloseOpen(item: DrawingToolDef): void {
-    if (!this.toolEnabled(item.tool)) return;
+    if (item.id !== 'move' && !this.toolEnabled(item.tool)) return;
+    if (item.id === 'move') {
+      if (this.editable && this.currentTool !== ActiveTool.Move && this.currentTool !== ActiveTool.Pan) {
+        this.switchMoveToolAction();
+      }
+      this.openPopoverId = this.openPopoverId === 'move' ? '' : 'move';
+      return;
+    }
     if (item.tool !== ActiveTool.Instance && !this.isItemActive(item)) {
       this.selectToolAction(item.tool, item.label);
     }
@@ -203,15 +242,6 @@ export struct DrawingToolbar {
     } else {
       this.exactRectError = '创建未成功，请检查当前图层是否锁定或隐藏';
     }
-  }
-
-  private activeCurveCommands(): string {
-    for (let i = 0; i < CURVE_TOOLS.length; i++) {
-      if (CURVE_TOOLS[i].name === this.activeCurveKind) {
-        return CURVE_TOOLS[i].commands;
-      }
-    }
-    return CURVE_TOOLS[0].commands;
   }
 
   private activeCurveButtonLabel(): string {
@@ -314,13 +344,19 @@ export struct DrawingToolbar {
           this.quickPill('清空选区 Esc', false, () => { this.clearSelectionAction(); this.openPopoverId = ''; })
           this.quickPill('移动工具 M', this.currentTool === ActiveTool.Move, () => { this.switchMoveToolAction(); this.openPopoverId = ''; })
         }.width('100%')
-      } else if (id === 'pan') {
-        this.popoverHeader('视图漫游与缩放', 'H · 滚轮中键按住拖移 · Z框放')
+      } else if (id === 'move' || id === 'pan') {
+        this.popoverHeader('图形平移与视口漫游', 'M移动 · H抓手 · Z框放')
         StableSegmentButton({
-          items: [{ text: '抓手平移 (H)' }, { text: '拉框放大 (Z)' }] as [SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
-          selectedIndex: this.currentTool === ActiveTool.BoxZoom ? 1 : 0,
+          items: [{ text: '移动图形 (M)' }, { text: '抓手漫游 (H)' }, { text: '拉框放大 (Z)' }] as [SegmentButtonTextItem, SegmentButtonTextItem, SegmentButtonTextItem] as SegmentButtonItemTuple,
+          selectedIndex: this.currentTool === ActiveTool.BoxZoom ? 2 : (this.currentTool === ActiveTool.Pan ? 1 : 0),
           onItemClicked: (idx: number) => {
-            this.selectToolAction(idx === 1 ? ActiveTool.BoxZoom : ActiveTool.Pan, idx === 1 ? '框选放大' : '漫游');
+            if (idx === 0 && this.editable) {
+              this.switchMoveToolAction();
+            } else if (idx === 1) {
+              this.selectToolAction(ActiveTool.Pan, '漫游');
+            } else {
+              this.selectToolAction(ActiveTool.BoxZoom, '框选放大');
+            }
             this.openPopoverId = '';
           },
           fontColor: COLORS.muted,
@@ -333,11 +369,11 @@ export struct DrawingToolbar {
           itemMinHeight: 24
         })
         Row({ space: 6 }) {
-          this.quickPill('适配全图 F/F2', false, () => { this.fitAllAction(); this.openPopoverId = ''; })
+          this.quickPill('适配全图 F', false, () => { this.fitAllAction(); this.openPopoverId = ''; })
           this.quickPill('重置 100%', false, () => { this.resetViewAction(); this.openPopoverId = ''; })
           this.quickPill('回上级 Cell', false, () => { this.viewBackAction(); this.openPopoverId = ''; })
         }.width('100%')
-        Text('层级展开深度 (快捷键 1~5 / *)').fontSize(11).fontColor(COLORS.muted).width('100%')
+        Text('层级展开深度 (快捷键 1~5)').fontSize(11).fontColor(COLORS.muted).width('100%')
         Row({ space: 6 }) {
           ForEach([1, 2, 3, 4, 5], (d: number) => {
             this.quickPill(d === 1 ? '1 仅本层' : (d === 5 ? '5 全部' : `${d} 层`), this.hierarchyDepth === d, () => {
@@ -784,7 +820,7 @@ export struct DrawingToolbar {
       Button({ type: ButtonType.Normal }) {
         if (this.vertical) {
           SymbolGlyph($r('sys.symbol.circle_lefthalf_inset_filled'))
-            .fontSize(19)
+            .fontSize(17.5)
             .fontColor([this.isCurveActive() ? COLORS.primary : COLORS.ink])
             .renderingStrategy(SymbolRenderingStrategy.SINGLE)
         } else {
@@ -801,10 +837,15 @@ export struct DrawingToolbar {
         }
       }
       .id('curve-tools-menu')
-      .width(this.vertical ? 40 : undefined)
-      .height(this.vertical ? 38 : UI.compactControlHeight)
+      .width(this.vertical ? 34 : undefined)
+      .height(this.vertical ? 34 : UI.compactControlHeight)
       .padding(this.vertical ? 0 : { left: 9, right: 12 })
       .backgroundColor(this.isCurveActive() ? COLORS.primarySoft : Color.Transparent)
+      .border({
+        width: this.isCurveActive() ? 0.8 : 0,
+        color: this.isCurveActive() ? COLORS.primary : Color.Transparent,
+        radius: UI.controlRadius
+      })
       .borderRadius(UI.controlRadius)
       .attributeModifier(hongTuThemeState.luminousPointLightModifier())
       .enabled(this.editable)
@@ -835,17 +876,16 @@ export struct DrawingToolbar {
         this.openPopoverId = 'curve';
       }))
 
-      // PS/AE 右下角子工具展开三角热区
       Stack({ alignContent: Alignment.BottomEnd }) {
-        Polygon({ width: 5.5, height: 5.5 })
-          .points([[5.5, 0], [5.5, 5.5], [0, 5.5]])
+        Polygon({ width: 4.5, height: 4.5 })
+          .points([[4.5, 0], [4.5, 4.5], [0, 4.5]])
           .fill(this.isCurveActive() ? COLORS.primary : COLORS.muted)
-          .opacity(this.editable ? 0.85 : 0.3)
-          .margin({ right: 3, bottom: 3 })
+          .opacity(this.editable ? 0.6 : 0.25)
+          .margin({ right: 2.5, bottom: 2.5 })
           .hitTestBehavior(HitTestMode.None)
       }
-      .width(14)
-      .height(14)
+      .width(12)
+      .height(12)
       .onClick(() => {
         if (!this.editable) return;
         if (!this.isCurveActive()) this.interactiveCurveAction('CIRCLE');
@@ -875,13 +915,15 @@ export struct DrawingToolbar {
         if (this.vertical) {
           Column({ space: 1 }) {
             WorkbenchIcon({
-              name: item.id === 'pan' && this.currentTool === ActiveTool.BoxZoom ? 'search' : item.icon,
-              iconSize: this.subModeTag(item.id).length > 0 ? 18 : 20,
+              name: item.id === 'move' && this.currentTool === ActiveTool.Pan
+                ? 'pan'
+                : (item.id === 'pan' && this.currentTool === ActiveTool.BoxZoom ? 'search' : item.icon),
+              iconSize: this.subModeTag(item.id).length > 0 ? 16.5 : 17.5,
               color: this.isItemActive(item) ? COLORS.primary : COLORS.ink
             })
             if (this.subModeTag(item.id).length > 0) {
               Text(this.subModeTag(item.id))
-                .fontSize(8.5)
+                .fontSize(8)
                 .fontWeight(FontWeight.Medium)
                 .fontColor(this.isItemActive(item) ? COLORS.primary : COLORS.muted)
                 .maxLines(1)
@@ -908,18 +950,23 @@ export struct DrawingToolbar {
           .alignItems(VerticalAlign.Center)
         }
       }
-      .width(this.vertical ? 40 : undefined)
-      .height(this.vertical ? 38 : UI.compactControlHeight)
+      .width(this.vertical ? 34 : undefined)
+      .height(this.vertical ? 34 : UI.compactControlHeight)
       .padding(this.vertical ? 0 : { left: 9, right: 12 })
       .margin(this.vertical ? 0 : { right: 2 })
       .borderRadius(UI.controlRadius)
       .animation(null)
       .backgroundColor(this.isItemActive(item) ? COLORS.primarySoft : Color.Transparent)
+      .border({
+        width: this.isItemActive(item) ? 0.8 : 0,
+        color: this.isItemActive(item) ? COLORS.primary : Color.Transparent,
+        radius: UI.controlRadius
+      })
       .animation({ duration: motionDuration(MOTION.feedback), curve: feedbackCurve() })
       .animation(null)
       .attributeModifier(hongTuThemeState.luminousPointLightModifier())
       .stateEffect(true)
-      .enabled(this.toolEnabled(item.tool))
+      .enabled(item.id === 'move' ? true : this.toolEnabled(item.tool))
       .hoverEffect(HoverEffect.Highlight)
       .focusable(false)
       .accessibilityText(`${item.label} ${item.key}`)
@@ -928,7 +975,8 @@ export struct DrawingToolbar {
       .bindTips(`${item.label} (${item.key}) · 再点或右键展开子模式`)
       .onClick(() => this.handlePrimaryClick(item))
       .onMouse((event: MouseEvent) => {
-        if (this.toolEnabled(item.tool) && event.action === MouseAction.Press && event.button === MouseButton.Right) {
+        if ((item.id === 'move' || this.toolEnabled(item.tool)) &&
+          event.action === MouseAction.Press && event.button === MouseButton.Right) {
           event.stopPropagation();
           this.handleDiscloseOpen(item);
         }
@@ -937,17 +985,16 @@ export struct DrawingToolbar {
         this.handleDiscloseOpen(item);
       }))
 
-      // PS / AE 经典右下角展开小三角热区（◢）
       Stack({ alignContent: Alignment.BottomEnd }) {
-        Polygon({ width: 5.5, height: 5.5 })
-          .points([[5.5, 0], [5.5, 5.5], [0, 5.5]])
+        Polygon({ width: 4.5, height: 4.5 })
+          .points([[4.5, 0], [4.5, 4.5], [0, 4.5]])
           .fill(this.isItemActive(item) ? COLORS.primary : COLORS.muted)
-          .opacity(this.toolEnabled(item.tool) ? 0.85 : 0.3)
-          .margin({ right: 3, bottom: 3 })
+          .opacity((item.id === 'move' || this.toolEnabled(item.tool)) ? 0.6 : 0.25)
+          .margin({ right: 2.5, bottom: 2.5 })
           .hitTestBehavior(HitTestMode.None)
       }
-      .width(14)
-      .height(14)
+      .width(12)
+      .height(12)
       .onClick(() => this.handleDiscloseOpen(item))
     }
     .bindPopup(this.openPopoverId === item.id, {
@@ -970,35 +1017,80 @@ export struct DrawingToolbar {
     if (this.vertical) {
       Scroll() {
         Column({ space: 3 }) {
-          ForEach(DRAWING_TOOLS, (item: DrawingToolDef) => {
+          ForEach(this.toolItems(), (item: DrawingToolDef) => {
             this.renderToolItem(item)
           }, (item: DrawingToolDef) => item.id)
-          Divider().width(26).color(COLORS.border).margin({ top: 2, bottom: 2 })
+
           this.curveToolItem()
-          Divider().width(26).color(COLORS.border).margin({ top: 2, bottom: 2 })
+
+          Divider().width(24).color(COLORS.border).margin({ top: 3, bottom: 3 })
+
           Button({ type: ButtonType.Normal }) {
-            WorkbenchIcon({ name: 'loupe', iconSize: 18, color: this.currentTool === ActiveTool.BoxZoom ? COLORS.primary : COLORS.ink })
+            WorkbenchIcon({ name: 'loupe', iconSize: 17, color: COLORS.ink })
           }
-          .width(40).height(34).padding(0)
-          .backgroundColor(this.currentTool === ActiveTool.BoxZoom ? COLORS.primarySoft : Color.Transparent)
-          .borderRadius(UI.controlRadius).focusable(false)
-          .bindTips('拉框放大视口 (Z)')
-          .onClick(() => this.selectToolAction(ActiveTool.BoxZoom, '框选放大'))
-          Button({ type: ButtonType.Normal }) {
-            WorkbenchIcon({ name: 'fit', iconSize: 18, color: COLORS.ink })
-          }
-          .width(40).height(34).padding(0)
+          .width(34).height(32).padding(0)
           .backgroundColor(Color.Transparent)
-          .borderRadius(UI.controlRadius).focusable(false)
-          .bindTips('全图适配 (F)')
-          .onClick(() => this.fitAllAction())
+          .borderRadius(UI.controlRadius)
+          .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(false)
+          .accessibilityText('放大视图')
+          .bindTips('放大视图 (+)')
+          .onClick(() => this.zoomAction(1))
+
+          Button({ type: ButtonType.Normal }) {
+            WorkbenchIcon({ name: 'zoomOut', iconSize: 17, color: COLORS.ink })
+          }
+          .width(34).height(32).padding(0)
+          .backgroundColor(Color.Transparent)
+          .borderRadius(UI.controlRadius)
+          .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(false)
+          .accessibilityText('缩小视图')
+          .bindTips('缩小视图 (-)')
+          .onClick(() => this.zoomAction(-1))
+
+          Button({ type: ButtonType.Normal }) {
+            WorkbenchIcon({
+              name: 'dashedRect',
+              iconSize: 17,
+              color: this.currentTool === ActiveTool.BoxZoom ? COLORS.primary : COLORS.ink
+            })
+          }
+          .width(34).height(32).padding(0)
+          .backgroundColor(this.currentTool === ActiveTool.BoxZoom ? COLORS.primarySoft : Color.Transparent)
+          .borderRadius(UI.controlRadius)
+          .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(false)
+          .accessibilityText('适配全图（右键切换拉框放大）')
+          .bindTips('全图适配 (F) · 右键或长按切换拉框放大 (Z)')
+          .onClick(() => {
+            if (this.currentTool === ActiveTool.BoxZoom) {
+              this.selectToolAction(ActiveTool.Select, '选择');
+            }
+            this.fitAllAction();
+          })
+          .onMouse((event: MouseEvent) => {
+            if (event.action === MouseAction.Press && event.button === MouseButton.Right) {
+              event.stopPropagation();
+              this.selectToolAction(ActiveTool.BoxZoom, '框选放大');
+            }
+          })
+          .gesture(LongPressGesture({ repeat: false, duration: 380 }).onAction(() => {
+            this.selectToolAction(ActiveTool.BoxZoom, '框选放大');
+          }))
+
           if (this.measureStore.totalMeasurementCount() > 0) {
             Button({ type: ButtonType.Normal }) {
-              WorkbenchIcon({ name: 'delete', iconSize: 16, color: COLORS.danger })
+              WorkbenchIcon({ name: 'delete', iconSize: 15, color: COLORS.danger })
             }
-            .width(40).height(32).padding(0)
+            .width(34).height(30).padding(0)
             .backgroundColor(COLORS.dangerSoft)
-            .borderRadius(UI.controlRadius).focusable(false)
+            .borderRadius(UI.controlRadius)
+            .focusable(false)
+            .accessibilityText('清空测量与标尺')
             .bindTips('清空全部测量与标尺 (Shift+K)')
             .onClick(() => { this.measureStore.clearAll(); })
           }
@@ -1008,14 +1100,14 @@ export struct DrawingToolbar {
       .align(Alignment.Top)
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
-      .width(48)
+      .width(44)
       .constraintSize({ maxHeight: Math.max(120, this.availableHeight) })
-      .padding(4)
+      .padding({ left: 5, right: 5, top: 6, bottom: 6 })
       .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'regular', hongTuThemeState.elevation('md')))
     } else {
       Scroll() {
         Row() {
-          ForEach(DRAWING_TOOLS, (item: DrawingToolDef) => {
+          ForEach(this.toolItems(), (item: DrawingToolDef) => {
             this.renderToolItem(item)
           }, (item: DrawingToolDef) => item.id)
           Row().width(1).height(22).backgroundColor(COLORS.border).margin({ left: 3, right: 4 })

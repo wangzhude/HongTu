@@ -23,8 +23,8 @@ export function workbenchPanelPlacement(
   const allowMultiColumn: boolean = windowHeight > 0
     ? shouldUseDualColumnLayout(getWidthClass(windowWidth), getAspectClass(windowWidth, windowHeight))
     : true;
-  const sidebarOverlay: boolean = !allowMultiColumn || available < sidebarWidth + 480;
+  const sidebarOverlay: boolean = !allowMultiColumn || available < sidebarWidth + 440;
   const contentWidth: number = available - (sidebarVisible && !sidebarOverlay ? sidebarWidth : 0);
-  const inspectorOverlay: boolean = !allowMultiColumn || !inspectorPinned || contentWidth < inspectorWidth + 520;
+  const inspectorOverlay: boolean = !allowMultiColumn || !inspectorPinned || contentWidth < inspectorWidth + 460;
   return { sidebarOverlay, inspectorOverlay };
 }

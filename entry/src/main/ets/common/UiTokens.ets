@@ -1,4 +1,4 @@
-/** Shared workbench dimensions aligned with Luminous design tokens while preserving dense EDA tool strips. */
+/** Shared workbench dimensions aligned with Luminous design tokens and Ribbon EDA studio layout. */
 import { Radius } from '../store/ThemeStore';
 
 export interface WorkbenchUiTokens {
@@ -45,9 +45,9 @@ export const UI: WorkbenchUiTokens = {
   panelRadius: Radius.lg,
   sectionGap: 24,
   titleSize: 18,
-  titleBarHeight: 56,
-  railWidth: 48,
-  sidebarWidth: 218,
+  titleBarHeight: 44,
+  railWidth: 58,
+  sidebarWidth: 252,
   rowHeight: 40,
   segmentItemRadius: Radius.sm,
   chipRadius: Radius.sm,

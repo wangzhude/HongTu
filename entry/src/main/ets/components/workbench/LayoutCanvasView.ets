@@ -52,6 +52,7 @@ import { showAppSnackBar } from '../AppSnackBar';
 import { buildLuminousMenuOptions } from '../../store/LuminousSurfaceOptions';
 import { menuCheckIcon, menuIcon, MENU_ITEM_STYLE, menuStyle } from '../../common/WorkbenchMenuStyle';
 import { DraftOverlayLayer } from './DraftOverlayLayer';
+import { WorkbenchIcon } from './WorkbenchIcon';
 import { shortcutService } from '../../services/ShortcutService';
 import { expandCellShapes, isExpandedSyntheticShape, expandAndCullCellShapes, expandAndCullCellShapesBounded, BoundedHierarchyDrawResult, WorldViewport, worldViewportFromCamera, applyLodToShapes, HierarchyBoundsResolver, HierarchyBoundsResult, HierarchyHitResult, HierarchyHitCandidate, HierarchyCandidatesResult } from '../../services/HierarchyExpandService';
 import { FONT_MONO } from '../../common/Fonts';
@@ -914,19 +915,24 @@ export struct LayoutCanvasView {
         this.HitCandidateBar()
       }
 
-      CanvasHud({
-        toolLabel: this.toolLabel(),
-        selectedLayerNumber: this.selectedLayerNumber,
-        selectedDatatype: this.selectedDatatype,
-        selectedLayerColor: this.colorForLayer(this.selectedLayerNumber, this.selectedDatatype),
-        selectedLayerLocked: !editService.canEditLayer(this.selectedLayerNumber, this.selectedDatatype) || !this.isLayerVisible(this.selectedLayerNumber, this.selectedDatatype),
-        layers: this.layers,
-        desktopMode: this.desktopMode,
-        zoomPercent: this.zoomPercent,
-        cursorStore: this.cursorStore,
-        onSelectLayer: (ln: number, dt: number) => { this.selectActiveLayerAction(ln, dt); },
-        onUnlockAndShowLayer: (ln: number, dt: number) => { this.unlockAndShowLayerAction(ln, dt); },
-      })
+      if (!this.desktopMode ||
+        !editService.canEditLayer(this.selectedLayerNumber, this.selectedDatatype) ||
+        !this.isLayerVisible(this.selectedLayerNumber, this.selectedDatatype) ||
+        this.cursorStore.layerNumber >= 0) {
+        CanvasHud({
+          toolLabel: this.toolLabel(),
+          selectedLayerNumber: this.selectedLayerNumber,
+          selectedDatatype: this.selectedDatatype,
+          selectedLayerColor: this.colorForLayer(this.selectedLayerNumber, this.selectedDatatype),
+          selectedLayerLocked: !editService.canEditLayer(this.selectedLayerNumber, this.selectedDatatype) || !this.isLayerVisible(this.selectedLayerNumber, this.selectedDatatype),
+          layers: this.layers,
+          desktopMode: this.desktopMode,
+          zoomPercent: this.zoomPercent,
+          cursorStore: this.cursorStore,
+          onSelectLayer: (ln: number, dt: number) => { this.selectActiveLayerAction(ln, dt); },
+          onUnlockAndShowLayer: (ln: number, dt: number) => { this.unlockAndShowLayerAction(ln, dt); },
+        })
+      }
 
       // Move 工具长按微调弹框：由 moveFineTuneController（@CustomDialog）驱动，open() 时弹出
 
@@ -1868,18 +1874,18 @@ export struct LayoutCanvasView {
   }
 
   private shouldShowTopFloatingBar(): boolean {
-    if (this.cellStackIds.length > 1) {
-      return true;
-    }
     if (this.desktopMode) {
       return false;
+    }
+    if (this.cellStackIds.length > 1) {
+      return true;
     }
     return !this.draftControlStore.hasAnyTopStrip();
   }
 
   private topControlStripY(): number {
     if (this.desktopMode) {
-      return this.cellStackIds.length > 1 ? 66 : 50;
+      return 12;
     }
     return this.cellStackIds.length > 1 ? 100 : 50;
   }
@@ -5869,120 +5875,160 @@ struct VertexLayer {
   build() {
     Stack() {
       if (this.selectActive && (this.hasTarget || this.selectionCount > 0)) {
-        Scroll() {
-          Row({ space: 6 }) {
-            if (this.hasTarget) {
-              CanvasModeButton({
-                label: this.store.isRect ? '拉伸控点' : '顶点',
-                active: this.store.active,
-                activateAction: () => {
-                  const nextActive: boolean = !this.store.active;
-                  this.store.active = nextActive;
-                  this.store.explicitlyPinned = nextActive;
-                  this.store.setHint('');
-                }
-              })
-              if (this.store.active && !this.store.isRect) {
+        Row() {
+          Scroll() {
+            Row({ space: 4 }) {
+              if (this.hasTarget) {
                 CanvasModeButton({
-                  label: '锁正交',
-                  active: this.store.orthoLock,
+                  icon: 'edit',
+                  label: this.store.isRect ? '控点' : '顶点',
+                  active: this.store.active,
                   activateAction: () => {
-                    this.store.orthoLock = !this.store.orthoLock;
-                    this.store.setHint(this.store.orthoLock ? '顶点移动已锁定水平/竖直轴向' : '');
-                  }
-                })
-                CanvasModeButton({
-                  label: '删顶点',
-                  active: this.store.deleteMode,
-                  danger: true,
-                  activateAction: () => {
-                    this.store.deleteMode = !this.store.deleteMode;
+                    const nextActive: boolean = !this.store.active;
+                    this.store.active = nextActive;
+                    this.store.explicitlyPinned = nextActive;
                     this.store.setHint('');
                   }
                 })
+                if (this.store.active && !this.store.isRect) {
+                  CanvasModeButton({
+                    icon: 'ortho',
+                    label: '锁正交',
+                    active: this.store.orthoLock,
+                    activateAction: () => {
+                      this.store.orthoLock = !this.store.orthoLock;
+                      this.store.setHint(this.store.orthoLock ? '顶点移动已锁定水平/竖直轴向' : '');
+                    }
+                  })
+                  CanvasModeButton({
+                    icon: 'delete',
+                    label: '删顶点',
+                    active: this.store.deleteMode,
+                    danger: true,
+                    activateAction: () => {
+                      this.store.deleteMode = !this.store.deleteMode;
+                      this.store.setHint('');
+                    }
+                  })
+                }
+                if (this.canContinuePath) {
+                  CanvasModeButton({
+                    icon: 'continuePath',
+                    label: '续画',
+                    active: false,
+                    activateAction: () => {
+                      this.onContinuePath();
+                    }
+                  })
+                }
+                Row().width(1).height(16).backgroundColor(canvasOverlayBorder()).margin({ left: 3, right: 3 })
               }
-              if (this.canContinuePath) {
+
+              if (this.selectionCount > 0) {
+                if (this.canEnterInstance) {
+                  CanvasModeButton({ icon: 'cell', label: '进入单元', active: true, activateAction: () => { this.onEnterInstance(); } })
+                }
+                if (this.canFlattenInstance) {
+                  CanvasModeButton({ icon: 'flatten', label: '展开', active: false, activateAction: () => { this.onFlattenInstance(); } })
+                }
+                CanvasModeButton({ icon: 'copy', label: '复制', active: false, activateAction: () => { this.onDuplicate(); } })
+                CanvasModeButton({ icon: 'rotate', label: '旋转90°', active: false, activateAction: () => { this.onRotate90(); } })
+                CanvasModeButton({ icon: 'mirror', label: '镜像H', active: false, activateAction: () => { this.onMirrorH(); } })
+                CanvasModeButton({ icon: 'mirrorV', label: '镜像V', active: false, activateAction: () => { this.onMirrorV(); } })
+
+                Row().width(1).height(16).backgroundColor(canvasOverlayBorder()).margin({ left: 3, right: 3 })
+
                 CanvasModeButton({
-                  label: '续画路径',
+                  icon: 'alignLeft',
+                  label: '左齐',
                   active: false,
-                  activateAction: () => {
-                    this.onContinuePath();
-                  }
+                  actionEnabled: this.selectionCount >= 2,
+                  activateAction: () => { this.onAlignQuick('left'); }
                 })
-              }
-              Row().width(1).height(18).backgroundColor(canvasOverlayBorder()).margin({ left: 4, right: 2 })
-            } else if (this.selectionCount > 1) {
-              Text(`已选 ${this.selectionCount}`)
-                .fontSize(11)
-                .fontFamily(FONT_MONO)
-                .fontColor(COLORS.primary)
-                .fontWeight(FontWeight.Bold)
-                .margin({ left: 4, right: 2 })
-            }
+                CanvasModeButton({
+                  icon: 'alignCenter',
+                  label: '居中',
+                  active: false,
+                  actionEnabled: this.selectionCount >= 2,
+                  activateAction: () => { this.onAlignQuick('centerH'); }
+                })
 
-            if (this.selectionCount > 0) {
-              if (this.canEnterInstance) {
-                CanvasModeButton({ label: '进入 Cell', active: true, activateAction: () => { this.onEnterInstance(); } })
-              }
-              if (this.canFlattenInstance) {
-                CanvasModeButton({ label: '展开实例', active: false, activateAction: () => { this.onFlattenInstance(); } })
-              }
-              CanvasModeButton({ label: '复制+1', active: false, activateAction: () => { this.onDuplicate(); } })
-              CanvasModeButton({ label: '旋90°', active: false, activateAction: () => { this.onRotate90(); } })
-              CanvasModeButton({ label: '镜像H', active: false, activateAction: () => { this.onMirrorH(); } })
-              CanvasModeButton({ label: '镜像V', active: false, activateAction: () => { this.onMirrorV(); } })
-              if (this.canRoundSelected) {
-                CanvasModeButton({ label: '圆角…', active: false, activateAction: () => { this.onRoundCorners(); } })
-              }
-              if (this.selectionCount >= 2) {
-                CanvasModeButton({ label: '左齐', active: false, activateAction: () => { this.onAlignQuick('left'); } })
-                CanvasModeButton({ label: '居中', active: false, activateAction: () => { this.onAlignQuick('centerH'); } })
-                CanvasModeButton({ label: '合并', active: false, activateAction: () => { this.onBooleanQuick('merge'); } })
-                CanvasModeButton({ label: '相减', active: false, activateAction: () => { this.onBooleanQuick('subtract'); } })
-              }
-              CanvasModeButton({ label: '阵列…', active: false, activateAction: () => { this.onOpenArrayCopy(); } })
+                Row().width(1).height(16).backgroundColor(canvasOverlayBorder()).margin({ left: 3, right: 3 })
 
-              Button('改层', { type: ButtonType.Normal })
-                .fontSize(UI.fontBody)
-                .fontColor(canvasOverlayInk())
-                .height(UI.compactControlHeight)
-                .padding({ left: 10, right: 10 })
-                .backgroundColor(canvasOverlayInactive())
-                .border({ width: 1, color: canvasOverlayBorder() })
+                CanvasModeButton({
+                  icon: 'union',
+                  label: '合并',
+                  active: false,
+                  actionEnabled: this.selectionCount >= 2,
+                  activateAction: () => { this.onBooleanQuick('merge'); }
+                })
+                CanvasModeButton({
+                  icon: 'subtract',
+                  label: '相减',
+                  active: false,
+                  actionEnabled: this.selectionCount >= 2,
+                  activateAction: () => { this.onBooleanQuick('subtract'); }
+                })
+
+                Row().width(1).height(16).backgroundColor(canvasOverlayBorder()).margin({ left: 3, right: 3 })
+
+                CanvasModeButton({ icon: 'layout', label: '阵列', active: false, activateAction: () => { this.onOpenArrayCopy(); } })
+                if (this.canRoundSelected) {
+                  CanvasModeButton({ icon: 'cornerRound', label: '圆角', active: false, activateAction: () => { this.onRoundCorners(); } })
+                }
+
+                Button({ type: ButtonType.Normal }) {
+                  Row({ space: 4 }) {
+                    WorkbenchIcon({ name: 'layers', iconSize: 13.5, color: canvasOverlayInk() })
+                    Text('改层')
+                      .fontSize(11.5)
+                      .fontColor(canvasOverlayInk())
+                      .fontWeight(FontWeight.Medium)
+                  }.alignItems(VerticalAlign.Center)
+                }
+                .height(30)
+                .padding({ left: 8, right: 8 })
+                .backgroundColor(Color.Transparent)
                 .borderRadius(UI.controlRadius)
                 .focusable(false)
+                .hoverEffect(HoverEffect.Highlight)
                 .attributeModifier(hongTuThemeState.luminousPointLightModifier())
                 .bindMenu(
                   this.changeLayerMenu,
                   buildLuminousMenuOptions(undefined, hongTuThemeState.luminous, hongTuThemeState.resolveLuminousRenderMode(), UI.panelRadius)
                 )
 
-              CanvasModeButton({ label: '删除', active: false, danger: true, activateAction: () => { this.onDelete(); } })
-            }
+                CanvasModeButton({ icon: 'delete', label: '删除', active: false, danger: true, activateAction: () => { this.onDelete(); } })
+              }
 
-            if (this.store.active && this.store.hint.length > 0) {
-              Text(this.store.hint)
-                .fontSize(11)
-                .fontFamily(FONT_MONO)
-                .fontColor(COLORS.primary)
-                .margin({ left: 6 })
+              if (this.store.active && this.store.hint.length > 0) {
+                Text(this.store.hint)
+                  .fontSize(11)
+                  .fontFamily(FONT_MONO)
+                  .fontColor(COLORS.primary)
+                  .margin({ left: 6 })
+              }
             }
+            .alignItems(VerticalAlign.Center)
           }
-          .alignItems(VerticalAlign.Center)
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .constraintSize({ maxWidth: Math.max(220, this.canvasWidth - (this.desktopMode ? 128 : 28)) })
+          .height(40)
+          .padding({ left: 8, right: 8 })
+          .attributeModifier(hongTuThemeState.luminousFloatingModifier(12, 'regular', hongTuThemeState.elevation('md')))
+          .hitTestBehavior(HitTestMode.Default)
+          .onTouch((event: TouchEvent) => { event.stopPropagation(); })
+          .onMouse((event: MouseEvent) => { event.stopPropagation(); })
+          .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
         }
-        .scrollable(ScrollDirection.Horizontal)
-        .scrollBar(BarState.Off)
-        .constraintSize({ maxWidth: Math.max(220, this.canvasWidth - (this.desktopMode ? 86 : 28)) })
-        .height(42)
-        .padding({ left: 8, right: 10 })
-        .attributeModifier(hongTuThemeState.luminousFloatingModifier(UI.panelRadius, 'regular', hongTuThemeState.elevation('md')))
+        .width(this.canvasWidth)
+        .justifyContent(FlexAlign.Center)
+        .padding({ left: this.desktopMode ? 56 : 0, right: 8 })
         .transition(panelTransition(TransitionEdge.BOTTOM))
         .zIndex(ZIndexTokens.floatingToolbar)
-        .position({ x: this.desktopMode ? 72 : 14, y: this.canvasHeight - VERTEX_STRIP_HEIGHT - 4 })
-        .hitTestBehavior(HitTestMode.Default)
-        .onTouch((event: TouchEvent) => { event.stopPropagation(); })
-        .onMouse((event: MouseEvent) => { event.stopPropagation(); })
-        .onKeyEvent((event: KeyEvent) => { event.stopPropagation(); })
+        .position({ x: 0, y: Math.max(8, this.canvasHeight - VERTEX_STRIP_HEIGHT - 6) })
+        .hitTestBehavior(HitTestMode.None)
       }
 
       if (this.store.active && this.selectActive && this.store.shapeId >= 0) {
@@ -6123,27 +6169,58 @@ interface VertexBox {
 @Component
 struct CanvasModeButton {
   @StorageProp('effectiveIsDark') private effectiveIsDark: boolean = false;
+  @Prop icon: string = '';
   @Prop label: string = '';
   @Prop active: boolean = false;
   @Prop danger: boolean = false;
+  @Prop actionEnabled: boolean = true;
   activateAction: () => void = () => {};
 
+  private fgColor(): ResourceColor {
+    if (!this.actionEnabled) return COLORS.muted;
+    if (this.danger) return COLORS.danger;
+    if (this.active) return COLORS.primary;
+    return canvasOverlayInk();
+  }
+
   build() {
-    Button(this.label, { type: ButtonType.Normal })
-      .fontSize(UI.fontBody)
-      .fontColor(this.danger ? COLORS.danger : (this.active ? COLORS.primary : canvasOverlayInk()))
-      .fontWeight(this.active ? FontWeight.Bold : FontWeight.Normal)
-      .height(UI.compactControlHeight)
-      .padding({ left: 9, right: 9 })
-      .backgroundColor(this.danger ? COLORS.dangerSoft : (this.active ? COLORS.primarySoft : canvasOverlayInactive()))
-      .border({ width: 1, color: this.active ? (this.danger ? COLORS.danger : COLORS.primary) : canvasOverlayBorder() })
-      .borderRadius(UI.controlRadius)
-      .attributeModifier(hongTuThemeState.luminousPointLightModifier())
-      .focusable(false)
-      .accessibilityText(this.label).bindTips(this.label).hoverEffect(HoverEffect.Highlight)
-      .onClick(() => {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 4 }) {
+        if (this.icon.length > 0) {
+          WorkbenchIcon({
+            name: this.icon,
+            iconSize: 13.5,
+            color: this.fgColor()
+          })
+        }
+        Text(this.label)
+          .fontSize(11.5)
+          .fontColor(this.fgColor())
+          .fontWeight(this.active || this.danger ? FontWeight.Bold : FontWeight.Medium)
+          .maxLines(1)
+      }
+      .alignItems(VerticalAlign.Center)
+    }
+    .height(30)
+    .padding({ left: 8, right: 8 })
+    .backgroundColor(this.danger ? COLORS.dangerSoft : (this.active ? COLORS.primarySoft : Color.Transparent))
+    .border({
+      width: this.active || this.danger ? 0.8 : 0,
+      color: this.danger ? COLORS.dangerSoft : (this.active ? COLORS.primary : Color.Transparent)
+    })
+    .borderRadius(UI.controlRadius)
+    .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+    .enabled(this.actionEnabled)
+    .opacity(this.actionEnabled ? 1 : 0.38)
+    .focusable(false)
+    .accessibilityText(this.label)
+    .bindTips(this.label)
+    .hoverEffect(HoverEffect.Highlight)
+    .onClick(() => {
+      if (this.actionEnabled) {
         this.activateAction();
-      })
+      }
+    })
   }
 }
 

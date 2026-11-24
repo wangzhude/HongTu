@@ -1,19 +1,16 @@
 import { COLORS } from '../../common/constants';
-import { ColorMetrics, LengthMetrics } from '@kit.ArkUI';
 import { UI } from '../../common/UiTokens';
 import { feedbackCurve, MOTION, motionDuration } from '../../common/Motion';
+import { MENU_ITEM_STYLE, menuCheckIcon, menuIcon, menuStyle, workbenchLuminousMenuOptions } from '../../common/WorkbenchMenuStyle';
 import { hongTuThemeState } from '../../store/ThemeStore';
 import { WorkModule } from '../../workbench/WorkbenchModels';
 import { WorkbenchIcon } from './WorkbenchIcon';
 
 /**
- * 桌面全功能左侧活动侧轨（v8 Studio 级高密度抽屉直达版）
+ * 桌面专业 EDA 左侧导航侧轨（对齐参考布局：版图编辑 / 验证(DRC) / 数据 / 脚本 / 工艺 / 工具集 / 设置）
  *
- * 彻底利用原先左侧侧轨中部 400vp+ 闲置空白区：
- * - 顶部：版图 / 验证（带 DRC 实时计数徽章）/ 数据 三大工作区；
- * - 中部：查找筛选、器件库/PCell、端侧 Python 3、工艺叠层、版图比较、AI 视觉助手 一键抽屉开关（带激活高亮）；
- * - 底部：宏录制、工程历史、光感外观、快捷键（原生键盘符号）。
- * 外层包裹无滚动条弹簧 Scroll，在矮窗口横屏下同样完整可达、绝不裁切。
+ * - 当前主模块（如「版图编辑」）采用高识别度主色实心圆角方块 + 纯白图标与标签；
+ * - 辅助抽屉收敛至「脚本」「工艺」「工具集」与底部「设置」，消除杂乱堆叠，保留 100% 业务直达能力。
  *
  * This file is part of HongTu, licensed under GPLv3.
  */
@@ -21,7 +18,7 @@ import { WorkbenchIcon } from './WorkbenchIcon';
 export struct DesktopModuleRail {
   @Prop currentModule: WorkModule = WorkModule.Layout;
   @Prop drcIssueCount: number = 0;
-  @Prop railWidth: number = 48;
+  @Prop railWidth: number = UI.railWidth;
   @Prop searchActive: boolean = false;
   @Prop libraryActive: boolean = false;
   @Prop pythonActive: boolean = false;
@@ -41,26 +38,131 @@ export struct DesktopModuleRail {
   projectAction: () => void = () => {};
   shortcutAction: () => void = () => {};
   openAppearanceAction: () => void = () => {};
+  rdbReviewAction: () => void = () => {};
+  viewWorkspaceAction: () => void = () => {};
+
+  private isToolkitActive(): boolean {
+    return this.searchActive || this.libraryActive || this.compareActive || this.macroActive;
+  }
+
+  private toolkitMenuSizing(): MenuItemOptions[] {
+    return [
+      { content: '搜索与筛选图形', labelInfo: 'Ctrl+F', symbolStartIcon: menuIcon('search'), symbolEndIcon: menuCheckIcon(this.searchActive) },
+      { content: '个人器件库与 PCell', symbolStartIcon: menuIcon('pcell'), symbolEndIcon: menuCheckIcon(this.libraryActive) },
+      { content: '版图 XOR 差异比较', symbolStartIcon: menuIcon('compare'), symbolEndIcon: menuCheckIcon(this.compareActive) },
+      { content: 'RDB 验证报告审阅…', symbolStartIcon: menuIcon('verify') },
+      { content: '宏录制与批处理', symbolStartIcon: menuIcon('macro'), symbolEndIcon: menuCheckIcon(this.macroActive) },
+      { content: '视图与书签工作区…', symbolStartIcon: menuIcon('view') },
+      { content: 'AI 视觉智能助手', symbolStartIcon: menuIcon('ai'), symbolEndIcon: menuCheckIcon(this.aiActive) }
+    ];
+  }
+
+  @Builder
+  private buildToolkitMenu() {
+    Menu() {
+      MenuItemGroup({ header: '查找与器件' }) {
+        MenuItem({ content: '搜索与筛选图形', labelInfo: 'Ctrl+F', symbolStartIcon: menuIcon('search'), symbolEndIcon: menuCheckIcon(this.searchActive) })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .selected(this.searchActive)
+          .onClick(() => this.searchAction())
+        MenuItem({ content: '个人器件库与 PCell', symbolStartIcon: menuIcon('pcell'), symbolEndIcon: menuCheckIcon(this.libraryActive) })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .selected(this.libraryActive)
+          .onClick(() => this.libraryAction())
+      }
+      MenuItemGroup({ header: '分析与自动化' }) {
+        MenuItem({ content: '版图 XOR 差异比较', symbolStartIcon: menuIcon('compare'), symbolEndIcon: menuCheckIcon(this.compareActive) })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .selected(this.compareActive)
+          .onClick(() => this.compareAction())
+        MenuItem({ content: 'RDB 验证报告审阅…', symbolStartIcon: menuIcon('verify') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => this.rdbReviewAction())
+        MenuItem({ content: '宏录制与批处理', symbolStartIcon: menuIcon('macro'), symbolEndIcon: menuCheckIcon(this.macroActive) })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .selected(this.macroActive)
+          .onClick(() => this.macroAction())
+        MenuItem({ content: '视图与书签工作区…', symbolStartIcon: menuIcon('view') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => this.viewWorkspaceAction())
+        MenuItem({ content: 'AI 视觉智能助手', symbolStartIcon: menuIcon('ai'), symbolEndIcon: menuCheckIcon(this.aiActive) })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .selected(this.aiActive)
+          .onClick(() => this.aiAction())
+      }
+    }
+    .attributeModifier(menuStyle(this.toolkitMenuSizing(), this.getUIContext()))
+  }
+
+  private settingsMenuSizing(): MenuItemOptions[] {
+    return [
+      { content: '外观与沉浸光感设置…', symbolStartIcon: menuIcon('appearance') },
+      { content: '工程与历史快照', labelInfo: 'Ctrl+N', symbolStartIcon: menuIcon('project') },
+      { content: '键盘快捷键与助记码', symbolStartIcon: menuIcon('command') }
+    ];
+  }
+
+  @Builder
+  private buildSettingsMenu() {
+    Menu() {
+      MenuItemGroup({ header: '工作台偏好与工程' }) {
+        MenuItem({ content: '外观与沉浸光感设置…', symbolStartIcon: menuIcon('appearance') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => this.openAppearanceAction())
+        MenuItem({ content: '工程与历史快照', labelInfo: 'Ctrl+N', symbolStartIcon: menuIcon('project') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => this.projectAction())
+        MenuItem({ content: '键盘快捷键与助记码', symbolStartIcon: menuIcon('command') })
+          .attributeModifier(MENU_ITEM_STYLE)
+          .onClick(() => this.shortcutAction())
+      }
+    }
+    .attributeModifier(menuStyle(this.settingsMenuSizing(), this.getUIContext()))
+  }
 
   build() {
-    Column({ space: 3 }) {
+    Column({ space: 6 }) {
       Scroll() {
-        Column({ space: 3 }) {
-          this.moduleButton(WorkModule.Layout, '版图', '版图编辑工作区')
-          this.moduleButton(WorkModule.Verify, '验证', 'DRC / LVS 验证工作区')
-          this.moduleButton(WorkModule.Data, '数据', '版图文件与单元库总览')
+        Column({ space: 8 }) {
+          this.moduleButton(WorkModule.Layout, '版图编辑', '版图编辑工作区', 'layout')
+          this.moduleButton(WorkModule.Verify, '验证\n(DRC)', 'DRC / LVS 验证工作区', 'drcShield')
+          this.moduleButton(WorkModule.Data, '数据', '版图文件与单元库总览', 'data')
 
-          Divider()
-            .width(26)
-            .color(COLORS.border)
-            .margin({ top: 3, bottom: 3 })
+          this.railActionButton('python', '脚本', '端侧内置 Python 3 脚本工作台', this.pythonActive, () => {
+            this.pythonAction();
+          })
 
-          this.drawerButton('search', '查找', '搜索与筛选图形 (Ctrl+F)', this.searchActive, this.searchAction)
-          this.drawerButton('cell', '器件', '个人器件库与参数化 PCell', this.libraryActive, this.libraryAction)
-          this.drawerButton('python', '脚本', '端侧内置 Python 3 脚本工作台', this.pythonActive, this.pythonAction)
-          this.drawerButton('stack', '工艺', '工艺文件管理与 2.5D 截面叠层', this.techActive, this.technologyAction)
-          this.drawerButton('compare', '比较', '版图 XOR 差异比较', this.compareActive, this.compareAction)
-          this.drawerButton('ai', 'AI', '鸿图视觉 Harness 智能助手', this.aiActive, this.aiAction)
+          this.railActionButton('layers', '工艺', '工艺文件管理与 2.5D 截面叠层', this.techActive, () => {
+            this.technologyAction();
+          })
+
+          Button({ type: ButtonType.Normal }) {
+            Column({ space: 4 }) {
+              WorkbenchIcon({
+                name: 'tools',
+                iconSize: 19,
+                color: this.isToolkitActive() ? COLORS.primary : COLORS.ink
+              })
+              Text('工具集')
+                .fontSize(10.5)
+                .fontWeight(this.isToolkitActive() ? FontWeight.Bold : FontWeight.Medium)
+                .fontColor(this.isToolkitActive() ? COLORS.primary : COLORS.ink)
+            }
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+          }
+          .width(48)
+          .height(50)
+          .padding(0)
+          .borderRadius(10)
+          .backgroundColor(this.isToolkitActive() ? COLORS.primarySoft : Color.Transparent)
+          .border({ width: this.isToolkitActive() ? 0.8 : 0, color: this.isToolkitActive() ? COLORS.primary : Color.Transparent })
+          .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(false)
+          .accessibilityText('版图工具集')
+          .bindTips('查找筛选、器件库、版图比较、宏与 AI 助手')
+          .bindMenu(this.buildToolkitMenu, workbenchLuminousMenuOptions())
         }
         .width('100%')
         .alignItems(HorizontalAlign.Center)
@@ -72,30 +174,43 @@ export struct DesktopModuleRail {
       .layoutWeight(1)
       .width('100%')
 
-      Divider()
-        .width(26)
-        .color(COLORS.border)
-        .margin({ top: 2, bottom: 2 })
-
-      this.drawerButton('macro', '宏', '录制与运行批处理宏', this.macroActive, this.macroAction)
-      this.utilityButton('project', '工程', '工程与历史快照 (Ctrl+N)', this.projectAction)
-      this.utilityButton('appearance', '光感', '外观与沉浸光感设置', this.openAppearanceAction)
-      this.utilityButton('keyboard', '热键', '键盘快捷键与助记码设置', this.shortcutAction)
+      Button({ type: ButtonType.Normal }) {
+        Column({ space: 4 }) {
+          WorkbenchIcon({ name: 'settings', iconSize: 19, color: COLORS.ink })
+          Text('设置')
+            .fontSize(10.5)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(COLORS.ink)
+        }
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+      }
+      .width(48)
+      .height(48)
+      .padding(0)
+      .borderRadius(10)
+      .backgroundColor(Color.Transparent)
+      .attributeModifier(hongTuThemeState.luminousPointLightModifier())
+      .hoverEffect(HoverEffect.Highlight)
+      .focusable(false)
+      .accessibilityText('设置与工作台偏好')
+      .bindTips('外观光感、工程快照与快捷键设置')
+      .bindMenu(this.buildSettingsMenu, workbenchLuminousMenuOptions())
     }
     .width(this.railWidth)
     .height('100%')
-    .padding({ left: 4, right: 4, top: 6, bottom: 6 })
+    .padding({ left: 4, right: 4, top: 8, bottom: 8 })
     .alignItems(HorizontalAlign.Center)
     .backgroundColor(hongTuThemeState.isLuminousBackgroundEnabled()
       ? hongTuThemeState.luminous.translucentCardColor
-      : COLORS.bg)
+      : COLORS.surface)
     .border({ width: { right: 0.8 }, color: COLORS.border })
   }
 
   @Builder
-  private moduleButton(module: WorkModule, shortLabel: string, actionLabel: string) {
+  private moduleButton(module: WorkModule, shortLabel: string, actionLabel: string, iconName: string) {
     Button({ type: ButtonType.Normal }) {
-      Column({ space: 2 }) {
+      Column({ space: 3 }) {
         Badge({
           count: module === WorkModule.Verify ? this.drcIssueCount : 0,
           maxCount: 99,
@@ -103,26 +218,33 @@ export struct DesktopModuleRail {
           style: { badgeColor: COLORS.danger, fontSize: 9, badgeSize: 14, color: Color.White }
         }) {
           Row() {
-            this.moduleIcon(module)
+            WorkbenchIcon({
+              name: iconName,
+              iconSize: 20,
+              color: this.currentModule === module ? '#FFFFFF' : COLORS.ink
+            })
           }
           .width(34)
           .height(22)
           .justifyContent(FlexAlign.Center)
+          .alignItems(VerticalAlign.Center)
         }
         Text(shortLabel)
-          .fontSize(10.5)
+          .fontSize(10)
+          .lineHeight(12)
+          .textAlign(TextAlign.Center)
           .fontWeight(this.currentModule === module ? FontWeight.Bold : FontWeight.Medium)
-          .fontColor(this.currentModule === module ? COLORS.primary : COLORS.ink)
+          .fontColor(this.currentModule === module ? '#FFFFFF' : COLORS.ink)
       }
       .justifyContent(FlexAlign.Center)
       .alignItems(HorizontalAlign.Center)
     }
-    .width('100%')
-    .height(46)
-    .padding(0)
-    .borderRadius(UI.controlRadius)
+    .width(48)
+    .height(module === WorkModule.Verify ? 56 : 52)
+    .padding({ left: 2, right: 2 })
+    .borderRadius(10)
     .animation(null)
-    .backgroundColor(this.currentModule === module ? COLORS.primarySoft : Color.Transparent)
+    .backgroundColor(this.currentModule === module ? COLORS.primary : Color.Transparent)
     .animation({ duration: motionDuration(MOTION.feedback), curve: feedbackCurve() })
     .animation(null)
     .attributeModifier(hongTuThemeState.luminousPointLightModifier())
@@ -136,20 +258,22 @@ export struct DesktopModuleRail {
   }
 
   @Builder
-  private drawerButton(icon: string, label: string, accessibleLabel: string, active: boolean, action: () => void) {
+  private railActionButton(icon: string, label: string, accessibleLabel: string, active: boolean, action: () => void) {
     Button({ type: ButtonType.Normal }) {
-      Column({ space: 2 }) {
-        WorkbenchIcon({ name: icon, iconSize: 17, color: active ? COLORS.primary : COLORS.ink })
+      Column({ space: 4 }) {
+        WorkbenchIcon({ name: icon, iconSize: 19, color: active ? COLORS.primary : COLORS.ink })
         Text(label)
-          .fontSize(10)
-          .fontWeight(active ? FontWeight.Bold : FontWeight.Normal)
-          .fontColor(active ? COLORS.primary : COLORS.muted)
-      }.justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
+          .fontSize(10.5)
+          .fontWeight(active ? FontWeight.Bold : FontWeight.Medium)
+          .fontColor(active ? COLORS.primary : COLORS.ink)
+      }
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
     }
-    .width('100%')
-    .height(42)
+    .width(48)
+    .height(50)
     .padding(0)
-    .borderRadius(UI.controlRadius)
+    .borderRadius(10)
     .backgroundColor(active ? COLORS.primarySoft : Color.Transparent)
     .border({ width: active ? 0.8 : 0, color: active ? COLORS.primary : Color.Transparent })
     .attributeModifier(hongTuThemeState.luminousPointLightModifier())
@@ -159,35 +283,5 @@ export struct DesktopModuleRail {
     .accessibilitySelected(active)
     .bindTips(accessibleLabel)
     .onClick(() => action())
-  }
-
-  @Builder
-  private utilityButton(icon: string, label: string, accessibleLabel: string, action: () => void) {
-    Button({ type: ButtonType.Normal }) {
-      Column({ space: 2 }) {
-        WorkbenchIcon({ name: icon, iconSize: 16, color: COLORS.muted })
-        Text(label).fontSize(9.5).fontColor(COLORS.muted)
-      }.justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
-    }
-    .width('100%')
-    .height(40)
-    .padding(0)
-    .borderRadius(UI.controlRadius)
-    .backgroundColor(Color.Transparent)
-    .attributeModifier(hongTuThemeState.luminousPointLightModifier())
-    .hoverEffect(HoverEffect.Highlight)
-    .focusable(false)
-    .accessibilityText(accessibleLabel)
-    .bindTips(accessibleLabel)
-    .onClick(() => action())
-  }
-
-  @Builder
-  private moduleIcon(module: WorkModule) {
-    WorkbenchIcon({
-      name: module === WorkModule.Layout ? 'layout' : module === WorkModule.Verify ? 'verify' : 'data',
-      iconSize: 19,
-      color: this.currentModule === module ? COLORS.primary : COLORS.ink
-    })
   }
 }
