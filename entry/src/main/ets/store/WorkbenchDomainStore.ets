@@ -251,6 +251,7 @@ export class PanelLayoutStore {
   @Trace showSearchPanel: boolean = false;
   @Trace showLibraryPanel: boolean = false;
   @Trace propertyPanelClosed: boolean = false;
+  @Trace floatingPropertyPopoverEnabled: boolean = true;
   @Trace propertyPanelPinned: boolean = false;
   @Trace windowWidthVp: number = 1280;
   @Trace windowHeightVp: number = 800;

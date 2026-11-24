@@ -1559,7 +1559,8 @@ struct Index {
   }
 
   private floatingShapePropertiesVisible(): boolean {
-    if (this.viewportStore.currentModule !== WorkModule.Layout || this.panelStore.propertyPanelClosed) {
+    if (this.viewportStore.currentModule !== WorkModule.Layout || this.panelStore.propertyPanelClosed ||
+        !this.panelStore.floatingPropertyPopoverEnabled) {
       return false;
     }
     if (this.panelStore.activeDialogCount > 0 || this.showAppearanceSheet || this.lvsSheetOpen) {
@@ -1740,15 +1741,17 @@ struct Index {
   }
 
   private toggleFloatingPropertyPopover(): void {
-    this.panelStore.propertyPanelClosed = !this.panelStore.propertyPanelClosed;
-    if (!this.panelStore.propertyPanelClosed && this.viewportStore.selectedShapeId >= 0) {
-      this.ensureFloatingPropertyToolReady();
+    this.panelStore.floatingPropertyPopoverEnabled = !this.panelStore.floatingPropertyPopoverEnabled;
+    if (this.panelStore.floatingPropertyPopoverEnabled) {
+      this.panelStore.propertyPanelClosed = false;
+      if (this.viewportStore.selectedShapeId >= 0) this.ensureFloatingPropertyToolReady();
     }
   }
 
   private showInspectorPanel(): void {
     this.panelStore.propertyPanelClosed = false;
-    if (this.viewportStore.currentModule === WorkModule.Layout && this.viewportStore.selectedShapeId >= 0) {
+    if (this.panelStore.floatingPropertyPopoverEnabled && this.viewportStore.currentModule === WorkModule.Layout &&
+        this.viewportStore.selectedShapeId >= 0) {
       this.ensureFloatingPropertyToolReady();
       return;
     }
@@ -2734,7 +2737,8 @@ struct Index {
           Column() {
           WorkbenchInspector({
             visible: true,
-            editable: this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT,
+            editable: this.viewportStore.selectedShapeId >= 0 ? this.selectedPropertiesEditable() :
+              (this.docStore.workspaceReady && this.viewportStore.currentViewMode === ViewMode.EDIT),
             desktopCanvasFirst: this.isDesktopWorkspace(),
             panelWidth: this.inspectorWidth(),
             currentModule: this.viewportStore.currentModule,
@@ -2751,7 +2755,7 @@ struct Index {
             selectedShapes: editService.getSelectedShapes(),
             cells: this.propertyCellOptions(),
             currentCellName: this.docStore.currentEditingCellName,
-            floatingPopoverEnabled: !this.panelStore.propertyPanelClosed,
+            floatingPopoverEnabled: this.panelStore.floatingPropertyPopoverEnabled,
             lastDrcElapsed: this.verifyStore.lastDrcElapsed,
             docLibName: this.docStore.docLibName,
             docCellCount: this.docStore.docCellCount,

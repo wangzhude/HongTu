@@ -24,6 +24,12 @@ interface LayerPurposeDef {
   label: string;
 }
 
+interface InspectorInfoRow {
+  label: string;
+  value: string;
+  highlightValue: boolean;
+}
+
 const LAYER_PURPOSES: LayerPurposeDef[] = [
   { group: LayerGroup.OTHER, label: '版图层' },
   { group: LayerGroup.INTERCONNECT, label: '互连层' },
@@ -167,6 +173,12 @@ export struct ShapePropertiesPopover {
 
   private hasTargets(): boolean {
     return this.targets().length > 0;
+  }
+
+  private canRunInspectorOperation(requiresMultiple: boolean): boolean {
+    return this.editable && (requiresMultiple
+      ? this.targets().length >= 2 && this.booleanAction !== null
+      : this.hasTargets());
   }
 
   private selectionKey(): string {
@@ -534,15 +546,15 @@ export struct ShapePropertiesPopover {
   }
 
   @Builder
-  private infoKvRow(label: string, value: string, highlightValue: boolean = false) {
+  private infoKvRow(row: InspectorInfoRow) {
     Row({ space: 8 }) {
-      Text(label)
+      Text(row.label)
         .fontSize(11.5)
         .fontColor(COLORS.muted)
         .width(62)
-      Text(value)
+      Text(row.value)
         .fontSize(11.5)
-        .fontWeight(highlightValue ? FontWeight.Medium : FontWeight.Normal)
+        .fontWeight(row.highlightValue ? FontWeight.Medium : FontWeight.Normal)
         .fontColor(COLORS.ink)
         .layoutWeight(1)
         .maxLines(1)
@@ -602,18 +614,18 @@ export struct ShapePropertiesPopover {
   }
 
   @Builder
-  private opGridButton(iconName: string, label: string, enabled: boolean, onTap: () => void) {
+  private opGridButton(iconName: string, label: string, requiresMultiple: boolean, onTap: () => void) {
     Button({ type: ButtonType.Normal }) {
       Column({ space: 4 }) {
         WorkbenchIcon({
           name: iconName,
           iconSize: 15.5,
-          color: enabled ? COLORS.ink : COLORS.muted
+          color: this.canRunInspectorOperation(requiresMultiple) ? COLORS.ink : COLORS.muted
         })
         Text(label)
           .fontSize(11)
           .fontWeight(FontWeight.Medium)
-          .fontColor(enabled ? COLORS.ink : COLORS.muted)
+          .fontColor(this.canRunInspectorOperation(requiresMultiple) ? COLORS.ink : COLORS.muted)
           .maxLines(1)
       }
       .justifyContent(FlexAlign.Center)
@@ -626,14 +638,14 @@ export struct ShapePropertiesPopover {
     .border({ width: 0.8, color: COLORS.border, radius: UI.controlRadius })
     .borderRadius(UI.controlRadius)
     .attributeModifier(hongTuThemeState.luminousPointLightModifier())
-    .enabled(enabled)
-    .opacity(enabled ? 1 : 0.42)
+    .enabled(this.canRunInspectorOperation(requiresMultiple))
+    .opacity(this.canRunInspectorOperation(requiresMultiple) ? 1 : 0.42)
     .focusable(false)
     .hoverEffect(HoverEffect.Highlight)
     .accessibilityText(label)
     .bindTips(label)
     .onClick(() => {
-      if (enabled) onTap();
+      if (this.canRunInspectorOperation(requiresMultiple)) onTap();
     })
   }
 
@@ -645,8 +657,12 @@ export struct ShapePropertiesPopover {
       })
       if (this.infoExpanded) {
         Column({ space: 5 }) {
-          this.infoKvRow('对象类型', this.objectTypeSummary(), true)
-          this.infoKvRow('所属单元', this.currentCellName.length > 0 ? this.currentCellName : 'TOP', true)
+          this.infoKvRow({ label: '对象类型', value: this.objectTypeSummary(), highlightValue: true })
+          this.infoKvRow({
+            label: '所属单元',
+            value: this.currentCellName.length > 0 ? this.currentCellName : 'TOP',
+            highlightValue: true
+          })
 
           Row({ space: 8 }) {
             Text('图层')
@@ -675,11 +691,11 @@ export struct ShapePropertiesPopover {
           .height(24)
           .alignItems(VerticalAlign.Center)
 
-          this.infoKvRow(
-            '选择状态',
-            this.hasTargets() ? (this.editable ? '已选中' : '已选中 · 只读') : '未选中（点击画布选择）',
-            this.hasTargets()
-          )
+          this.infoKvRow({
+            label: '选择状态',
+            value: this.hasTargets() ? (this.editable ? '已选中' : '已选中 · 只读') : '未选中（点击画布选择）',
+            highlightValue: this.hasTargets()
+          })
 
           if (this.commonType() === ShapeType.INSTANCE) {
             Row({ space: 6 }) {
@@ -1270,14 +1286,14 @@ export struct ShapePropertiesPopover {
       if (this.opsExpanded) {
         Column({ space: 7 }) {
           Row({ space: 7 }) {
-            this.opGridButton('copy', '复制', this.editable && this.hasTargets(), () => {
+            this.opGridButton('copy', '复制', false, () => {
               if (this.duplicateAction !== null) {
                 this.duplicateAction();
               } else {
                 this.copyAction();
               }
             })
-            this.opGridButton('layout', '阵列', this.editable && this.hasTargets(), () => {
+            this.opGridButton('layout', '阵列', false, () => {
               this.triggerBatchArrayFromDraft();
             })
 
@@ -1313,16 +1329,16 @@ export struct ShapePropertiesPopover {
           }.width('100%')
 
           Row({ space: 7 }) {
-            this.opGridButton('union', '合并', this.editable && this.targets().length >= 2 && this.booleanAction !== null, () => {
+            this.opGridButton('union', '合并', true, () => {
               if (this.booleanAction !== null) this.booleanAction('merge');
             })
-            this.opGridButton('subtract', '相减', this.editable && this.targets().length >= 2 && this.booleanAction !== null, () => {
+            this.opGridButton('subtract', '相减', true, () => {
               if (this.booleanAction !== null) this.booleanAction('subtract');
             })
-            this.opGridButton('intersect', '相交', this.editable && this.targets().length >= 2 && this.booleanAction !== null, () => {
+            this.opGridButton('intersect', '相交', true, () => {
               if (this.booleanAction !== null) this.booleanAction('intersect');
             })
-            this.opGridButton('xor', '异或', this.editable && this.targets().length >= 2 && this.booleanAction !== null, () => {
+            this.opGridButton('xor', '异或', true, () => {
               if (this.booleanAction !== null) this.booleanAction('xor');
             })
           }.width('100%')

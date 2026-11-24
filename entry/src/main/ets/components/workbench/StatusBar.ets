@@ -214,7 +214,7 @@ export struct WorkbenchStatusBar {
               .fontSize(11.5)
               .fontWeight(FontWeight.Medium)
               .fontColor(COLORS.danger)
-          } else {
+          } else if (this.drcHasRun) {
             Stack({ alignContent: Alignment.Center }) {
               Circle({ width: 14, height: 14 }).fill(COLORS.success)
               WorkbenchIcon({ name: 'check', iconSize: 9.5, color: '#FFFFFF' })
@@ -231,6 +231,11 @@ export struct WorkbenchStatusBar {
               .fontColor(COLORS.success)
             Text(` (${this.drcIssueCount} 个违例)`)
               .fontSize(11.5)
+              .fontColor(COLORS.muted)
+          } else {
+            Text('DRC: 未检查')
+              .fontSize(11.5)
+              .fontWeight(FontWeight.Medium)
               .fontColor(COLORS.muted)
           }
         }.alignItems(VerticalAlign.Center)
