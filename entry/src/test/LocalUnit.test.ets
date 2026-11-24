@@ -5,6 +5,8 @@ import { snapService } from '../main/ets/services/SnapService';
 import { Shape, ShapeType, Point, getShapeBounds, packShapesCoordinates, nativeShapesToShapes, hasKeyholeBridgeEdges, extractKeyholeCleanLoops } from '../main/ets/models/GdsiiData';
 import { cleanDbuNm } from '../main/ets/services/PrecisionService';
 import { GdsByteWriter, layoutExportService } from '../main/ets/services/LayoutExportService';
+import { truncateToolOutputForModel, compactLongTaskWireMessages } from '../main/ets/services/DshLayoutAgentService';
+import type { WireChatMessage } from '../main/ets/services/DshLayoutAgentService';
 import { formatZoomPercent, worldToScreenPx, screenToWorldPx } from '../main/ets/common/constants';
 import { worldViewportFromCamera, HierarchyBoundsResolver } from '../main/ets/services/HierarchyExpandService';
 import { LayerGroup, UiLayer } from '../main/ets/common/types';
@@ -1380,6 +1382,43 @@ export default function localUnitTest(): void {
       expect(svc.redo()).assertTrue();
       expect(svc.getShapes()[0].ownerCellId).assertEqual(5);
       expect(svc.getShapes()[0].cellId).assertEqual(6);
+
+      // 7) Long-task anti-truncation: head+tail smart tool output clipping & wireMessages compaction
+      const longOut: string = 'HEAD_MARKER_' + 'A'.repeat(40000) + '_TAIL_MARKER';
+      const clippedOut: string = truncateToolOutputForModel(longOut, 28000);
+      expect(clippedOut.startsWith('HEAD_MARKER_')).assertTrue();
+      expect(clippedOut.endsWith('_TAIL_MARKER')).assertTrue();
+      expect(clippedOut.includes('输出已截断')).assertTrue();
+      expect(clippedOut.length < longOut.length).assertTrue();
+
+      const msgs: WireChatMessage[] = [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'first prompt' }
+      ];
+      for (let m = 0; m < 10; m++) {
+        msgs.push({ role: 'assistant', content: `step ${m}`, reasoning_content: 'R'.repeat(1200) });
+        msgs.push({ role: 'tool', tool_call_id: `c${m}`, content: `TOOL_HEAD_${m}_` + 'X'.repeat(5000) + `_TOOL_TAIL_${m}` });
+      }
+      msgs.push({
+        role: 'user',
+        content: [{ type: 'text', text: 'obs' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }],
+        fallbackText: 'snapshot summary'
+      });
+      for (let m = 0; m < 14; m++) {
+        msgs.push({ role: 'assistant', content: `recent ${m}`, reasoning_content: 'KEEP' });
+      }
+      compactLongTaskWireMessages(msgs, 14, true);
+      expect(msgs[2].reasoning_content).assertEqual('R'.repeat(1200));
+      compactLongTaskWireMessages(msgs, 14);
+      // Old tool message compressed, old reasoning cleared, old image folded to text, recent preserved
+      const oldTool: string = String(msgs[3].content ?? '');
+      expect(oldTool.includes('历史轮次工具输出已压缩')).assertTrue();
+      expect(oldTool.startsWith('TOOL_HEAD_0_')).assertTrue();
+      expect(oldTool.endsWith('_TOOL_TAIL_0')).assertTrue();
+      expect(msgs[2].reasoning_content === undefined).assertTrue();
+      expect(typeof msgs[22].content === 'string').assertTrue();
+      expect(String(msgs[22].content).includes('snapshot summary')).assertTrue();
+      expect(msgs[msgs.length - 1].reasoning_content).assertEqual('KEEP');
     });
   });
 }

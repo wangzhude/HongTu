@@ -166,28 +166,28 @@ interface OpenAiToolDef {
   function: OpenAiToolFunctionDef;
 }
 
-interface WireToolCallFunction {
+export interface WireToolCallFunction {
   name: string;
   arguments: string;
 }
 
-interface WireToolCall {
+export interface WireToolCall {
   id: string;
   type: 'function';
   function: WireToolCallFunction;
 }
 
-interface WireImageUrlField {
+export interface WireImageUrlField {
   url: string;
 }
 
-interface WireContentPart {
+export interface WireContentPart {
   type: 'text' | 'image_url';
   text?: string;
   image_url?: WireImageUrlField;
 }
 
-interface WireChatMessage {
+export interface WireChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | WireContentPart[] | null;
   fallbackText?: string;
@@ -538,6 +538,62 @@ function hasAnyMultimodalPart(messages: WireChatMessage[]): boolean {
   return false;
 }
 
+/**
+ * 智能头尾保留截断：大版图分析脚本或大列表返回超长时，保留头部与尾部并明确标注省略字数，
+ * 避免静默腰斩导致 Agent 误判或重复写分页脚本白耗轮次。
+ */
+export function truncateToolOutputForModel(raw: string, maxChars: number = 28000): string {
+  if (raw.length <= maxChars || maxChars < 512) {
+    return raw;
+  }
+  const headLen: number = Math.floor(maxChars * 0.65);
+  const tailLen: number = Math.max(256, Math.floor(maxChars * 0.30));
+  const omitted: number = Math.max(0, raw.length - headLen - tailLen);
+  return `${raw.substring(0, headLen)}\n... [输出已截断：原长 ${raw.length} 字符，中间省略 ${omitted} 字符；如需完整明细请在脚本中做汇总或按条件分批输出] ...\n${raw.substring(raw.length - tailLen)}`;
+}
+
+/**
+ * 长任务上下文自动瘦身：保留系统提示、首条用户指令与最近若干条消息完整不变，
+ * 折叠更早轮次的超大工具 JSON、旧 Base64 截图及超长历史思维链，防止 30+ 轮后上下文爆炸或触发服务端截断。
+ */
+export function compactLongTaskWireMessages(
+  messages: WireChatMessage[],
+  keepRecentMessages: number = 14,
+  preserveReasoning: boolean = false
+): void {
+  const cutoff: number = messages.length - Math.max(6, keepRecentMessages);
+  if (cutoff <= 2) {
+    return;
+  }
+  for (let i = 2; i < cutoff; i++) {
+    const m: WireChatMessage = messages[i];
+    if (m.role === 'tool' && typeof m.content === 'string' && m.content.length > 2000) {
+      const origLen: number = m.content.length;
+      m.content = `${m.content.substring(0, 900)}\n... [历史轮次工具输出已压缩，原长 ${origLen} 字符] ...\n${m.content.substring(origLen - 400)}`;
+    } else if (m.role === 'user' && Array.isArray(m.content)) {
+      m.content = (m.fallbackText && m.fallbackText.trim().length > 0)
+        ? `${m.fallbackText}\n[历史截图二进制数据已自动压缩]`
+        : '[历史视觉巡检截图已自动压缩为文字摘要]';
+    }
+    if (!preserveReasoning && m.role === 'assistant' && m.reasoning_content !== undefined && m.reasoning_content.length > 0) {
+      m.reasoning_content = undefined;
+    }
+  }
+}
+
+function hasTruncatedToolCallArgs(toolCalls: WireToolCall[]): boolean {
+  for (let i = 0; i < toolCalls.length; i++) {
+    const raw: string = (toolCalls[i].function.arguments ?? '').trim();
+    if (raw.length === 0) continue;
+    try {
+      JSON.parse(raw);
+    } catch (_) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function describeUserAttachmentsForPrompt(attachments: AiChatAttachment[]): string {
   if (attachments.length === 0) return '';
   const lines: string[] = ['[本轮附带文件与图片清单]'];
@@ -679,12 +735,20 @@ export class DshLayoutAgentService {
       }
 
       const toolDefs: OpenAiToolDef[] = buildDshTools(permission, webSearchEnabled);
-      const maxTurns: number = 32;
+      const maxTurns: number = 96;
+      // DeepSeek requires full reasoning_content replay when the request includes tools.
+      const preserveReasoning: boolean = config.modelName.toLowerCase().includes('deepseek') ||
+        /^https?:\/\/api\.deepseek\.com(?=[:/])/i.test(url);
       let lengthRecoveries: number = 0;
+      let completedNormally: boolean = false;
+      let wrapUpPrompted: boolean = false;
 
       for (let turn = 0; turn < maxTurns; turn++) {
         if (ticket !== this.runSerial || !host.isPageCurrent()) {
           throw new Error('已取消生成');
+        }
+        if (turn >= 10 && wireMessages.length > 20) {
+          compactLongTaskWireMessages(wireMessages, 14, preserveReasoning);
         }
 
         let turnThinkStepId: string = '';
@@ -767,21 +831,32 @@ export class DshLayoutAgentService {
           aggregatedReasoning += (aggregatedReasoning.length > 0 ? '\n\n' : '') + parsedTurn.thinking;
         }
 
-        if (turnOut.finishReason === 'length' && turnOut.toolCalls.length === 0 && lengthRecoveries < 3) {
+        const brokenToolArgs: boolean = turnOut.toolCalls.length > 0 && hasTruncatedToolCallArgs(turnOut.toolCalls);
+        if (turnOut.finishReason === 'length' && (turnOut.toolCalls.length === 0 || brokenToolArgs)) {
+          if (lengthRecoveries >= 6) {
+            finalAnswer = '本轮多次触及模型输出长度上限，任务尚未完成。可回复「继续」接续处理。';
+            emitSnapshot(finalAnswer);
+            break;
+          }
           lengthRecoveries++;
           wireMessages.push({
             role: 'assistant',
-            content: parsedTurn.answer.length > 0 ? parsedTurn.answer : '（思考过程较长，继续执行下一步）',
+            content: parsedTurn.answer.length > 0
+              ? parsedTurn.answer
+              : (brokenToolArgs ? '（上一轮工具调用参数过长被截断，准备拆分重试）' : '（思考过程较长，继续执行下一步）'),
             reasoning_content: parsedTurn.thinking.length > 0 ? parsedTurn.thinking : undefined
           });
           wireMessages.push({
             role: 'user',
-            content: '[系统提示：上一轮输出触及单轮长度上限。请勿重复展开长篇推导，直接调用所需工具或输出最终简明结论。]'
+            content: brokenToolArgs
+              ? '[系统提示：上一轮工具调用参数在输出中途触及单轮 max_tokens 长度上限而被截断（JSON 不完整）。请勿一次输出超长脚本或巨量参数，请精简脚本或拆分成更小步骤后重新调用工具。]'
+              : '[系统提示：上一轮输出触及单轮长度上限。请勿重复展开长篇推导，直接调用所需工具或输出最终简明结论。]'
           });
           continue;
         }
 
         if (turnOut.toolCalls.length === 0) {
+          completedNormally = true;
           finalAnswer = parsedTurn.answer.trim();
           if (finalAnswer.length === 0 && parsedTurn.thinking.length > 0) {
             finalAnswer = '已完成分析与操作，详情可展开上方「工作过程」查看。';
@@ -890,7 +965,8 @@ export class DshLayoutAgentService {
           }
 
           toolState.status = toolOk ? 'completed' : 'failed';
-          toolState.result = toolResultJson.substring(0, 15000);
+          const clippedToolOutput: string = truncateToolOutputForModel(toolResultJson, 28000);
+          toolState.result = clippedToolOutput;
           const sIdx: number = steps.findIndex((s: AiProcessStep): boolean => s.id === stepId);
           if (sIdx >= 0) {
             steps[sIdx].status = toolState.status;
@@ -907,7 +983,7 @@ export class DshLayoutAgentService {
           wireMessages.push({
             role: 'tool',
             tool_call_id: call.id,
-            content: toolResultJson.substring(0, 14000)
+            content: clippedToolOutput
           });
 
           if (stagedPending) {
@@ -945,16 +1021,29 @@ export class DshLayoutAgentService {
         }
 
         if (stagedPending) {
+          completedNormally = true;
           finalAnswer = '已生成版图修改预览方案（见下方待确认卡片），确认后将作为单次可撤销操作写入当前版图。';
           emitSnapshot(finalAnswer);
           break;
         }
+
+        if (!wrapUpPrompted && turn >= maxTurns - 2) {
+          wrapUpPrompted = true;
+          wireMessages.push({
+            role: 'user',
+            content: `[系统提示：本轮长任务已接近单次 ${maxTurns} 步安全上限（剩余最后 ${maxTurns - 1 - turn} 步）。请尽快完成收尾核验并直接输出清晰的结果总结；如仍有剩余待处理项请明确列出，方便用户回复「继续」接续执行。]`
+          });
+        }
       }
 
       if (finalAnswer.trim().length === 0) {
-        finalAnswer = mutatedLayout
-          ? '已完成版图绘制与检查，详情见上方工作过程与画布视图。'
-          : '已完成本次任务，详情见上方工作过程。';
+        if (!completedNormally && !stagedPending) {
+          finalAnswer = `已达到单次长任务最大推理步数上限（${maxTurns} 步），当前已完成 ${tools.length} 次工具调用${mutatedLayout ? '并已写入部分版图变更' : ''}，但任务可能尚未全部收尾。可直接回复「继续」让我接着当前进度继续执行。`;
+        } else {
+          finalAnswer = mutatedLayout
+            ? '已完成版图绘制与检查，详情见上方工作过程与画布视图。'
+            : '已完成本次任务，详情见上方工作过程。';
+        }
       }
 
       const changeParts: string[] = [];
